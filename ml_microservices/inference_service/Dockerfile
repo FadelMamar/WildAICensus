@@ -5,7 +5,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.7.3 /uv /uvx /bin/
 
 # Install build-time dependencies
 RUN apt-get update \
- && apt-get install -y --no-install-recommends git \
+ && apt-get install -y --no-install-recommends git libgl1 \
  && rm -rf /var/lib/apt/lists/*
 
 # Prepare working directory
@@ -53,6 +53,9 @@ ENV MODEL_ALIAS="demo"
 ENV AWS_ACCESS_KEY_ID=minioadmin
 ENV AWS_SECRET_ACCESS_KEY=minioadmin
 ENV MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+
+# RUN uv pip uninstall opencv-python
+# RUN uv pip install opencv-python-headless
 
 # Entrypoint
 CMD ["uv", "run", "python", "main.py"]
