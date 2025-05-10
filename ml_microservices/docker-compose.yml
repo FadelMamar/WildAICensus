@@ -65,6 +65,9 @@ services:
       INFERENCE_PORT: 4141
       MODEL_NAME: labeler
       MODEL_ALIAS: demo
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      MLFLOW_S3_ENDPOINT_URL: http://minio:9000
     volumes:
       - inference_service_data:/model_weights
     depends_on:
