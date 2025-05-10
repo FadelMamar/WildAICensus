@@ -77,6 +77,9 @@ services:
     image: dashboard:latest
     ports:
       - "8501:8501"
+    environment:
+      INFERENCE_SERVICE_URL: http://inference:4141/predict
+      LABEL_STUDIO_URL: http://labelstudio:8080
     volumes:
       - dashboard_service_data:/inference_results
 
