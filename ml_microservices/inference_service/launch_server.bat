@@ -9,9 +9,9 @@ call .venv-inference\Scripts\activate
 
 @REM call serve run main:entrypoint
 
-call set MODEL_NAME="labeler"
-call set MODEL_ALIAS="demo"
-call set MLFLOW_TRACKING_URI=http://mlflow_service:5000
+call set MODEL_NAME=labeler
+call set MODEL_ALIAS=demo
+call set MLFLOW_TRACKING_URI=http://127.0.0.1:5000
 call python main.py
 
 @REM call python app.py
