@@ -50,7 +50,9 @@ ENV MLFLOW_TRACKING_URI=http://mlflow_service:5000
 ENV INFERENCE_PORT=4141
 ENV MODEL_NAME="labeler"
 ENV MODEL_ALIAS="demo"
-
+ENV AWS_ACCESS_KEY_ID=minioadmin
+ENV AWS_SECRET_ACCESS_KEY=minioadmin
+ENV MLFLOW_S3_ENDPOINT_URL=http://minio:9000
 
 # Entrypoint
 CMD ["uv", "run", "python", "main.py"]
