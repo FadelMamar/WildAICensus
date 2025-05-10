@@ -1,8 +1,9 @@
 import litserve as ls
-import base64, os
+import os
 
 from PIL import Image
 import torch
+import logging
 # from ray import serve
 
 from .utils import (
@@ -12,6 +13,8 @@ from .utils import (
     GPSUtils,
     ImageProcessor,
 )
+
+logger = logging.getLogger(__file__)
 
 
 class MyModelAPI(ls.LitAPI):
@@ -23,7 +26,7 @@ class MyModelAPI(ls.LitAPI):
         One-time initialization: load your model here.
         `device` is e.g. 'cuda:0' or 'cpu'.
         """
-        print("Device:", device)
+        logger.info(f"Device: {device}")
         self.model = Detector(
             mlflow_model_name=os.environ.get("MODEL_NAME", "labeler"),
             mlflow_model_alias=os.environ.get("MODEL_ALIAS", "demo"),
@@ -38,6 +41,8 @@ class MyModelAPI(ls.LitAPI):
             ),
         )
 
+        logger.info("creating model...")
+
         self.get_image_gps_coord = GPSUtils.get_gps_coord
         self.get_px_gps_coord = ImageProcessor.generate_pixel_coordinates
 
@@ -46,52 +51,25 @@ class MyModelAPI(ls.LitAPI):
         Convert the JSON payload into model inputs.
         For example, extract and preprocess an image or numeric data.
         """
-        from io import BytesIO
 
-        try:
-            img_data = request["image"]
+        decoded = decode_request(request)
 
-            if not isinstance(img_data, str):
-                raise ValueError("Invalid base64 format")
-
-            image_bytes = base64.b64decode(img_data)
-            img = Image.open(BytesIO(image_bytes))
-
-        except Exception as e:
-            raise ValueError(f"Image decoding failed: {str(e)}")
-
-        request["image"] = img
-        request["image_gps"] = None
-        request["return_coco"] = True
-
-        # get gps coordinates
-        return_as_decimal = request.get("return_as_decimal", False)
-        gps, _ = self.get_image_gps_coord(
-            file_name=None, image=img, return_as_decimal=return_as_decimal
-        )
-        request["image_gps"] = gps
-
-        if "return_as_decimal" in request.keys():
-            request.pop("return_as_decimal")
-
-        request["return_gps"] = False
-
-        return request
+        return decoded
 
     def predict(self, x: dict):
         """
         Run the model forward pass.
         Input `x` is the output of decode_request.
         """
-        import torch
 
         out = dict(image_gps=x.pop("image_gps"))
 
-        with torch.no_grad():
-            results = self.model.predict(
-                **x,
-            )
-            out["detections"] = results
+        logger.info("computing predictions...")
+
+        results = self.model.predict(
+            **x,
+        )
+        out["detections"] = results
 
         return out
 
@@ -99,6 +77,7 @@ class MyModelAPI(ls.LitAPI):
         """
         Wrap the model output in a JSON-serializable dict.
         """
+        logger.debug("sending response...")
         return output
 
 

@@ -4,14 +4,15 @@ from PIL import Image
 from PIL.ExifTags import GPSTAGS, TAGS
 import base64, os
 from io import BytesIO
-
+from typing import Sequence
 import logging
 import traceback
 import geopy
 import pandas as pd
 import torch
 from PIL import Image
-from sahi.predict import get_prediction, get_sliced_prediction
+
+# from sahi.predict import get_prediction, get_sliced_prediction
 import mlflow
 from tqdm import tqdm
 
@@ -33,8 +34,6 @@ class Detector(object):
     ):
         if device is None:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        self.detection_model = None
 
         self.sahi_prostprocess = "NMS"
 
@@ -70,13 +69,7 @@ class Detector(object):
     def predict(
         self,
         image: Image.Image = None,
-        return_gps: bool = False,
-        return_coco: bool = False,
-        sahi_prostprocess: float = "NMS",
-        override_tilesize: int = None,
-        postprocess_match_threshold: float = 0.5,
-        nms_iou: float = None,
-        verbose: int = 0,
+        return_gps: bool = True,
     ):
         """Run sliced predictions
 
@@ -94,32 +87,8 @@ class Detector(object):
             f"image should be instance of Image.Image, got {type(image)}"
         )
 
-        if self.use_sliding_window:
-            tilesize = override_tilesize or self.tilesize
-            result = get_sliced_prediction(
-                image,
-                self.detection_model,
-                slice_height=tilesize,
-                slice_width=tilesize,
-                overlap_height_ratio=self.overlap_ratio,
-                overlap_width_ratio=self.overlap_ratio,
-                postprocess_type=sahi_prostprocess,
-                postprocess_match_metric="IOU",
-                verbose=verbose,
-                postprocess_match_threshold=postprocess_match_threshold or nms_iou,
-            )
-        else:
-            result = get_prediction(
-                image=image,
-                detection_model=self.detection_model,
-                shift_amount=[0, 0],
-                full_shape=None,
-                postprocess=None,
-                verbose=verbose,
-            )
-
-        if return_coco:
-            result = result.to_coco_annotations()
+        with torch.no_grad():
+            result = self.model.predict(image)
 
         out = result
         # get gps coordinates
@@ -273,14 +242,14 @@ def decode_request(request: dict) -> dict:
         raise ValueError(f"Image decoding failed: {str(e)}")
 
     # Attach image and default flags
-    inputs = {"image": img, "return_coco": True, "return_gps": True}
+    inputs = {"image": img, "return_gps": True}
 
     # get gps coordinates
     return_as_decimal = request.get("return_as_decimal", False)
-    gps, _ = GPSUtils.get_gps_coord(
+    gps_info = GPSUtils.get_gps_coord(
         file_name=None, image=img, return_as_decimal=return_as_decimal
     )
-    inputs["image_gps"] = gps
+    inputs["image_gps"] = gps_info[0] if isinstance(gps_info, Sequence) else gps_info
 
     return inputs
 

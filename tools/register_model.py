@@ -3,12 +3,96 @@
 # import argparse
 from dataclasses import dataclass
 from sys import version_info
+from sahi.models.ultralytics import UltralyticsDetectionModel
+from ultralytics import YOLO
+from sahi.predict import get_prediction, get_sliced_prediction
 
-# import cloudpickle
+import torch
 import mlflow
 from datargs import parse
 
-from datalabeling.common.mlflow_utils import DetectorWrapper, get_experiment_id
+
+def get_experiment_id(name: str):
+    """Gets mlflow experiments id
+
+    Args:
+        name (str): mlflow experiment name
+
+    Returns:
+        str: experiment id
+    """
+    exp = mlflow.get_experiment_by_name(name)
+    if exp is None:
+        exp_id = mlflow.create_experiment(name)
+        return exp_id
+    return exp.experiment_id
+
+
+class DetectorWrapper(mlflow.pyfunc.PythonModel):
+    def __init__(
+        self,
+        tilesize: int = 640,
+        confidence_threshold: float = 0.1,
+        overlap_ratio: float = 0.1,
+        imgsz: int = 640,
+        use_sliding_window: bool = True,
+        nms_iou: bool = 0.5,
+    ):
+        """_summary_
+
+        Args:
+            tilesize (int, optional): _description_. Defaults to 640.
+            confidence_threshold (float, optional): _description_. Defaults to 0.1.
+            overlap_ratio (float, optional): _description_. Defaults to 0.1.
+            sahi_postprocess (str, optional): _description_. Defaults to 'NMS'.
+        """
+        super(DetectorWrapper, self).__init__()
+        self.tilesize = tilesize
+        self.confidence_threshold = confidence_threshold
+        self.overlapratio = overlap_ratio
+        self.imgsz = imgsz
+        self.use_sliding_window = use_sliding_window
+        self.nms_iou = nms_iou
+        self.detection_model = None
+
+    def load_context(self, context):
+        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        self.detection_model = UltralyticsDetectionModel(
+            model=YOLO(context.artifacts["path"], task="detect"),
+            confidence_threshold=self.confidence_threshold,
+            image_size=self.imgsz,
+            device=device,
+        )
+
+    def predict(self, context, img):
+        if self.use_sliding_window:
+            tilesize = self.tilesize
+            result = get_sliced_prediction(
+                img,
+                self.detection_model,
+                slice_height=tilesize,
+                slice_width=tilesize,
+                overlap_height_ratio=self.overlapratio,
+                overlap_width_ratio=self.overlapratio,
+                postprocess_type="NMS",
+                postprocess_match_metric="IOU",
+                postprocess_match_threshold=self.nms_iou,
+                verbose=False,
+            )
+        else:
+            result = get_prediction(
+                image=img,
+                detection_model=self.detection_model,
+                shift_amount=[0, 0],
+                full_shape=None,
+                postprocess=None,
+                verbose=False,
+            )
+
+        result = result.to_coco_annotations()
+
+        return result
 
 
 @dataclass
@@ -27,8 +111,6 @@ class Args:
 
     use_sliding_window: bool = False
 
-    # is_yolo_obb: bool = False
-
 
 PYTHON_VERSION = "{major}.{minor}.1".format(
     major=version_info.major, minor=version_info.minor
@@ -45,7 +127,6 @@ conda_env = {
                 "pillow",
                 "ultralytics",
                 "sahi",
-                # "cloudpickle",
                 "torch>=2.0.0",
             ],
         },
@@ -68,8 +149,6 @@ def main():
         use_sliding_window=args.use_sliding_window,
         nms_iou=args.nms_iou,
         imgsz=args.imgsz,
-        # is_yolo_obb=args.is_yolo_obb,
-        sahi_postprocess="NMS",
     )
 
     exp_id = get_experiment_id(args.exp_name)
