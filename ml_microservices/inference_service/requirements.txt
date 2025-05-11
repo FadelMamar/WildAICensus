@@ -11,5 +11,4 @@ lightning
 lightning-sdk
 litserve==0.2.9
 python-dotenv
-opencv-python-headless
 boto3
