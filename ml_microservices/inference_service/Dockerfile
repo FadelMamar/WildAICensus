@@ -53,6 +53,7 @@ ENV MODEL_ALIAS="demo"
 ENV AWS_ACCESS_KEY_ID=minioadmin
 ENV AWS_SECRET_ACCESS_KEY=minioadmin
 ENV MLFLOW_S3_ENDPOINT_URL=http://minio:9000
+ENV WEIGHTS_PATH=/model_weights
 
 RUN apt-get update \
  && apt-get install -y libgl1 libglib2.0-0 \
