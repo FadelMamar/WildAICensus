@@ -6,7 +6,7 @@ from sys import version_info
 from sahi.models.ultralytics import UltralyticsDetectionModel
 from ultralytics import YOLO
 from sahi.predict import get_prediction, get_sliced_prediction
-
+from pathlib import Path
 import torch
 import mlflow
 from datargs import parse
@@ -58,8 +58,11 @@ class DetectorWrapper(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
+        path = Path(context.artifacts["path"]).resolve().as_posix()
+        path = path.replace("\\", "/")
+
         self.detection_model = UltralyticsDetectionModel(
-            model=YOLO(context.artifacts["path"], task="detect"),
+            model=YOLO(path, task="detect"),
             confidence_threshold=self.confidence_threshold,
             image_size=self.imgsz,
             device=device,
@@ -140,7 +143,7 @@ def main():
 
     mlflow.set_tracking_uri(args.mlflow_tracking_uri)
 
-    artifacts = {"path": args.model}
+    artifacts = {"path": str(Path(args.model).resolve())}
 
     model = DetectorWrapper(
         tilesize=args.tilesize,
