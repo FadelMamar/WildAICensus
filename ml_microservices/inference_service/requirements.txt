@@ -12,3 +12,4 @@ lightning-sdk
 litserve==0.2.9
 python-dotenv
 boto3
+-e .
