@@ -64,7 +64,9 @@ class Detector(object):
         ).version
         self.modelversion = f"{self.mlflow_model_name}:{version}"
         self.modelURI = f"models:/{self.mlflow_model_name}/{version}"
-        self.model = mlflow.pyfunc.load_model(self.modelURI)
+        self.model = mlflow.pyfunc.load_model(
+            self.modelURI, dst_path="/model_weights/weights.pt"
+        )
 
     def predict(
         self,

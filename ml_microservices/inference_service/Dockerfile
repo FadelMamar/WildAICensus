@@ -54,8 +54,9 @@ ENV AWS_ACCESS_KEY_ID=minioadmin
 ENV AWS_SECRET_ACCESS_KEY=minioadmin
 ENV MLFLOW_S3_ENDPOINT_URL=http://minio:9000
 
-# RUN uv pip uninstall opencv-python
-# RUN uv pip install opencv-python-headless
+RUN apt-get update \
+ && apt-get install -y libgl1 libglib2.0-0 \
+ && rm -rf /var/lib/apt/lists/*
 
 # Entrypoint
 CMD ["uv", "run", "python", "main.py"]
