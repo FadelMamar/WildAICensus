@@ -11,6 +11,7 @@ import geopy
 import pandas as pd
 import torch
 from PIL import Image
+from pathlib import Path
 
 # from sahi.predict import get_prediction, get_sliced_prediction
 import mlflow
@@ -64,9 +65,19 @@ class Detector(object):
         ).version
         self.modelversion = f"{self.mlflow_model_name}:{version}"
         self.modelURI = f"models:/{self.mlflow_model_name}/{version}"
-        self.model = mlflow.pyfunc.load_model(
-            self.modelURI, dst_path="/model_weights/weights.pt"
+
+        dwnd_location = (
+            Path(os.environ.get("WEIGHTS_PATH", "./model_weights"))
+            / f"{self.mlflow_model_name}"
         )
+        dwnd_location = dwnd_location / str(version)
+        if dwnd_location.exists():
+            self.model = mlflow.pyfunc.load_model(str(dwnd_location))
+        else:
+            dwnd_location.mkdir(parents=True, exist_ok=True)
+            self.model = mlflow.pyfunc.load_model(
+                self.modelURI, dst_path=str(dwnd_location)
+            )
 
     def predict(
         self,

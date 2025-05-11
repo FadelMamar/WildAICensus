@@ -1,3 +1,4 @@
+call deactivate
 
 call cd D:\datalabeling\ml_microservices\inference_service
 
@@ -15,6 +16,7 @@ call set MLFLOW_TRACKING_URI=http://127.0.0.1:5000
 call set AWS_ACCESS_KEY_ID=minioadmin
 call set AWS_SECRET_ACCESS_KEY=minioadmin
 call set MLFLOW_S3_ENDPOINT_URL=http://127.0.0.1:9000
+call set WEIGHTS_PATH=./model
 
 call python main.py
 
