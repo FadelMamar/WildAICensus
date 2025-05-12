@@ -92,8 +92,10 @@ class TrainingConfig:
     cls_workdir: str = "runs-classifier"
     cls_train_dir: str = None
     cls_val_dir: str = None
+    cls_data_dir: str = None
     cls_monitor_metric: str = "val_f1score"
     cls_monitor_mode: str = "max"
+    cls_auto_augment: str = "augmix"
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original
@@ -182,6 +184,7 @@ class TrainingConfig:
     hsv_v: float = 0.3
     translate: float = 0.2
     mosaic: float = 0.0
+    multi_scale: bool = False
 
 
 @dataclass

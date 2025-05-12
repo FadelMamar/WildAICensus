@@ -182,18 +182,20 @@ class ClassificationDataExport(PipelineStep):
         self.handler.process_images(bbox_resize_factor=self.bbox_resize_factor)
 
 
-class ModelTraining(PipelineStep):
+class ModelTrainingStep(PipelineStep):
     def __init__(
         self,
         training_cfg: TrainingConfig,
         model_type: str = "ultralytics",
         herdnet_loss=None,
         herdnet_training_backend: str = "original",
+        classifier_training_backend: str = "ultralytics",
     ):
         self.training_cfg = training_cfg
         self.model_type = model_type
         self.herdnet_loss = herdnet_loss
         self.herdnet_training_backend = herdnet_training_backend
+        self.classifier_training_backend = classifier_training_backend
 
     def run(self, context: Dict[str, Any] = None) -> None:
         trainer = TrainingManager(
@@ -201,6 +203,7 @@ class ModelTraining(PipelineStep):
             herdnet_loss=self.herdnet_loss,
             herdnet_training_backend=self.herdnet_training_backend,
             model_type=self.model_type,
+            classifier_training_backend=self.classifier_training_backend,
         )
         trainer.run()
 
