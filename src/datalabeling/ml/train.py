@@ -614,7 +614,9 @@ class TrainingManager:
             experiment_name=self.args.project_name,
             run_name=self.args.run_name,
             tracking_uri=self.args.mlflow_tracking_uri,
-            log_model=True,
+            log_model=False,
+            # artifact_location='checkpoints',
+            checkpoint_path_prefix="checkpoints",
         )
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.args.cls_workdir,
