@@ -60,7 +60,7 @@ class Classifier(object):
 
         with torch.no_grad():
             probs = self.model(preprocessed).softmax(1)
-            pred = probs.argmax(1).cpu().long().flatten().to_list()
+            pred = probs.argmax(1).cpu().long().flatten().tolist()
 
         pred = list(map(lambda x: self.label_map[x], pred))
 
@@ -69,19 +69,27 @@ class Classifier(object):
 
 # TODO
 class DetectionsPostprocessor(object):
-    def __init__(self, classifier: Classifier, keep_classes: str = ["groundtruth"]):
+    def __init__(
+        self, classifier: Classifier, keep_classes: list[str] = ["groundtruth"]
+    ):
         self.classifier = classifier
         self.keep = keep_classes
 
     # TODO: implement
-    def run(self, detections: list[dict], image: np.ndarray) -> list[dict]:
+    def run(
+        self, detections: list[dict], image: np.ndarray, box_size: int = 96
+    ) -> list[dict]:
         dets = []
 
         for det in detections:
-            x1 = det["x_min"]
-            y1 = det["y_min"]
-            x2 = det["x_max"]
-            y2 = det["y_max"]
+            x_center = (det["x_min"] + det["x_max"]) / 2
+            y_center = (det["y_min"] + det["y_max"]) / 2
+
+            x1 = int(max(x_center - box_size, 0))
+            y1 = int(max(y_center - box_size, 0))
+
+            x2 = int(min(x_center + box_size, image.shape[1]))
+            y2 = int(min(y_center + box_size, image.shape[0]))
 
             dets.append(image[y1:y2, x1:x2])
 
