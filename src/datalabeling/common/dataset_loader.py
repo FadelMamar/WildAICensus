@@ -12,7 +12,7 @@ import pandas as pd
 import yaml
 from tqdm import tqdm
 from itertools import chain, product
-
+import torch
 from .annotation_utils import (
     ImageProcessor,
     LabelstudioConverter,
@@ -197,6 +197,27 @@ class YOLODatasetBuilder:
             )
 
 
+class FeatureExtractor:
+    def __init__(self, hf_model_path="facebook/dinov2-with-registers-small"):
+        from transformers import AutoImageProcessor, AutoModel
+
+        self.processor = AutoImageProcessor.from_pretrained(hf_model_path)
+        self.extractor = AutoModel.from_pretrained(hf_model_path)
+
+    def get_features(self, image: np.ndarray) -> np.ndarray:
+        assert isinstance(image, np.ndarray)
+
+        image = Image.fromarray(image)
+
+        inputs = self.processor(images=image, return_tensors="pt")
+
+        with torch.no_grad():
+            outputs = self.extractor(**inputs)
+        features = outputs.pooler_output.cpu().numpy().flatten()
+
+        return features
+
+
 class ClassificationDatasetBuilder:
     def __init__(
         self,
@@ -204,6 +225,7 @@ class ClassificationDatasetBuilder:
         eval_config: EvaluationConfig,
         source_dirs: list[str],
         output_dir: str,
+        feature_extractor: FeatureExtractor = None,
     ):
         self.config = eval_config
         self.detector = detector
@@ -211,6 +233,7 @@ class ClassificationDatasetBuilder:
         self.output_dir = output_dir
         self.perf_eval = PerformanceEvaluator(config=self.config)
         self.bbox_resize_factor = None
+        self.feature_extractor = feature_extractor
 
         Path(output_dir).mkdir(exist_ok=True, parents=True)
 
@@ -248,8 +271,14 @@ class ClassificationDatasetBuilder:
 
         img_dir = Path(self.output_dir) / str(label_name)
         img_dir.mkdir(exist_ok=True, parents=False)
-        save_path = img_dir / f"{os.path.basename(file_name)}-{tag}.jpg"
-        cv2.imwrite(save_path, image)
+        save_path = img_dir / f"{Path(file_name).stem}#{tag}.jpg"
+
+        if self.feature_extractor is None:
+            cv2.imwrite(save_path, image)
+        else:
+            save_path = save_path.with_suffix(".npy")
+            features = self.feature_extractor.get_features(image)
+            np.save(save_path, features)
 
     def resize_bbox(self, factor: float, x1, x2, y1, y2, img_width, img_height):
         box_size = max(x2 - x1, y2 - y1)
