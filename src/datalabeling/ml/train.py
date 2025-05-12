@@ -258,7 +258,7 @@ class ImageClassifier(L.LightningModule):
     def __init__(
         self,
         model,
-        epochs: int,
+        epochs: int = 50,
         num_classes: int = 2,
         threshold: float = 0.5,
         label_smoothing: float = 0.0,
@@ -294,7 +294,7 @@ class ImageClassifier(L.LightningModule):
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
 
-    def forward(self, x):
+    def forward(self, x) -> torch.Tensor:
         out = self.model(x)
 
         if isinstance(out, Sequence):
@@ -337,6 +337,13 @@ class ImageClassifier(L.LightningModule):
             self.log(f"val_{name}", metric)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
+
+    def predict_step(self, x):
+        with torch.no_grad():
+            probs = self.forward(x).softmax(dim=1)
+            pred = probs.argmax(1)
+
+        return probs, pred
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(
