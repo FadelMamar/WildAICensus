@@ -2,11 +2,12 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Iterable
 
 import albumentations as A
 import lightning as L
 import pandas as pd
+import numpy as np
 import torch
 import yaml
 from animaloc.data.transforms import (
@@ -23,6 +24,7 @@ from tqdm import tqdm
 from torchvision.datasets import ImageFolder
 
 from .config import DataConfig
+
 
 # =================
 # Data Handling
@@ -71,7 +73,9 @@ class DataHandler:
 
     @staticmethod
     def load_yolo_groundtruth(
-        images_dir: str = None, images_paths: list[str] = None
+        images_dir: str = None,
+        images_paths: list[str] | Iterable = None,
+        load_empty: bool = False,
     ) -> tuple[pd.DataFrame, str]:
         from .annotation_utils import check_label_format
 
@@ -79,6 +83,8 @@ class DataHandler:
         labels_format = set()
         num_empty = 0
         paths = images_paths or Path(images_dir).glob("*")
+
+        logger.info("Loading groundtruth...")
 
         for image_path in paths:
             # as Path object
@@ -90,42 +96,60 @@ class DataHandler:
             # image is empty?
             if not os.path.exists(label_path):
                 num_empty += 1
-                continue
+                if load_empty:
+                    _format = np.nan
+                    df = pd.DataFrame(
+                        columns=[
+                            "category_id",
+                            "x1",
+                            "y1",
+                            "x2",
+                            "y2",
+                            "x3",
+                            "y3",
+                            "x4",
+                            "y4",
+                        ]
+                    )
 
-            df = pd.read_csv(label_path, sep=" ", header=None)
-            _format = check_label_format(df)
-            if _format == "yolo-obb":
-                df.columns = [
-                    "category_id",
-                    "x1",
-                    "y1",
-                    "x2",
-                    "y2",
-                    "x3",
-                    "y3",
-                    "x4",
-                    "y4",
-                ]
-            elif _format == "yolo":
-                df.columns = ["category_id", "x", "y", "w", "h"]
-
-                df["x1"] = df["x"] - df["w"] / 2.0
-                df["y1"] = df["y"] - df["h"] / 2.0
-
-                df["x2"] = df["x1"] + df["w"]
-                df["y2"] = df["y1"]
-
-                df["x3"] = df["x2"]
-                df["y3"] = df["y2"] + df["h"]
-
-                df["x4"] = df["x1"]
-                df["y4"] = df["y3"]
+                    for col in df.columns:
+                        df[col] = np.nan
             else:
-                raise ValueError("Check features in label file.")
+                df = pd.read_csv(label_path, sep=" ", header=None)
+                _format = check_label_format(df)
+                if _format == "yolo-obb":
+                    df.columns = [
+                        "category_id",
+                        "x1",
+                        "y1",
+                        "x2",
+                        "y2",
+                        "x3",
+                        "y3",
+                        "x4",
+                        "y4",
+                    ]
+                elif _format == "yolo":
+                    df.columns = ["category_id", "x", "y", "w", "h"]
+
+                    df["x1"] = df["x"] - df["w"] / 2.0
+                    df["y1"] = df["y"] - df["h"] / 2.0
+
+                    df["x2"] = df["x1"] + df["w"]
+                    df["y2"] = df["y1"]
+
+                    df["x3"] = df["x2"]
+                    df["y3"] = df["y2"] + df["h"]
+
+                    df["x4"] = df["x1"]
+                    df["y4"] = df["y3"]
+                else:
+                    raise ValueError("Check features in label file.")
 
             # record features
-            labels_format.add(_format)
-            assert len(labels_format) == 1, (
+            if _format is not np.nan:
+                labels_format.add(_format)
+            assert len(labels_format) <= 1, (
                 f"There are inconcistencies in the labels formats.Found {labels_format}"
             )
 
