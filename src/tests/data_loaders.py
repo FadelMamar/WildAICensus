@@ -44,7 +44,10 @@ def load_herd_net():
 def load_classification_data():
     from datalabeling.common.config import EvaluationConfig
     from datalabeling.ml.models import Detector
-    from datalabeling.common.dataset_loader import ClassificationDatasetBuilder
+    from datalabeling.common.dataset_loader import (
+        ClassificationDatasetBuilder,
+        FeatureExtractor,
+    )
 
     eval_config = EvaluationConfig()
     eval_config.score_threshold = 0.25
@@ -71,18 +74,21 @@ def load_classification_data():
     )
 
     source_dirs = [
-        r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\train_tiled\images",
-        r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\val_tiled\images",
-        r"D:\PhD\Data per camp\DetectionDataset\WAID\val\images",
-        r"D:\PhD\Data per camp\DetectionDataset\savmap\images",
-        # r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
+        # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\train_tiled\images",
+        # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\val_tiled\images",
+        # r"D:\PhD\Data per camp\DetectionDataset\WAID\val\images",
+        # r"D:\PhD\Data per camp\DetectionDataset\savmap\images",
+        r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
     ]
 
     handler = ClassificationDatasetBuilder(
         detector,
         eval_config,
         source_dirs=source_dirs,
-        output_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\val",
+        output_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls-features\train",
+        feature_extractor=FeatureExtractor(
+            hf_model_path="facebook/dinov2-with-registers-small"
+        ),
     )
 
     handler.run(
@@ -93,7 +99,25 @@ def load_classification_data():
     )
 
 
+def load_classification_features_data():
+    from datalabeling.common.io import ClassifierFeaturesData
+    from torch.utils.data import DataLoader
+
+    data = ClassifierFeaturesData(
+        split_data_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls-features\train"
+    )
+    loader = DataLoader(data, batch_size=8, shuffle=False)
+
+    print("labels_map: ", data.labels_map)
+
+    feature, label = next(iter(loader))
+
+    return feature, label
+
+
 if __name__ == "__main__":
     pass
 
-    load_classification_data()
+    # load_classification_data()
+
+    # feature,label = load_classification_features_data()
