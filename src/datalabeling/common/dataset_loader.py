@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 import yaml
 from tqdm import tqdm
+from itertools import chain, product
 
 from .annotation_utils import (
     ImageProcessor,
@@ -18,7 +19,8 @@ from .annotation_utils import (
     load_coco_annotations,
 )
 from .config import DataConfig, LabelConfig, EvaluationConfig
-from .io import load_yaml
+from .io import load_yaml, DataHandler
+
 from ..ml.models import Detector
 from ..common.evaluation import PerformanceEvaluator
 
@@ -208,66 +210,193 @@ class ClassificationDatasetBuilder:
         self.source_dirs = source_dirs
         self.output_dir = output_dir
         self.perf_eval = PerformanceEvaluator(config=self.config)
-        
+        self.bbox_resize_factor = None
+
         Path(output_dir).mkdir(exist_ok=True, parents=True)
+
+    def run(
+        self,
+        strategy: str = "gt",
+        bbox_resize_factor: int = 2,
+        save_true_negatives: bool = False,
+        tn_kwargs=dict(w=50, h=50, number=2),
+    ):
+        assert strategy in ["gt", "fp"]
+
+        self.bbox_resize_factor = bbox_resize_factor
+
+        if strategy == "gt":
+            self.save_groundtruth(
+                images_dirs=self.source_dirs,
+                save_true_negatives=save_true_negatives,
+                tn_kwargs=tn_kwargs,
+            )
+
+        if strategy == "fp":
+            self.save_false_positives()
 
     def save(
         self,
         image: np.ndarray,
         label_name: str | int,
         file_name: str,
-        index: int,
+        tag: str,
     ):
+        if image.sum() < 1:
+            logger.info(f"Skipping {os.path.basename(file_name)}. It's all black.")
+            return None
+
         img_dir = Path(self.output_dir) / str(label_name)
         img_dir.mkdir(exist_ok=True, parents=False)
-        save_path = img_dir / f"{os.path.basename(file_name)}-{index}.jpg"
+        save_path = img_dir / f"{os.path.basename(file_name)}-{tag}.jpg"
         cv2.imwrite(save_path, image)
 
     def resize_bbox(self, factor: float, x1, x2, y1, y2, img_width, img_height):
-        x1 = max(x1 - (factor - 1.0) * (x2 - x1) / 2, 0)
-        y1 = max(y1 - (factor - 1.0) * (y2 - y1) / 2, 0)
-        x2 = min(x2 + (factor - 1.0) * (x2 - x1) / 2, img_width)
-        y2 = min(y2 + (factor - 1.0) * (y2 - y1) / 2, img_height)
+        box_size = max(x2 - x1, y2 - y1)
+
+        x1 = max(x1 - (factor - 1.0) * box_size / 2, 0)
+        y1 = max(y1 - (factor - 1.0) * box_size / 2, 0)
+        x2 = min(x2 + (factor - 1.0) * box_size / 2, img_width)
+        y2 = min(y2 + (factor - 1.0) * box_size / 2, img_height)
 
         out = list(map(int, [x1, x2, y1, y2]))
 
         return out
 
+    def _save_empty(
+        self,
+        df_gt,
+        file_name,
+        bbox_resize_factor,
+        w: int = 50,
+        h: int = 50,
+        number: int = 2,
+    ):
+        image = Image.open(file_name).convert("RGB")
+        image = np.asarray(image)
+
+        img_height, img_width = image.shape[:2]
+
+        label_name = "true_negatives"
+
+        xs = np.random.randint(
+            low=w * bbox_resize_factor,
+            high=img_width - w * bbox_resize_factor,
+            size=number,
+        )
+        ys = np.random.randint(
+            low=h * bbox_resize_factor,
+            high=img_height - h * bbox_resize_factor,
+            size=number,
+        )
+        count = 0
+        for x, y in product(xs, ys):
+            if count == number:
+                break
+
+            # rescale w,h
+            w_ = (np.random.rand() + 0.5) * w
+            h_ = (np.random.rand() + 0.5) * h
+
+            x1 = x - w_ / 2
+            x2 = x + w_ / 2
+            y1 = y - h_ / 2
+            y2 = y + h_ / 2
+
+            x1, x2, y1, y2 = self.resize_bbox(
+                bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
+            )
+
+            self.save(
+                image=image[y1:y2, x1:x2],
+                label_name=label_name,
+                file_name=file_name,
+                tag=f"#{y1}_{y2}_{x1}_{x2}",
+            )
+
+            count += 1
+
+    def _save_gt(self, df_gt, file_name, bbox_resize_factor):
+        image = Image.open(file_name).convert("RGB")
+        image = np.asarray(image)
+
+        for i, row in df_gt.iterrows():
+            x1 = int(row["x_min"])
+            y1 = int(row["y_min"])
+            x2 = int(row["x_max"])
+            y2 = int(row["y_max"])
+            img_width = row["width"]
+            img_height = row["height"]
+
+            label_name = "groundtruth"
+
+            x1, x2, y1, y2 = self.resize_bbox(
+                bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
+            )
+
+            self.save(
+                image=image[y1:y2, x1:x2],
+                label_name=label_name,
+                file_name=file_name,
+                tag=f"#{y1}_{y2}_{x1}_{x2}",
+            )
+
     def save_groundtruth(
         self,
-        bbox_resize_factor: float = 1.0,
+        images_dirs=None,
+        images_paths=None,
+        save_true_negatives: bool = False,
+        tn_kwargs: dict = {},
     ):
+        assert (images_dirs is None) + (images_paths is None) == 1, (
+            "Give images_dirs or images_paths."
+        )
+        df_labels, _ = self.load_groundtruth(
+            images_dirs, images_paths, load_empty=save_true_negatives
+        )
+
+        cols = ["x_min", "y_min", "x_max", "y_max", "width", "height"]
+
+        # save labels
         for file_name, df_gt in tqdm(
-            self.perf_eval.ground_truth.groupby("file_name"), desc="Saving groundtruth"
+            df_labels.groupby("file_name"), desc="Saving groundtruth"
         ):
-            image = Image.open(file_name).convert("RGB")
-            image = np.asarray(image)
+            # save positive samples
+            self._save_gt(
+                df_gt.loc[:, cols].dropna(axis=0, how="any"),
+                file_name,
+                self.bbox_resize_factor,
+            )
 
-            for i, row in df_gt.iterrows():
-                x1 = int(row["x_min"])
-                y1 = int(row["y_min"])
-                x2 = int(row["x_max"])
-                y2 = int(row["y_max"])
-                img_width = row["width"]
-                img_height = row["height"]
+            # save empty samples
+            self._save_empty(
+                df_gt.loc[df_gt["x_min"].isna(), cols],
+                file_name,
+                self.bbox_resize_factor,
+                **tn_kwargs,
+            )
 
-                label_name = "groundtruth"
+    def load_groundtruth(
+        self,
+        images_dirs: list[str] = None,
+        images_paths: list[str] = None,
+        load_empty: bool = False,
+    ) -> tuple[pd.DataFrame, str]:
+        paths = images_paths
+        if paths is None:
+            iters = [Path(p).glob("*") for p in images_dirs]
+            paths = chain.from_iterable(iters)
 
-                x1, x2, y1, y2 = self.resize_bbox(
-                    bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
-                )
+        labels, _format = DataHandler.load_yolo_groundtruth(
+            images_dir=None, images_paths=paths, load_empty=load_empty
+        )
 
-                self.save(
-                    image=image[y1:y2, x1:x2],
-                    label_name=label_name,
-                    file_name=file_name,
-                    index=i,
-                )
+        return labels, _format
 
-    def process_images(self, bbox_resize_factor: float = 1.0):
+    def save_false_positives(
+        self,
+    ):
         """Run batch detection and save cropped ROIs"""
-
-        assert bbox_resize_factor >= 1.0
 
         df_metrics = self.perf_eval.evaluate(
             images_dirs=self.source_dirs,
@@ -305,7 +434,7 @@ class ClassificationDatasetBuilder:
                     continue
 
                 x1, x2, y1, y2 = self.resize_bbox(
-                    bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
+                    self.bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
                 )
 
                 self.save(
@@ -314,8 +443,6 @@ class ClassificationDatasetBuilder:
                     file_name=file_name,
                     index=i,
                 )
-
-        self.save_groundtruth(bbox_resize_factor=bbox_resize_factor)
 
 
 class DataPreparation:
