@@ -18,10 +18,11 @@ from animaloc.data.transforms import (
 )
 from animaloc.datasets import CSVDataset, FolderDataset
 from PIL import Image
-from torch.utils.data import ConcatDataset, DataLoader
+from torch.utils.data import ConcatDataset, DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
 from torchvision.datasets import ImageFolder
+import albumentations as A
 
 from .config import DataConfig
 
@@ -302,24 +303,58 @@ class DataHandler:
         pass
 
 
+class ClassifierFeaturesData(Dataset):
+    def __init__(self, split_data_dir: str, transform=None):
+        super().__init__()
+
+        self.data_dir = Path(split_data_dir)
+        self.samples = list(self.data_dir.glob("*/**/*"))
+
+        labels = [p for p in os.listdir(self.data_dir)]
+        self.classes = list(range(len(labels)))
+        self.labels_map = dict(zip(labels, self.classes))
+
+        # self.transform=transform
+
+    def __len__(
+        self,
+    ):
+        return len(self.samples)
+
+    def __getitem__(self, index):
+        path = self.samples[index]
+        features = np.load(path)
+        label = self.labels_map[path.parent.name]
+
+        return torch.Tensor(features), torch.Tensor(
+            [
+                label,
+            ]
+        ).long()
+
+
 class ClassifierDataModule(L.LightningDataModule):
     def __init__(
         self,
-        train_dir: str,
-        val_dir: str,
+        data_dir: str,
         batch_size: int = 32,
         num_workers: int = 4,
         img_size: int = 96,
+        is_features: bool = False,
         # train_tfms=None,
         # val_tfms=None,
     ):
         super().__init__()
 
-        self.train_dir = train_dir
-        self.val_dir = val_dir
+        self.train_dir = Path(data_dir) / "train"
+        self.val_dir = Path(data_dir) / "val"
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.img_size = img_size
+
+        self.loader = ImageFolder
+        if is_features:
+            self.loader = ClassifierFeaturesData
 
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]
@@ -343,14 +378,23 @@ class ClassifierDataModule(L.LightningDataModule):
             ]
         )
 
+        # self.train_tfms = A.Compose(
+        #     A.PadIfNeeded(min_height=self.img_size*2,
+        #                   min_width=self.img_size*2
+        #                   ),
+        #     A.Cr
+
+        #     )
+        # self.val_tfms = ...
+
     def setup(self, stage=None):
         if stage in (None, "fit"):
-            self.train_dataset = ImageFolder(self.train_dir, transform=self.train_tfms)
-            self.val_dataset = ImageFolder(self.val_dir, transform=self.val_tfms)
+            self.train_dataset = self.loader(self.train_dir, transform=self.train_tfms)
+            self.val_dataset = self.loader(self.val_dir, transform=self.val_tfms)
             self.num_classes = len(self.train_dataset.classes)
 
         if stage == "validate":
-            self.val_dataset = ImageFolder(self.val_dir, transform=self.val_tfms)
+            self.val_dataset = self.loader(self.val_dir, transform=self.val_tfms)
             self.num_classes = len(self.train_dataset.classes)
 
     def train_dataloader(self):
@@ -360,7 +404,7 @@ class ClassifierDataModule(L.LightningDataModule):
             shuffle=True,
             num_workers=self.num_workers,
             persistent_workers=True,
-            pin_memory=torch.cuda.is_available(),
+            # pin_memory=torch.cuda.is_available(),
         )
 
     def val_dataloader(self):
@@ -370,7 +414,7 @@ class ClassifierDataModule(L.LightningDataModule):
             shuffle=False,
             num_workers=self.num_workers,
             persistent_workers=True,
-            pin_memory=torch.cuda.is_available(),
+            # pin_memory=torch.cuda.is_available(),
         )
 
 
