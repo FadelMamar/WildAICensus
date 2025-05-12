@@ -310,9 +310,9 @@ class ClassifierFeaturesData(Dataset):
         self.data_dir = Path(split_data_dir)
         self.samples = list(self.data_dir.glob("*/**/*"))
 
-        labels = [p for p in os.listdir(self.data_dir)]
+        labels = sorted(os.listdir(self.data_dir))
         self.classes = list(range(len(labels)))
-        self.labels_map = dict(zip(labels, self.classes))
+        self.class_to_idx = dict(zip(labels, self.classes))
 
         # self.transform=transform
 
@@ -324,7 +324,7 @@ class ClassifierFeaturesData(Dataset):
     def __getitem__(self, index):
         path = self.samples[index]
         features = np.load(path)
-        label = self.labels_map[path.parent.name]
+        label = self.class_to_idx[path.parent.name]
 
         return torch.Tensor(features), torch.Tensor(
             [
