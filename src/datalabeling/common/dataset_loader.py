@@ -12,7 +12,6 @@ import pandas as pd
 import yaml
 from tqdm import tqdm
 from itertools import chain, product
-import torch
 from .annotation_utils import (
     ImageProcessor,
     LabelstudioConverter,
@@ -20,9 +19,9 @@ from .annotation_utils import (
 )
 from .config import DataConfig, LabelConfig, EvaluationConfig
 from .io import load_yaml, DataHandler
-
+from .processor import FeatureExtractor
 from ..ml.models import Detector
-from ..common.evaluation import PerformanceEvaluator
+from .evaluation import PerformanceEvaluator
 
 logger = logging.getLogger(__name__)
 
@@ -197,27 +196,6 @@ class YOLODatasetBuilder:
             )
 
 
-class FeatureExtractor:
-    def __init__(self, hf_model_path="facebook/dinov2-with-registers-small"):
-        from transformers import AutoImageProcessor, AutoModel
-
-        self.processor = AutoImageProcessor.from_pretrained(hf_model_path)
-        self.extractor = AutoModel.from_pretrained(hf_model_path)
-
-    def get_features(self, image: np.ndarray) -> np.ndarray:
-        assert isinstance(image, np.ndarray)
-
-        image = Image.fromarray(image)
-
-        inputs = self.processor(images=image, return_tensors="pt")
-
-        with torch.no_grad():
-            outputs = self.extractor(**inputs)
-        features = outputs.pooler_output.cpu().numpy().flatten()
-
-        return features
-
-
 class ClassificationDatasetBuilder:
     def __init__(
         self,
@@ -294,7 +272,6 @@ class ClassificationDatasetBuilder:
 
     def _save_empty(
         self,
-        df_gt,
         file_name,
         bbox_resize_factor,
         w: int = 50,
@@ -399,7 +376,6 @@ class ClassificationDatasetBuilder:
 
             # save empty samples
             self._save_empty(
-                df_gt.loc[df_gt["x_min"].isna(), cols],
                 file_name,
                 self.bbox_resize_factor,
                 **tn_kwargs,
@@ -470,7 +446,7 @@ class ClassificationDatasetBuilder:
                     image=image[y1:y2, x1:x2],
                     label_name=label_name,
                     file_name=file_name,
-                    index=i,
+                    tag=f"#{y1}_{y2}_{x1}_{x2}",
                 )
 
 
