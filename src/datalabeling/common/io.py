@@ -95,27 +95,7 @@ class DataHandler:
             label_path = str(image_path.with_suffix(".txt")).replace("images", "labels")
 
             # image is empty?
-            if not os.path.exists(label_path):
-                num_empty += 1
-                if load_empty:
-                    _format = np.nan
-                    df = pd.DataFrame(
-                        columns=[
-                            "category_id",
-                            "x1",
-                            "y1",
-                            "x2",
-                            "y2",
-                            "x3",
-                            "y3",
-                            "x4",
-                            "y4",
-                        ]
-                    )
-
-                    for col in df.columns:
-                        df[col] = np.nan
-            else:
+            if os.path.exists(label_path):
                 df = pd.read_csv(label_path, sep=" ", header=None)
                 _format = check_label_format(df)
                 if _format == "yolo-obb":
@@ -146,6 +126,28 @@ class DataHandler:
                     df["y4"] = df["y3"]
                 else:
                     raise ValueError("Check features in label file.")
+
+            # emtpy images
+            else:
+                num_empty += 1
+                if load_empty:
+                    _format = np.nan
+                    df = pd.DataFrame(
+                        columns=[
+                            "category_id",
+                            "x1",
+                            "y1",
+                            "x2",
+                            "y2",
+                            "x3",
+                            "y3",
+                            "x4",
+                            "y4",
+                        ]
+                    )
+
+                    for col in df.columns:
+                        df.at[0, col] = np.nan
 
             # record features
             if _format is not np.nan:
