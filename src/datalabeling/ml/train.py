@@ -257,7 +257,7 @@ class HerdnetTrainer(L.LightningModule):
 class ImageClassifier(L.LightningModule):
     def __init__(
         self,
-        model,
+        cls_is_features: bool,
         epochs: int = 50,
         num_classes: int = 2,
         threshold: float = 0.5,
@@ -271,7 +271,9 @@ class ImageClassifier(L.LightningModule):
         self.save_hyperparameters(ignore=["model", "threshold"])
 
         # use a pretrained ResNet backbone
-        self.model = model
+        self.model = get_image_classifier_module(
+            cls_is_features=cls_is_features, num_classes=num_classes
+        )
         # replace final layer
         # in_features = self.model.fc.in_features
         # self.model.fc = nn.Linear(in_features, num_classes)
@@ -334,7 +336,7 @@ class ImageClassifier(L.LightningModule):
 
         for name, metric in self.metrics.items():
             metric.update(logits, y)
-            self.log(f"val_{name}", metric)
+            self.log(f"val_{name}", metric, prog_bar=True, on_epoch=True)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
 
@@ -360,7 +362,7 @@ class ImageClassifier(L.LightningModule):
         return [optimizer], [lr_scheduler]
 
 
-def get_image_classifier_module(cls_num_classes: int, cls_is_features: bool = False):
+def get_image_classifier_module(num_classes: int, cls_is_features: bool = False):
     if cls_is_features:
         model = torch.nn.Sequential(
             torch.nn.LazyLinear(128),
@@ -368,11 +370,11 @@ def get_image_classifier_module(cls_num_classes: int, cls_is_features: bool = Fa
             torch.nn.Dropout(p=0.2),
             torch.nn.LazyLinear(128),
             torch.nn.ReLU(),
-            torch.nn.LazyLinear(cls_num_classes),
+            torch.nn.LazyLinear(num_classes),
         )
     else:
         model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-        model.classifier = torch.nn.LazyLinear(cls_num_classes)
+        model.classifier = torch.nn.LazyLinear(num_classes)
 
     return model
 
@@ -459,14 +461,8 @@ class TrainingManager:
             return SGDClassifier(loss="hinge", n_jobs=4)
 
         # using pl
-        else:
-            model = get_image_classifier_module(
-                cls_num_classes=self.args.cls_num_classes,
-                cls_is_features=self.args.cls_is_features,
-            )
-
-        routine = ImageClassifier(
-            model=model,
+        model = ImageClassifier(
+            cls_is_features=self.args.cls_is_features,
             epochs=self.args.epochs,
             num_classes=self.args.cls_num_classes,
             threshold=self.args.cls_thrs,
@@ -476,7 +472,7 @@ class TrainingManager:
             weight_decay=self.args.weight_decay,
         )
 
-        return routine
+        return model
 
     def _load_herdnet(
         self,

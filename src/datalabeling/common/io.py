@@ -340,7 +340,7 @@ class ClassifierDataModule(L.LightningDataModule):
         self,
         data_dir: str,
         batch_size: int = 32,
-        num_workers: int = 4,
+        num_workers: int = 1,
         img_size: int = 96,
         is_features: bool = False,
         # train_tfms=None,
@@ -404,8 +404,8 @@ class ClassifierDataModule(L.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
-            persistent_workers=True,
+            # num_workers=self.num_workers,
+            # persistent_workers=True,
             # pin_memory=torch.cuda.is_available(),
         )
 
@@ -414,8 +414,8 @@ class ClassifierDataModule(L.LightningDataModule):
             self.val_dataset,
             batch_size=self.batch_size,
             shuffle=False,
-            num_workers=self.num_workers,
-            persistent_workers=True,
+            # num_workers=self.num_workers,
+            # persistent_workers=True,
             # pin_memory=torch.cuda.is_available(),
         )
 
