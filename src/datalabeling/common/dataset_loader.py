@@ -199,41 +199,47 @@ class YOLODatasetBuilder:
 class ClassificationDatasetBuilder:
     def __init__(
         self,
-        detector: Detector,
         eval_config: EvaluationConfig,
-        source_dirs: list[str],
-        output_dir: str,
-        feature_extractor: FeatureExtractor = None,
     ):
         self.config = eval_config
-        self.detector = detector
-        self.source_dirs = source_dirs
-        self.output_dir = output_dir
+        self.detector = None
+        self.source_dirs = None
+        self.output_dir = None
         self.perf_eval = PerformanceEvaluator(config=self.config)
         self.bbox_resize_factor = None
-        self.feature_extractor = feature_extractor
+        self.feature_extractor = None
 
+    def set_dirs(self, source_dirs: list[str], output_dir: str):
+        self.source_dirs = source_dirs
+        self.output_dir = output_dir
         Path(output_dir).mkdir(exist_ok=True, parents=True)
 
     def run(
         self,
         strategy: str = "gt",
-        bbox_resize_factor: int = 2,
+        detector: Detector = None,
+        feature_extractor=None,
+        bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
         tn_kwargs=dict(w=50, h=50, number=2),
+        tp_kwargs=dict(w=None, h=None),
     ):
-        assert strategy in ["gt", "fp"]
+        assert strategy in ["gt", "fp"], "Provide gt for fp as a strategy"
 
         self.bbox_resize_factor = bbox_resize_factor
+        self.detector = detector
+        self.feature_extractor = feature_extractor
 
         if strategy == "gt":
             self.save_groundtruth(
                 images_dirs=self.source_dirs,
                 save_true_negatives=save_true_negatives,
                 tn_kwargs=tn_kwargs,
+                tp_kwargs=tp_kwargs,
             )
 
         if strategy == "fp":
+            assert self.detector is not None, "Provide a detector engine"
             self.save_false_positives()
 
     def save(
@@ -322,7 +328,14 @@ class ClassificationDatasetBuilder:
 
             count += 1
 
-    def _save_gt(self, df_gt, file_name, bbox_resize_factor):
+    def _save_gt(
+        self,
+        df_gt,
+        file_name,
+        bbox_resize_factor,
+        w: int = None,
+        h: int = None,
+    ):
         image = Image.open(file_name).convert("RGB")
         image = np.asarray(image)
 
@@ -333,6 +346,14 @@ class ClassificationDatasetBuilder:
             y2 = int(row["y_max"])
             img_width = row["width"]
             img_height = row["height"]
+
+            if w and h:
+                x = int((x1 + x2) / 2)
+                y = int((y1 + y2) / 2)
+                x1 = x - w / 2
+                x2 = x + w / 2
+                y1 = y - h / 2
+                y2 = y + h / 2
 
             label_name = "groundtruth"
 
@@ -353,6 +374,7 @@ class ClassificationDatasetBuilder:
         images_paths=None,
         save_true_negatives: bool = False,
         tn_kwargs: dict = {},
+        tp_kwargs: dict = {},
     ):
         assert (images_dirs is None) + (images_paths is None) == 1, (
             "Give images_dirs or images_paths."
@@ -372,14 +394,16 @@ class ClassificationDatasetBuilder:
                 df_gt.loc[:, cols].dropna(axis=0, how="any"),
                 file_name,
                 self.bbox_resize_factor,
+                **tp_kwargs,
             )
 
             # save empty samples
-            self._save_empty(
-                file_name,
-                self.bbox_resize_factor,
-                **tn_kwargs,
-            )
+            if df_gt.loc[:, cols].isna().sum().sum() > 0 and save_true_negatives:
+                self._save_empty(
+                    file_name,
+                    self.bbox_resize_factor,
+                    **tn_kwargs,
+                )
 
     def load_groundtruth(
         self,
