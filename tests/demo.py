@@ -1,32 +1,47 @@
 if __name__ == "__main__":
-    from dotenv import load_dotenv
+    pass
 
-    load_dotenv(r"D:\datalabeling\.env")
+    # from datalabeling.ml.models import Detector
 
-    from datalabeling.ml import Annotator
-    import os
-    from pathlib import Path
-    import torch
-    from PIL import Image
-    from tqdm import tqdm
+    # path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_512_512_1152_1152.jpg"
 
-    use_sliding_window = True
+    # result = Detector.predict_url(image_path=path,
+    #                               inference_service_url="http://localhost:4141/predict",
+    #                               return_gps=True,
 
-    handler = Annotator(
-        mlflow_model_alias="demo",
-        mlflow_model_name="labeler",
-        tilesize=800,
-        overlapratio=0.1,
-        use_sliding_window=use_sliding_window,
-        confidence_threshold=0.5,
-        # device="NPU", # "cpu", "cuda"
-        # tag_to_append=f"-sahi:{use_sliding_window}",
-        dotenv_path=r"D:\datalabeling\.env",
-    )
-    img = Image.open(
-        r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_512_512_1152_1152.jpg"
-    )
-    pred = handler.predict(img)
+    #                               )
+    # print(result)
+    # =============================================================================
+    # %%     Annotator
+    # =============================================================================
+    # from dotenv import load_dotenv
+
+    # load_dotenv(r"D:\datalabeling\.env")
+
+    # from datalabeling.ml import Annotator
+    # import os
+    # from pathlib import Path
+    # import torch
+    # from PIL import Image
+    # from tqdm import tqdm
+
+    # use_sliding_window = True
+
+    # handler = Annotator(
+    #     mlflow_model_alias="demo",
+    #     mlflow_model_name="labeler",
+    #     tilesize=800,
+    #     overlapratio=0.1,
+    #     use_sliding_window=use_sliding_window,
+    #     confidence_threshold=0.5,
+    #     # device="NPU", # "cpu", "cuda"
+    #     # tag_to_append=f"-sahi:{use_sliding_window}",
+    #     dotenv_path=r"D:\datalabeling\.env",
+    # )
+    # img = Image.open(
+    #     r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_512_512_1152_1152.jpg"
+    # )
+    # pred = handler.predict(img)
 
     # project_id = 3  # insert correct project_id by loooking at the url
     # top_n=10
@@ -125,7 +140,6 @@ if __name__ == "__main__":
     # from datalabeling.common.io import ClassifierDataModule
     # from lightning import Trainer
     # from torchvision import models
-    # import torch
 
     # dm = ClassifierDataModule(
     #     train_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\train",
@@ -155,3 +169,52 @@ if __name__ == "__main__":
     #     max_epochs=5,
     # )
     # trainer.fit(routine, dm)
+    # %% Detector
+
+    from ultralytics import YOLO
+    from PIL import Image
+    import time
+    import numpy as np
+    from datalabeling.ml import Detector, Annotator
+    from datalabeling.common.config import Detection
+    from dotenv import load_dotenv
+    from pathlib import Path
+    import matplotlib.pyplot as plt
+
+    # %matplotlib inline
+    import folium
+    from folium.plugins import MarkerCluster, FastMarkerCluster
+    import pandas as pd
+    from itertools import chain
+
+    # det = Detection()
+
+    handler = Detector(
+        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
+        imgsz=960,
+        tilesize=960,
+        confidence_threshold=0.25,
+        use_sliding_window=True,
+    )
+
+    image_dir = r"D:\savmap_dataset_v2\raw\tmp"
+    save_path = Path(image_dir).parent / "detection_gps.csv"
+
+    exts = [
+        "*.jpg",
+        "*.jpeg",
+        "*.png",
+    ]
+    exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
+
+    image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
+
+    image_paths = list(Path(image_dir).glob("*.jpg"))[:1]
+    len(image_paths)
+
+    results = handler.predict_directory(
+        path_to_dir=None,
+        images_paths=image_paths,
+        as_dataframe=True,
+        save_path=None,
+    )
