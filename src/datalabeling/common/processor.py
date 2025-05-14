@@ -126,6 +126,9 @@ class DetectionsPostprocessor(Processor):
         assert isinstance(image, Image.Image)
         assert self.handler, "Provide a handler using self.set_handler"
 
+        if len(detections) < 1:
+            return []
+
         dets = []
 
         image = image.convert("RGB")

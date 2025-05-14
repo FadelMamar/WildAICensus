@@ -337,6 +337,9 @@ class Detector(object):
 
         unravel_dict = []
         for img_path, detections in results.items():
+            if len(detections) < 1:
+                continue
+
             for det in detections:
                 unravel_dict.append(dict(file_name=img_path, **det.to_dict()))
 

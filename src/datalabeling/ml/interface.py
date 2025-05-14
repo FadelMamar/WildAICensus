@@ -60,6 +60,9 @@ class InferenceEnginge(object):
             override_tilesize=self.config.tilesize,
         )
 
+        if len(detections) < 1:
+            return []
+
         if self.detection_processor:
             cfg = dict(image=image, box_size=self.config.cls_imgsz)
             detections = self.detection_processor.run(detections, **cfg)
@@ -76,7 +79,7 @@ class InferenceEnginge(object):
         results = {}
 
         for image_path in images_paths:
-            detections = self.predict(
+            detections = self.inference(
                 image_path=image_path,
                 image=None,
                 inference_service_url=inference_service_url,
