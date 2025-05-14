@@ -6,6 +6,7 @@ from pathlib import Path
 from time import time
 from urllib.parse import quote, unquote
 import pandas as pd
+import numpy as np
 import mlflow
 from dotenv import load_dotenv
 from label_studio_ml.utils import get_local_path
@@ -13,9 +14,80 @@ from label_studio_sdk.client import LabelStudio
 from PIL import Image
 from tqdm import tqdm
 
+from ..common.processor import Processor
+from ..common.config import Detection, PredictionConfig
 from .models import Detector
 
 logger = logging.getLogger(__name__)
+
+
+class InferenceEnginge(object):
+    def __init__(self, config: PredictionConfig):
+        self.config = config
+
+        self.detector = None
+        self.image_processor = None
+        self.detection_processor = None
+
+    def set_detector(self, detector: Detector):
+        self.detector = detector
+
+    def set_processor(
+        self, image_processor: Processor = None, detection_processor: Processor = None
+    ):
+        self.image_processor = image_processor
+        self.detection_processor = detection_processor
+
+    def inference(
+        self,
+        image_path: str = None,
+        image: Image.Image = None,
+        inference_service_url=None,
+    ) -> list[Detection]:
+        if image_path:
+            image = Image.open(image_path)
+            image_path = None
+
+        if self.image_processor:
+            image = self.image_processor.run(np.asarray(image))
+            image = Image.fromarray(image)
+
+        detections = self.detector.predict(
+            image=image,
+            image_path=image_path,
+            inference_service_url=inference_service_url,
+            override_tilesize=self.config.tilesize,
+        )
+
+        if self.detection_processor:
+            cfg = dict(image=image, box_size=self.config.cls_imgsz)
+            detections = self.detection_processor.run(detections, **cfg)
+
+        return detections
+
+    def batch_inference(
+        self,
+        images_paths: list[str],
+        save_path: str = None,
+        as_dataframe: bool = False,
+        inference_service_url=None,
+    ) -> pd.DataFrame:
+        results = {}
+
+        for image_path in images_paths:
+            detections = self.predict(
+                image_path=image_path,
+                image=None,
+                inference_service_url=inference_service_url,
+            )
+            results[str(image_path)] = detections
+
+        if as_dataframe or save_path:
+            results = self.detector._format_results_as_dataframe(results=results)
+            if save_path:
+                results.to_csv(save_path, index=False)
+
+        return results
 
 
 class Annotator(object):

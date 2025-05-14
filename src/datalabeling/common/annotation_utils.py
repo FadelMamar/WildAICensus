@@ -63,6 +63,18 @@ def check_label_format(loaded_df: pd.DataFrame) -> str:
         )
 
 
+def resize_bbox(factor: float, x1, x2, y1, y2, img_width, img_height):
+    box_size = max(x2 - x1, y2 - y1)
+
+    x1 = max(x1 - (factor - 1.0) * box_size / 2, 0)
+    y1 = max(y1 - (factor - 1.0) * box_size / 2, 0)
+    x2 = min(x2 + (factor - 1.0) * box_size / 2, img_width)
+    y2 = min(y2 + (factor - 1.0) * box_size / 2, img_height)
+
+    out = list(map(int, [x1, x2, y1, y2]))
+    return out
+
+
 def convert_yolo_to_obb(
     yolo_labels_dir: str, output_dir: str, skip: bool = True
 ) -> None:
@@ -1017,6 +1029,12 @@ class GPSUtils:
                 info[k] = list(v)
 
         return info
+
+    @staticmethod
+    def to_decimal(gps_coord: str):
+        lat, long, alt = geopy.Point.from_string(gps_coord)
+        coords = lat, long, alt * 1e3
+        return coords
 
     @staticmethod
     def get_gps_coord(

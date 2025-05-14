@@ -2,16 +2,43 @@ from PIL import Image
 import numpy as np
 import torch
 import albumentations as A
+from abc import ABC, abstractmethod
 
 
-class FeatureExtractor:
+from .config import Detection
+
+
+def get_processor(name: str):
+    if name == "feature_extractor":
+        return FeatureExtractor
+
+    elif name == "classifier":
+        return Classifier
+
+    elif name == "detections_post":
+        return DetectionsPostprocessor
+
+    else:
+        raise NotImplementedError
+
+
+class Processor(ABC):
+    @abstractmethod
+    def run(self, *args, **kwargs):
+        pass
+
+
+# =============================================================================
+# # Image processors
+# =============================================================================
+class FeatureExtractor(Processor):
     def __init__(self, hf_model_path="facebook/dinov2-with-registers-small"):
         from transformers import AutoImageProcessor, AutoModel
 
         self.processor = AutoImageProcessor.from_pretrained(hf_model_path)
         self.extractor = AutoModel.from_pretrained(hf_model_path)
 
-    def get_features(self, image: np.ndarray) -> np.ndarray:
+    def run(self, image: np.ndarray) -> np.ndarray:
         assert isinstance(image, np.ndarray)
 
         image = Image.fromarray(image)
@@ -25,13 +52,24 @@ class FeatureExtractor:
         return features
 
 
-class Classifier(object):
+class SuperResolution(Processor):
+    def __init__(
+        self,
+    ):
+        pass
+
+    def run(self, image: np.ndarray) -> np.ndarray:
+        pass
+
+
+class Classifier(Processor):
     def __init__(
         self,
         model: torch.nn.Module,
         label_map: dict,
-        feature_extractor: FeatureExtractor = None,
+        feature_extractor=None,
         imgsz: int = 96,
+        transform=None,
         device: str = "cpu",
     ):
         self.model = model
@@ -42,20 +80,20 @@ class Classifier(object):
 
         self.feature_extractor = feature_extractor
 
-        self.transform = A.Compose(
-            [
-                A.PadIfNeeded(min_height=imgsz, min_width=imgsz),
-                # A.CenterCrop(height=imgsz,width=imgsz,pad_if_needed=True)
-            ]
-        )
+        self.transform = transform
+        if transform is None:
+            self.transform = A.Compose(
+                [
+                    A.PadIfNeeded(min_height=imgsz, min_width=imgsz),
+                    # A.CenterCrop(height=imgsz,width=imgsz,pad_if_needed=True)
+                ]
+            )
 
-    def run(self, images: list[np.ndarray]):
+    def run(self, images: list[np.ndarray]) -> list[str]:
         preprocessed = [self.transform(image=image)["image"] for image in images]
 
         if self.feature_extractor:
-            preprocessed = [
-                self.feature_extractor.get_features(image) for image in preprocessed
-            ]
+            preprocessed = [self.feature_extractor.run(image) for image in preprocessed]
             preprocessed = torch.Tensor(np.stack(preprocessed)).to(self.device)
 
         with torch.no_grad():
@@ -67,23 +105,35 @@ class Classifier(object):
         return pred
 
 
-# TODO
-class DetectionsPostprocessor(object):
-    def __init__(
-        self, classifier: Classifier, keep_classes: list[str] = ["groundtruth"]
-    ):
-        self.classifier = classifier
+# =============================================================================
+# # Detections processors
+# =============================================================================
+class DetectionsPostprocessor(Processor):
+    def __init__(self, keep_classes: list[str] = ["groundtruth"]):
+        self.handler = None
         self.keep = keep_classes
+
+    def set_handler(self, handler):
+        self.handler = handler
 
     # TODO: implement
     def run(
-        self, detections: list[dict], image: np.ndarray, box_size: int = 96
-    ) -> list[dict]:
+        self,
+        detections: list[Detection],
+        image: Image.Image,
+        box_size: int = 96,
+    ) -> list[Detection]:
+        assert isinstance(image, Image.Image)
+        assert self.handler, "Provide a handler using self.set_handler"
+
         dets = []
 
+        image = image.convert("RGB")
+        image = np.asarray(image)
+
         for det in detections:
-            x_center = (det["x_min"] + det["x_max"]) / 2
-            y_center = (det["y_min"] + det["y_max"]) / 2
+            x_center = det.x
+            y_center = det.y
 
             x1 = int(max(x_center - box_size, 0))
             y1 = int(max(y_center - box_size, 0))
@@ -93,7 +143,7 @@ class DetectionsPostprocessor(object):
 
             dets.append(image[y1:y2, x1:x2])
 
-        preds = self.classifier.run(dets)
+        preds = self.handler.run(dets)
 
         out = [det for i, det in enumerate(detections) if preds[i] in self.keep]
 

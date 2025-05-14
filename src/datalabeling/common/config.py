@@ -1,8 +1,98 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
-
+import math
 import torch
+import geopy
+from PIL import Image
+
+
+@dataclass
+class Detection:
+    x_min: int = None
+    x_max: int = None
+    y_min: int = None
+    y_max: int = None
+    score: float = None
+    label: int = None
+    class_name: str = None
+    gps_loc: str = None
+    image_gps_loc: str = None
+    parent_image: str = None
+
+    @classmethod
+    def from_coco(cls, coco: dict, image_gps_loc: str = None, gps_loc: str = None):
+        bbox = coco["bbox"]
+        label = coco["category_id"]
+        class_ = coco["category_name"]
+        score = coco.get("score", None)
+
+        det = cls(
+            x_min=int(bbox[0]),
+            y_min=int(bbox[1]),
+            x_max=int(bbox[0] + bbox[2]),
+            y_max=int(bbox[1] + bbox[3]),
+            class_name=class_,
+            label=label,
+            score=score,
+            image_gps_loc=image_gps_loc,
+            gps_loc=gps_loc,
+        )
+
+        return det
+
+    def to_dict(
+        self,
+    ):
+        return vars(self)
+
+    def get_base_image(self) -> Image.Image:
+        assert self.parent_image is not None, "Parent image is not defined"
+        return Image.open(self.parent_image)
+
+    @property
+    def area(
+        self,
+    ):
+        return self.w * self.h
+
+    @property
+    def x(
+        self,
+    ):
+        return math.floor((self.x_min + self.x_max) / 2)
+
+    @property
+    def y(
+        self,
+    ):
+        return math.floor((self.y_min + self.y_max) / 2)
+
+    @property
+    def w(
+        self,
+    ):
+        return int(self.x_max - self.x_min)
+
+    @property
+    def h(
+        self,
+    ):
+        return int(self.y_max - self.y_min)
+
+    @property
+    def gps_as_decimals(
+        self,
+    ):
+        assert isinstance(self.gps_loc, str)
+
+        point = geopy.Point.from_string(self.gps_loc)
+
+        lat = point.latitude
+        long = point.longitude
+        alt = point.altitude * 1e3  # converting to meters
+
+        return lat, long, alt
 
 
 @dataclass
@@ -42,10 +132,18 @@ class DataConfig:
 
 @dataclass
 class PredictionConfig:
-    slice_width: int = 640
-    slice_height: int = 640
+    imgsz: int = 960
+    tilesize: int = 960
     overlap_ratio: float = 0.2
-    min_area_ratio: float = 0.1
+    confidence_threshold: float = 0.25
+    min_area: int = 10 * 10
+    max_area: int = None
+    use_sliding_window: bool = True
+    nms_iou: float = 0.5
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Image classifier imgsz
+    cls_imgsz: int = 96
 
 
 @dataclass

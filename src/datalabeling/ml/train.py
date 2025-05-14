@@ -628,7 +628,7 @@ class TrainingManager:
             dirpath=self.args.cls_workdir,
             monitor=self.args.cls_monitor_metric,
             mode=self.args.cls_monitor_mode,
-            filename="best.ckpt",
+            filename="best",
             save_weights_only=True,
             save_last=True,
             save_top_k=1,

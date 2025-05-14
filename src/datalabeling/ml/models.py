@@ -18,6 +18,7 @@ from tqdm import tqdm
 from ultralytics import YOLO
 
 from ..common.annotation_utils import GPSUtils, ImageProcessor
+from ..common.config import Detection
 
 logger = logging.getLogger(__name__)
 
@@ -26,13 +27,13 @@ class Detector(object):
     def __init__(
         self,
         path_to_weights: str,
+        detection_model: UltralyticsDetectionModel = None,
         confidence_threshold: float = 0.1,
         overlap_ratio: float = 0.1,
         tilesize: int | None = 1280,
         imgsz: int = 1280,
         device: str = None,
         use_sliding_window: bool = True,
-        is_yolo_obb: bool = False,
     ):
         """_summary_
 
@@ -52,10 +53,10 @@ class Detector(object):
         self.imgsz = imgsz
         self.overlapratio = overlap_ratio
         self.use_sliding_window = use_sliding_window
-        self.is_yolo_obb = is_yolo_obb
 
-        self.detection_model = None
-        if path_to_weights is not None:
+        self.detection_model = detection_model
+
+        if self.detection_model is None:
             logger.info(f"Computing device: {device}")
 
             self.detection_model = UltralyticsDetectionModel(
@@ -65,70 +66,30 @@ class Detector(object):
                 device=device,
             )
 
-    @staticmethod
-    def predict_url(
-        image_path: str,
-        inference_service_url: str = "http://127.0.0.1:4141/predict",
-        timeout=3 * 60,
-        return_gps: bool = True,
-    ):
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-        payload = {
-            "image": img_b64,
-            "sahi_prostprocess": "NMS",
-            "override_tilesize": None,  # tilesize to use for
-            "postprocess_match_threshold": 0.5,
-            "nms_iou": None,
-            "return_as_decimal": False,
-        }
-
-        resp = requests.post(
-            inference_service_url,
-            json=payload,
-            timeout=timeout,
-        ).json()
-
-        detections = resp["detections"]
-        image_gps = resp["image_gps"]
-
-        if return_gps:
-            return detections, image_gps
-
-        return detections
-
     # TODO: batch predictions with slicing
     def predict(
         self,
         image: Image.Image = None,
         inference_service_url: str = None,
         image_path: str = None,
-        return_gps: bool = False,
-        return_coco: bool = False,
         sahi_prostprocess: float = "NMS",
         override_tilesize: int = None,
         postprocess_match_threshold: float = 0.5,
         timeout: int = 3 * 60,
         nms_iou: float = None,
         verbose: int = 0,
-    ):
-        """Run sliced predictions
-
-        Args:
-            image (Image): input image
-
-        Returns:
-            dict: predictions in coco format
-        """
-
+    ) -> list[Detection]:
         # predict using inference service
         if isinstance(inference_service_url, str):
-            Detector.predict_url(
+            detections, image_gps = Detector.predict_url(
                 image_path=image_path,
                 inference_service_url=inference_service_url,
                 timeout=timeout,
-                return_gps=return_gps,
+            )
+            detections = self._format_detections(
+                detections=detections,
+                image_gps_loc=image_gps,
+                image=Image.open(image_path),
             )
 
         # predict using local model
@@ -152,6 +113,7 @@ class Detector(object):
                 verbose=verbose,
                 postprocess_match_threshold=postprocess_match_threshold or nms_iou,
             )
+            detections = result.to_coco_annotations()
         else:
             result = get_prediction(
                 image=image,
@@ -161,17 +123,69 @@ class Detector(object):
                 postprocess=None,
                 verbose=verbose,
             )
+            detections = result.to_coco_annotations()
 
-        if return_coco:
-            result = result.to_coco_annotations()
+        # image gps coordinate
+        gps_info = GPSUtils.get_gps_coord(
+            file_name=image_path, image=image, return_as_decimal=False
+        )
+        if isinstance(gps_info, tuple):
+            gps_coords = gps_info[0]
+        else:
+            gps_coords = gps_info
 
-        out = result
-        # get gps coordinates
-        if return_gps:
-            gps_coords = GPSUtils.get_gps_coord(file_name=image_path, image=image)
-            out = result, gps_coords
+        detections = self._format_detections(
+            detections=detections, image_gps_loc=gps_coords, image=image
+        )
 
-        return out
+        return detections
+
+    def _format_detections(
+        self, detections: list[Detection], image_gps_loc: str, image: Image.Image
+    ):
+        # format detections
+        detections = [
+            Detection.from_coco(pred, image_gps_loc=image_gps_loc, gps_loc=None)
+            for pred in detections
+        ]
+
+        # add detections gps
+        for det in detections:
+            det.gps_loc = self.compute_detection_gps(
+                x_center=det.x,
+                y_center=det.y,
+                image=image,
+                image_gps_loc=det.image_gps_loc,
+            )
+        return detections
+
+    @staticmethod
+    def predict_url(
+        image_path: str,
+        inference_service_url: str = "http://127.0.0.1:4141/predict",
+        timeout=3 * 60,
+    ):
+        with open(image_path, "rb") as f:
+            img_b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        payload = {
+            "image": img_b64,
+            "sahi_prostprocess": "NMS",
+            "override_tilesize": None,  # tilesize to use for
+            "postprocess_match_threshold": 0.5,
+            "nms_iou": None,
+        }
+
+        resp = requests.post(
+            inference_service_url,
+            json=payload,
+            timeout=timeout,
+        ).json()
+
+        detections = resp["detections"]
+        image_gps = resp["image_gps"]
+
+        return detections, image_gps
 
     # TODO: to debug and optimize
     def sliced_prediction(
@@ -233,11 +247,9 @@ class Detector(object):
         self,
         path_to_dir: str = None,
         images_paths: list[str] = None,
-        return_gps: bool = False,
-        return_coco: bool = False,
         as_dataframe: bool = True,
         save_path: str = None,
-    ) -> dict | pd.DataFrame:
+    ) -> dict[str, list[Detection]] | pd.DataFrame:
         """Computes predictions on a directory
 
         Args:
@@ -259,26 +271,21 @@ class Detector(object):
             try:
                 pred = self.predict(
                     image=None,
-                    return_coco=return_coco or as_dataframe or return_gps,
                     image_path=image_path,
-                    return_gps=return_gps,
                 )
             except Exception as e:
                 logger.error(e)
                 logger.error(f"Failed for {image_path}")
                 continue
-            gps_coords = None
-            if return_gps:
-                pred, gps_info = pred
-                if isinstance(gps_info, tuple):
-                    gps_coords = gps_info[0]
 
-            pred.append(dict(gps_coords=gps_coords))
             results.update({str(image_path): pred})
 
+        if len(results) < 1:
+            logger.info("0 detections.")
+
         # returns as df or save
-        if as_dataframe or (save_path is not None):
-            results = self.get_pred_results_as_dataframe(results, return_gps=return_gps)
+        if as_dataframe or save_path:
+            results = self._format_results_as_dataframe(results)
 
             if save_path is not None:
                 try:
@@ -289,127 +296,74 @@ class Detector(object):
 
         return results
 
-    def format_gps(self, gps_coord: str):
-        if gps_coord is None:
-            return None, None, None
-
-        point = geopy.Point.from_string(gps_coord)
-
-        lat = point.latitude
-        long = point.longitude
-        alt = point.altitude * 1e3  # converting to meters
-
-        return lat, long, alt
-
-    def get_detections_gps(
+    def compute_detection_gps(
         self,
-        x: pd.Series,
+        x_center,
+        y_center,
+        image: Image.Image,
+        image_gps_loc: str,
         flight_height: int = 180,
         sensor_height: int = 24,
         gsd: float = None,
     ):
-        try:
-            img_path = x["file_name"]
+        # None
+        if image_gps_loc is None:
+            return None
 
-            exif = GPSUtils.get_exif(img_path)
-            if exif is None:
-                return pd.Series(
-                    data=[None, None],
-                )
-            H = exif["ExifImageHeight"]
-            W = exif["ExifImageWidth"]
+        assert isinstance(image, Image.Image), "Provide PIL Image"
 
-            lat_center, lon_center, alt = x.img_Latitude, x.img_Longitude, x.Elevation
+        # compute detection
+        W, H = image.size
 
-            # bbox center
-            x_det = x["x_min"] + x["bbox_w"] * 0.5
-            y_det = x["y_min"] + x["bbox_h"] * 0.5
+        lat_center, lon_center, alt = GPSUtils.to_decimal(image_gps_loc)
 
-            if gsd is None:
-                gsd = ImageProcessor.get_gsd(
-                    image_path=img_path,
-                    sensor_height=sensor_height,
-                    flight_height=flight_height,
-                )
-
-            gsd *= 1e-2  # convert to m/px
-
-            px_lat, px_long = ImageProcessor.generate_pixel_coordinates(
-                x=x_det,
-                y=y_det,
-                lat_center=lat_center,
-                lon_center=lon_center,
-                W=W,
-                H=H,
-                gsd=gsd,
-            )
-            return pd.Series(
-                data=[px_lat, px_long],
+        if gsd is None:
+            gsd = ImageProcessor.get_gsd(
+                image=image,
+                image_path=None,
+                sensor_height=sensor_height,
+                flight_height=flight_height,
             )
 
-        except Exception as e:
-            traceback.print_exc()
-            return pd.Series(
-                data=[None, None],
-            )
+        gsd *= 1e-2  # convert to m/px
 
-    def get_pred_results_as_dataframe(
-        self, results: dict[str:list], return_gps: bool = False
-    ):
+        px_lat, px_long = ImageProcessor.generate_pixel_coordinates(
+            x=x_center,
+            y=y_center,
+            lat_center=lat_center,
+            lon_center=lon_center,
+            W=W,
+            H=H,
+            gsd=gsd,
+        )
+
+        gps_loc = str(geopy.Point(latitude=px_lat, longitude=px_long, altitude=alt))
+
+        return gps_loc
+
+    def _format_results_as_dataframe(
+        self, results: dict[str, list[Detection]]
+    ) -> pd.DataFrame:
+        if len(results) < 1:
+            return pd.DataFrame()
+
         unravel_dict = []
-        gps_coords = []
-        for file_name, value in results.items():
-            for v in value:
-                if "gps_coords" not in v.keys():
-                    unravel_dict.append(
-                        {"file_name": file_name, "value": v}
-                    )  # = v #,results['gps_coords']
-                elif return_gps:
-                    gps_coords.append({"gps": v["gps_coords"], "file_name": file_name})
+        for img_path, detections in results.items():
+            for det in detections:
+                unravel_dict.append(dict(file_name=img_path, **det.to_dict()))
 
-        df_results = pd.DataFrame.from_dict(unravel_dict)
+        dfs = pd.DataFrame.from_dict(unravel_dict)
 
-        dfs = list()
-        for i in tqdm(range(len(df_results)), desc="pred results as df"):
-            df_i = pd.DataFrame.from_records(df_results.iloc[i, 1:].to_list())
-            df_i["file_name"] = df_results.iat[i, 0]
-            dfs.append(df_i)
+        dfs["bbox_w"] = dfs["x_max"] - dfs["x_min"]
+        dfs["bbox_h"] = dfs["y_max"] - dfs["y_min"]
 
-        dfs = pd.concat(dfs, axis=0)  # .dropna(thresh=5)
-        # bbox is in coco format (x_min,y_min,w,h)
-        dfs["x_min"] = dfs["bbox"].apply(lambda x: x[0])
-        dfs["y_min"] = dfs["bbox"].apply(lambda x: x[1])
-        dfs["bbox_w"] = dfs["bbox"].apply(lambda x: x[2])
-        dfs["bbox_h"] = dfs["bbox"].apply(lambda x: x[3])
-        dfs["x_max"] = dfs["x_min"] + dfs["bbox_w"]
-        dfs["y_max"] = dfs["y_min"] + dfs["bbox_h"]
-
-        # add gps info
-        if return_gps:
-            df_gps = pd.DataFrame.from_dict(gps_coords)
-            dfs = dfs.merge(df_gps, on="file_name", how="left")
-
-            # converting gps coords to decimal
-            dfs[["img_Latitude", "img_Longitude", "Elevation"]] = dfs.gps.apply(
-                lambda x: self.format_gps(x)
-            ).apply(pd.Series)
-            dfs[["Latitude", "Longitude"]] = dfs.apply(self.get_detections_gps, axis=1)
-
-        try:
-            dfs.drop(
-                columns=[
-                    "image_id",
-                    "iscrowd",
-                    "segmentation",
-                    "bbox",
-                ],
-                inplace=True,
-            )
-        except Exception:
-            logger.info(
-                "Tried to drop columns: ['image_id','iscrowd','segmentation','bbox']."
-            )
-            traceback.print_exc()
+        # converting gps coords to decimal
+        dfs[["img_Latitude", "img_Longitude", "img_Elevation"]] = (
+            dfs["image_gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+        )
+        dfs[["Latitude", "Longitude", "Elevation"]] = (
+            dfs["gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+        )
 
         return dfs
 
