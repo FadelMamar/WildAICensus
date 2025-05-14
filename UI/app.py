@@ -2,27 +2,38 @@ import streamlit as st
 import pandas as pd
 from typing import List
 import requests
-# from dotenv import load_dotenv
+from dotenv import load_dotenv
 from pathlib import Path
 import os
 import traceback
-from datalabeling.ml.interface import Annotator
 from datalabeling.common.io import load_yaml
-from datalabeling.common.annotation_utils import GPSUtils, ImageProcessor
+from datalabeling.common.annotation_utils import GPSUtils
 import logging
-from label_studio_sdk.client import LabelStudio
+
+# from label_studio_sdk.client import LabelStudio
 from itertools import chain
+import folium
+from folium.plugins import MarkerCluster
+from streamlit_folium import folium_static
+from datalabeling.ml.train import ImageClassifier
+
+from datalabeling.common.processor import get_processor, DetectionsPostprocessor
+
+from datalabeling.common.config import PredictionConfig
+from datalabeling.ml.interface import Annotator
+
 
 DOT_ENV = Path(__file__) / "../.env"
-# load_dotenv(DOT_ENV)
+load_dotenv(DOT_ENV)
 
-LABEL_STUDIO_URL = os.environ["LABEL_STUDIO_URL"]
-LABEL_STUDIO_API_KEY = os.environ["LABEL_STUDIO_API_KEY"]
+# LABEL_STUDIO_URL = os.environ.get("LABEL_STUDIO_URL",'http://localhost:8080')
+# LABEL_STUDIO_API_KEY = os.environ.get("LABEL_STUDIO_API_KEY")
 
-LABEL_STUDIO_CLIENT = LabelStudio(
-    base_url=LABEL_STUDIO_URL, api_key=LABEL_STUDIO_API_KEY
-)
+# LABEL_STUDIO_CLIENT = LabelStudio(
+#     base_url=LABEL_STUDIO_URL, api_key=LABEL_STUDIO_API_KEY
+# )
 
+TRAINING_API_URL = ...
 
 
 class StreamlitLogHandler(logging.Handler):
@@ -41,9 +52,9 @@ def main():
     st.title("Labeling Workflow Management")
 
     # Sidebar for common controls
-    # with st.sidebar:
-    #     st.header("API Configuration")
-    # label_studio_token = st.text_input("Label Studio Token", type="password")
+    with st.sidebar:
+        st.header("API Configuration")
+        label_studio_token = st.text_input("Label Studio Token", type="password")
     # training_api_token = st.text_input("Training API Token", type="password")
 
     # Main tabs
@@ -61,30 +72,26 @@ def main():
         st.header("Upload to Label Studio")
         with st.form("upload_annotations"):
             project_id = st.number_input("Project ID", min_value=0, step=1)
-            model_alias = st.text_input("Model Alias",value="yolov11x-obb").strip()
-            detector_name = st.text_input("Detector name", value="obb-detector").strip()
+            model_alias = st.text_input("Model Alias", value="demo").strip()
+            detector_name = st.text_input("Detector name", value="labeler").strip()
             confidence_threshold = st.text_input(
                 "Confidence threshold", value=0.2
             ).strip()
-            path_to_weights = st.text_input(
-                "Path to model weights",
-                # value=r"D:\datalabeling\base_models_weights\best.pt",
-            ).strip()
-            tile_size = st.number_input("Tile size", min_value=640, step=1)
+            # path_to_weights = st.text_input(
+            #     "Path to model weights",
+            #     # value=None,
+            # ).strip()
+            tile_size = st.number_input("Tile size", min_value=800, step=1)
             top_n = st.number_input("Top n", min_value=0, step=1)
-            use_sliding_window = True
-            # annotation_file = st.file_uploader("Annotation File (JSON)", type=["json"])
 
             annotator_kwargs = {
-                "path_to_weights": path_to_weights,
+                # "path_to_weights": path_to_weights,
                 "mlflow_model_alias": model_alias,
                 "mlflow_model_name": detector_name,
                 "tilesize": tile_size,
                 "overlapratio": 0.1,
                 "use_sliding_window": True,
-                "is_yolo_obb": detector_name == "obb-detector",
                 "confidence_threshold": 0.1,
-                "tag_to_append": "",
             }
 
             log_widget = st.empty().code
@@ -97,13 +104,14 @@ def main():
                 try:
                     with st.spinner("Uploading annotations...", show_time=True):
                         upload_to_label_studio(
-                            project_id=project_id, top_n=top_n, **annotator_kwargs
+                            project_id=project_id,
+                            top_n=top_n,
+                            annotator_kwargs=annotator_kwargs,
                         )
                         st.success("Done!")
 
                 except Exception as e:
                     traceback.print_exc()
-                    # st.error(f"Upload failed: {str(e)}")
 
     with tab2:
         st.header("Project Analytics")
@@ -171,22 +179,86 @@ def main():
                 raise NotImplementedError
 
     with tab4:
-        st.header("GPS")
+        st.header("Visualizations")
+
+        st.subheader("Image GPS")
         with st.form("gps_coords"):
             image_dir = st.text_input(
                 "Path to images directory (without quotes)"
             ).strip()
 
+            save_path_map = st.text_input(
+                "Path to save map (without quotes)",
+                help="something like my_map.html",
+                # value='map.html'
+            ).strip()
+
+            map_style = st.radio(
+                label="map stype",
+                options=[
+                    "Esri.WorldImagery",
+                    # 'Cartodb Positron',
+                    # "Stamen Terrain",
+                    "OpenStreetMap",
+                ],
+            )
+
             if st.form_submit_button("Get coordinates"):
                 with st.spinner("Running...", show_time=True):
-                    gps_coords = get_gps_coords(image_paths=None, image_dir=image_dir)
-                st.dataframe(gps_coords, use_container_width=False)
+                    df_gps_coords = get_gps_coords(
+                        image_paths=None, image_dir=image_dir
+                    )
+
+                    st.dataframe(df_gps_coords, use_container_width=False)
+
+                    folium_static(
+                        get_map_with_detections(
+                            locations=df_gps_coords,
+                            map_style=map_style,
+                            save_path=save_path_map if len(save_path_map) > 5 else None,
+                        )
+                    )
+
+        st.subheader("Detections GPS")
+        with st.form("folium_map"):
+            detections_path = st.text_input(
+                "Path to detections csv (without quotes)"
+            ).strip()
+
+            save_path_map = st.text_input(
+                "Path to save map (without quotes)",
+                help="something like my_map.html",
+                # value='map.html'
+            ).strip()
+
+            map_style = st.radio(
+                label="map stype",
+                options=[
+                    "Esri.WorldImagery",
+                    # 'Cartodb Positron',
+                    # "Stamen Terrain",
+                    "OpenStreetMap",
+                ],
+            )
+
+            if st.form_submit_button("Visualize"):
+                with st.spinner("Running...", show_time=True):
+                    df_results_px = pd.read_csv(detections_path)
+
+                    st.dataframe(df_results_px, use_container_width=False)
+
+                    folium_static(
+                        get_map_with_detections(
+                            locations=df_results_px,
+                            map_style=map_style,
+                            save_path=save_path_map if len(save_path_map) > 5 else None,
+                        )
+                    )
 
     with tab5:
         st.header("Inference")
 
-        with st.form("inference"):           
-
+        with st.form("inference"):
             model_alias = st.text_input("Model Alias", value="yolov12s").strip()
             model_name = st.text_input("Model name", value="detector").strip()
             confidence_threshold = st.text_input(
@@ -195,7 +267,11 @@ def main():
             image_dir = st.text_input(
                 "Path to images directory (without quotes)"
             ).strip()
-            save_path = st.text_input("Save path (without quotes)",value='detections.csv').strip()
+            save_path = st.text_input(
+                "Save path (without quotes)", value="detections.csv"
+            ).strip()
+
+            # annotation_file = st.file_uploader("Annotation File (JSON)", type=["json"])
 
             log_widget = st.empty().code
             handler = StreamlitLogHandler(log_widget)
@@ -220,57 +296,91 @@ def main():
                         ],
                     )
                 st.dataframe(df_results_px, use_container_width=False)
-                
+
+                # plot detections on folium map
+                folium_static(get_map_with_detections(locations=df_results_px))
+
+
+def get_annotator(annotator_kwargs: dict):
+    config = PredictionConfig(
+        imgsz=annotator_kwargs.get("tilesize", 800),
+        tilesize=annotator_kwargs.get("tilesize", 800),
+        overlap_ratio=annotator_kwargs.get("overlap_ratio", 0.2),
+        confidence_threshold=annotator_kwargs.get("confidence_threshold", 0.2),
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=96,
+        # device='cuda'
+    )
+
+    # get image classifier
+    path = r"D:\datalabeling\src\tests\runs-classifier\best-v6.ckpt"
+    model = ImageClassifier.load_from_checkpoint(
+        path, cls_is_features=True, map_location="cpu"
+    )
+    handler = get_processor("classifier")(
+        model,
+        label_map={0: "gt", 1: "tn"},
+        device=config.device,
+        feature_extractor=get_processor("feature_extractor")(),
+        imgsz=config.cls_imgsz,
+    )
+
+    # build postprocessor
+    processor = DetectionsPostprocessor(
+        keep_classes=["gt"],
+    )
+    processor.set_handler(handler)
+
+    # get annotator
+    # path_to_weights = annotator_kwargs.get('path_to_weights')
+    # if not Path(path_to_weights).exists():
+    path_to_weights = None
+
+    annotator = Annotator(
+        config=config,
+        dotenv_path=DOT_ENV,
+        path_to_weights=path_to_weights,
+        mlflow_model_alias=annotator_kwargs.get("mlflow_model_alias"),
+        mlflow_model_name=annotator_kwargs.get("mlflow_model_name"),
+    )
+
+    annotator.set_processor(image_processor=None, detection_processor=processor)
+
+    return annotator
+
 
 @st.cache_data
 def run_inference(
     image_dir: str,
-    alias: str,
-    save_path: str=None,
+    annotator_kwargs: dict,
+    save_path: str = None,
     image_paths: list[None] = None,
-    confidence_threshold: float = 0.15,
-    dotenv_path: str = "../.env",
-    name: str = "obb-detector",
     exts: list[str] = [
         "*.jpg",
         "*.jpeg",
         "*.png",
     ],
 ) -> None:
-    handler = Annotator(
-        mlflow_model_alias=alias,
-        mlflow_model_name=name,
-        confidence_threshold=confidence_threshold,
-        is_yolo_obb=name.strip() == "obb-detector",
-        dotenv_path=dotenv_path,
-    )
+    handler = get_annotator(annotator_kwargs=annotator_kwargs)
 
     exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
 
     if image_paths is None:
         image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
 
-    results = handler.predict_directory(
-        path_to_dir=None,
+    results = handler.batch_inference(
         images_paths=image_paths,
-        return_gps=True,
-        return_coco=False,
+        save_path=save_path,
         as_dataframe=True,
-        save_path=None,
+        inference_service_url=annotator_kwargs.get("inference_service_url", None),
     )
-    
-    # results['img_Latitude'] = results['Latitude']
-    # results['img_Longitude'] = results['Longitude']
-    # results_px = results.drop(columns=["Latitude", "Longitude"]).copy()
-    # renaming={'px_Latitude':'Latitude',
-    #          'px_Longitude':'Longitude',
-    # }
-    # results_px = results_px.rename(columns=renaming)
 
     if save_path:
-        results[['Latitude','Longitude','Elevation']].to_csv(save_path, index=False)
+        results[["Latitude", "Longitude", "Elevation"]].to_csv(save_path, index=False)
 
     return results
+
 
 @st.cache_data
 def get_gps_coords(
@@ -299,10 +409,45 @@ def get_gps_coords(
     return gps_coords
 
 
+def get_map_with_detections(
+    locations: pd.DataFrame,
+    map_style: str = "Esri.WorldImagery",
+    zoom_start=14,
+    save_path: str = None,
+) -> folium.Map:
+    m = folium.Map(
+        location=[locations["Latitude"].mean(), locations["Longitude"].mean()],
+        zoom_start=zoom_start,
+        # attr=map_style.replace('.',"-")
+    )
+
+    folium.TileLayer(
+        map_style,
+        name=map_style.replace(".", " "),
+        control=True,
+        attr=map_style.replace(".", "-"),
+    ).add_to(m)
+
+    marker_cluster = MarkerCluster().add_to(m)
+
+    for idx, row in locations.iterrows():
+        folium.Marker(location=[row.Latitude, row.Longitude], popup=row.name).add_to(
+            marker_cluster
+        )
+
+    if save_path:
+        m.save(save_path)
+
+    return m
+
+
 # Mock API client functions (implement according to your API specs)
-def upload_to_label_studio(project_id: int, top_n: int = 0, **annotator_kwargs):
-    handler = Annotator(dotenv_path=str(DOT_ENV), **annotator_kwargs)
-    handler.upload_predictions(project_id=project_id, top_n=top_n)
+def upload_to_label_studio(project_id: int, annotator_kwargs: dict, top_n: int = 0):
+    annotator = get_annotator(annotator_kwargs=annotator_kwargs)
+
+    annotator.upload_predictions(
+        project_id=project_id, top_n=top_n, download_resources=False
+    )
 
 
 def get_project_statistics(

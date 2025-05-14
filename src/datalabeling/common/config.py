@@ -7,21 +7,27 @@ import geopy
 from PIL import Image
 
 
-@dataclass
+@dataclass  # (frozen=True)
 class Detection:
-    x_min: int = None
-    x_max: int = None
-    y_min: int = None
-    y_max: int = None
+    x_min: int
+    x_max: int
+    y_min: int
+    y_max: int
+    label: int
+    class_name: str
     score: float = None
-    label: int = None
-    class_name: str = None
     gps_loc: str = None
     image_gps_loc: str = None
     parent_image: str = None
 
     @classmethod
-    def from_coco(cls, coco: dict, image_gps_loc: str = None, gps_loc: str = None):
+    def from_coco(
+        cls,
+        coco: dict,
+        parent_image: str,
+        image_gps_loc: str = None,
+        gps_loc: str = None,
+    ):
         bbox = coco["bbox"]
         label = coco["category_id"]
         class_ = coco["category_name"]
@@ -37,6 +43,7 @@ class Detection:
             score=score,
             image_gps_loc=image_gps_loc,
             gps_loc=gps_loc,
+            parent_image=parent_image,
         )
 
         return det
@@ -45,6 +52,34 @@ class Detection:
         self,
     ):
         return vars(self)
+
+    def to_ls(
+        self, from_name, to_name, label_type, img_height: int, img_width: int
+    ) -> dict:
+        # formatting the prediction to work with Label studio
+        score = self.score
+        if not isinstance(score, float):
+            score = 0.0
+        template = {
+            "from_name": from_name,
+            "to_name": to_name,
+            "type": label_type,
+            "original_width": img_width,
+            "original_height": img_height,
+            "image_rotation": 0,
+            "value": {
+                label_type: [
+                    self.label,
+                ],
+                "x": self.x_min / img_width * 100,
+                "y": self.y_min / img_height * 100,
+                "width": self.w / img_width * 100,
+                "height": self.h / img_height * 100,
+                "rotation": 0,
+            },
+            "score": score,
+        }
+        return template
 
     def get_base_image(self) -> Image.Image:
         assert self.parent_image is not None, "Parent image is not defined"

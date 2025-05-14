@@ -18,52 +18,30 @@ from tqdm import tqdm
 from ultralytics import YOLO
 
 from ..common.annotation_utils import GPSUtils, ImageProcessor
-from ..common.config import Detection
+from ..common.config import Detection, PredictionConfig
 
 logger = logging.getLogger(__name__)
 
 
 class Detector(object):
     def __init__(
-        self,
-        path_to_weights: str,
-        detection_model: UltralyticsDetectionModel = None,
-        confidence_threshold: float = 0.1,
-        overlap_ratio: float = 0.1,
-        tilesize: int | None = 1280,
-        imgsz: int = 1280,
-        device: str = None,
-        use_sliding_window: bool = True,
+        self, detection_model: UltralyticsDetectionModel, config: PredictionConfig
     ):
-        """_summary_
-
-        Args:
-            path_to_weights (str): _description_
-            confidence_threshold (float, optional): _description_. Defaults to 0.1.
-            overlap_ratio (float, optional): _description_. Defaults to 0.1.
-            tilesize (int | None, optional): _description_. Defaults to 1280.
-            imgsz (int, optional): _description_. Defaults to 1280.
-            device (str, optional): _description_. Defaults to None.
-            use_sliding_window (bool, optional): _description_. Defaults to True.
-            is_yolo_obb (bool, optional): _description_. Defaults to False.
-        """
-        if device is None:
-            device = "cuda" if torch.cuda.is_available() else "cpu"
-        self.tilesize = tilesize
-        self.imgsz = imgsz
-        self.overlapratio = overlap_ratio
-        self.use_sliding_window = use_sliding_window
-
+        self.config = config
         self.detection_model = detection_model
 
-        if self.detection_model is None:
-            logger.info(f"Computing device: {device}")
+    def set_detection_model(self, detection_model, path_to_weights=None):
+        if detection_model:
+            self.detection_model = detection_model
+
+        else:
+            logger.info(f"Computing device: {self.config.device}")
 
             self.detection_model = UltralyticsDetectionModel(
                 model=YOLO(path_to_weights, task="detect"),
-                confidence_threshold=confidence_threshold,
-                image_size=self.imgsz,
-                device=device,
+                confidence_threshold=self.config.confidence_threshold,
+                image_size=self.config.imgsz,
+                device=self.config.device,
             )
 
     # TODO: batch predictions with slicing
@@ -88,6 +66,7 @@ class Detector(object):
             )
             detections = self._format_detections(
                 detections=detections,
+                image_path=image_path,
                 image_gps_loc=image_gps,
                 image=Image.open(image_path),
             )
@@ -99,15 +78,15 @@ class Detector(object):
         else:
             assert isinstance(image, Image.Image)
 
-        if self.use_sliding_window:
-            tilesize = override_tilesize or self.tilesize
+        if self.config.use_sliding_window:
+            tilesize = override_tilesize or self.config.tilesize
             result = get_sliced_prediction(
                 image,
                 self.detection_model,
                 slice_height=tilesize,
                 slice_width=tilesize,
-                overlap_height_ratio=self.overlapratio,
-                overlap_width_ratio=self.overlapratio,
+                overlap_height_ratio=self.config.overlap_ratio,
+                overlap_width_ratio=self.config.overlap_ratio,
                 postprocess_type=sahi_prostprocess,
                 postprocess_match_metric="IOU",
                 verbose=verbose,
@@ -135,17 +114,26 @@ class Detector(object):
             gps_coords = gps_info
 
         detections = self._format_detections(
-            detections=detections, image_gps_loc=gps_coords, image=image
+            detections=detections,
+            image_path=image_path,
+            image_gps_loc=gps_coords,
+            image=image,
         )
 
         return detections
 
     def _format_detections(
-        self, detections: list[Detection], image_gps_loc: str, image: Image.Image
+        self,
+        detections: list[Detection],
+        image_path: str,
+        image_gps_loc: str,
+        image: Image.Image,
     ):
         # format detections
         detections = [
-            Detection.from_coco(pred, image_gps_loc=image_gps_loc, gps_loc=None)
+            Detection.from_coco(
+                pred, parent_image=image_path, image_gps_loc=image_gps_loc, gps_loc=None
+            )
             for pred in detections
         ]
 
@@ -366,34 +354,3 @@ class Detector(object):
         )
 
         return dfs
-
-    def format_prediction(self, pred: dict, img_height: int, img_width: int):
-        """Formatting the prediction to work with Label studio
-
-        Args:
-            pred (dict): prediction in coco format
-            img_height (int): image height
-            img_width (int): image width
-
-        Returns:
-            dict: Label studio formated prediction
-        """
-        x, y, width, height = pred["bbox"]
-        label = pred["category_name"]
-        score = pred["score"]
-
-        template = {
-            "from_name": "label",
-            "to_name": "image",
-            "type": "rectanglelabels",
-            "value": {
-                "rectanglelabels": [label],
-                "x": x / img_width * 100,
-                "y": y / img_height * 100,
-                "width": width / img_width * 100,
-                "height": height / img_height * 100,
-            },
-            "score": score,
-        }
-
-        return template
