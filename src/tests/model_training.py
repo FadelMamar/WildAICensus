@@ -1,5 +1,5 @@
 from datalabeling.common.config import TrainingConfig
-from datalabeling.common.pipeline import ModelTraining, Pipeline
+from datalabeling.common.pipeline import ModelTrainingStep, Pipeline
 
 
 if __name__ == "__main__":
@@ -14,29 +14,44 @@ if __name__ == "__main__":
     # training_cfg.herdnet_lr_milestones = [15, 25]
     # training_cfg.herdnet_val_batchsize = 4
 
-    # training_cfg.yolo_yaml = (
-    #     r"D:\datalabeling\configs\yolo_configs\data\data_config.yaml"
-    # )
-    # training_cfg.yolo_arch_yaml = (
-    #     r"D:\datalabeling\configs\yolo_configs\models\yolov8-ghost-p2.yaml"
-    # )
-    # training_cfg.path_weights = None
+    training_cfg.yolo_yaml = (
+        r"D:\datalabeling\configs\yolo_configs\data\data_config.yaml"
+    )
+    training_cfg.yolo_arch_yaml = (
+        r"D:\datalabeling\configs\yolo_configs\models\yolov8-rtdetr-p1-p4.yaml"
+    )
+    training_cfg.path_weights = r"D:\datalabeling\base_models_weights\best.pt"
 
     # training_cfg.ultralytics_pos_weight = 10.0
 
-    training_cfg.cls_label_smoothing = 0.0
+    training_cfg.cls_label_smoothing = 1e-1
     training_cfg.cls_num_classes = 2
-    training_cfg.cls_train_dir = (
-        r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\train"
-    )
-    training_cfg.cls_val_dir = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\val"
-    training_cfg.imgsz = 96
-    training_cfg.batchsize = 16
+    training_cfg.weight_decay = 5e-1
 
-    training_step = ModelTraining(
+    training_cfg.cls_data_dir = r"D:\datalabeling\.tmp\cls-features"
+    training_cfg.cls_is_features = True
+
+    training_cfg.imgsz = 640  # not for cls_is_features
+
+    training_cfg.batchsize = 32
+    training_cfg.epochs = 15
+
+    training_cfg.task = "detect"  # ultralytics
+
+    training_cfg.is_rtdetr = False
+
+    training_cfg.lr0 = 3e-4
+    training_cfg.lrf = 1e-2
+    training_cfg.patience = 20
+
+    training_cfg.project_name = "classifier"
+    training_cfg.run_name = "demo"
+
+    training_step = ModelTrainingStep(
         training_cfg=training_cfg,
         herdnet_loss=None,
         herdnet_training_backend="pl",  # original or pl
+        classifier_training_backend="pl",  # sk, pl, ultralytics
         model_type="classifier",
     )
 
@@ -47,4 +62,4 @@ if __name__ == "__main__":
     )
 
     ## uncomment to run
-    # pipe.run()
+    pipe.run()

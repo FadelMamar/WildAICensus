@@ -73,46 +73,58 @@ def load_classification_data():
         # device="cpu",
     )
 
+    handler = ClassificationDatasetBuilder(
+        eval_config,
+    )
+
     source_dirs = [
         # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\train_tiled\images",
         # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\val_tiled\images",
         # r"D:\PhD\Data per camp\DetectionDataset\WAID\val\images",
         # r"D:\PhD\Data per camp\DetectionDataset\savmap\images",
         r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
+        # r"D:\general_dataset\tiled-data\val\images",
+        r"D:\general_dataset\tiled-data\test\images",
     ]
 
-    handler = ClassificationDatasetBuilder(
-        detector,
-        eval_config,
-        source_dirs=source_dirs,
-        output_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls-features\train",
-        feature_extractor=FeatureExtractor(
-            hf_model_path="facebook/dinov2-with-registers-small"
-        ),
+    handler.set_dirs(
+        source_dirs=source_dirs, output_dir=r"D:\datalabeling\.tmp\cls-features\train"
     )
 
     handler.run(
         strategy="gt",
         save_true_negatives=True,
-        bbox_resize_factor=2,
-        tn_kwargs=dict(w=50, h=50, number=3),
+        feature_extractor=FeatureExtractor(),
+        detector=detector,
+        bbox_resize_factor=1,  # resizes the bbox for tn,tp,fp
+        tn_kwargs=dict(w=96, h=96, number=3),  # to disable use {}
+        tp_kwargs=dict(w=96, h=96),  # or {} to use actual bbox
     )
 
 
 def load_classification_features_data():
-    from datalabeling.common.io import ClassifierFeaturesData
-    from torch.utils.data import DataLoader
+    from datalabeling.common.io import ClassifierDataModule
 
-    data = ClassifierFeaturesData(
-        split_data_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls-features\train"
+    data = ClassifierDataModule(
+        data_dir=r"D:\datalabeling\.tmp\cls-features",
+        batch_size=32,
+        is_features=True,
+        img_size=96,
     )
-    loader = DataLoader(data, batch_size=8, shuffle=False)
 
-    print("labels_map: ", data.labels_map)
+    data.setup("fit")
 
-    feature, label = next(iter(loader))
+    for tr_batch in tqdm(data.train_dataloader(), desc="train loader"):
+        pass
 
-    return feature, label
+    for val_batch in tqdm(data.val_dataloader(), desc="train loader"):
+        pass
+
+    # print("labels_map: ", data.labels_map)
+
+    # feature, label = next(iter(loader))
+
+    # return tr_batch, val_batch
 
 
 if __name__ == "__main__":
@@ -120,4 +132,4 @@ if __name__ == "__main__":
 
     # load_classification_data()
 
-    # feature,label = load_classification_features_data()
+    # load_classification_features_data()
