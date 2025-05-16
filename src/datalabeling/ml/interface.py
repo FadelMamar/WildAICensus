@@ -26,7 +26,7 @@ import torch
 logger = logging.getLogger(__name__)
 
 
-class InferenceEnginge(object):
+class InferenceEngine(object):
     def __init__(self, config: PredictionConfig):
         self.config = config
 
@@ -104,7 +104,7 @@ class InferenceEnginge(object):
         return results
 
 
-class Annotator(InferenceEnginge):
+class Annotator(InferenceEngine):
     def __init__(
         self,
         config: PredictionConfig,

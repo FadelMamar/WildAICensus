@@ -30,8 +30,8 @@ from ..common.annotation_utils import GPSUtils, ImageProcessor
 from ..common.config import Detection, PredictionConfig
 
 
-
 logger = logging.getLogger(__name__)
+
 
 class HerdnetTrainer(L.LightningModule):
     def __init__(
@@ -367,6 +367,7 @@ def get_image_classifier_module(num_classes: int, cls_is_features: bool = False)
 
     return model
 
+
 class Detector(object):
     def __init__(
         self, detection_model: UltralyticsDetectionModel, config: PredictionConfig
@@ -400,28 +401,21 @@ class Detector(object):
         nms_iou: float = None,
         verbose: int = 0,
     ) -> list[Detection]:
-        # predict using inference service
-        if isinstance(inference_service_url, str):
-            detections, image_gps = Detector.predict_url(
-                image_path=image_path,
-                inference_service_url=inference_service_url,
-                timeout=timeout,
-            )
-            detections = self._format_detections(
-                detections=detections,
-                image_path=image_path,
-                image_gps_loc=image_gps,
-                image=Image.open(image_path),
-            )
-
-        # predict using local model
         if image is None:
             assert image_path is not None, "Provide the image path."
             image = Image.open(image_path)
         else:
             assert isinstance(image, Image.Image)
 
-        if self.config.use_sliding_window:
+        # predict using inference service
+        if isinstance(inference_service_url, str):
+            detections = Detector.predict_url(
+                image_path=image_path,
+                inference_service_url=inference_service_url,
+                timeout=timeout,
+            )
+
+        elif self.config.use_sliding_window:
             tilesize = override_tilesize or self.config.tilesize
             result = get_sliced_prediction(
                 image,
@@ -436,6 +430,7 @@ class Detector(object):
                 postprocess_match_threshold=postprocess_match_threshold or nms_iou,
             )
             detections = result.to_coco_annotations()
+
         else:
             result = get_prediction(
                 image=image,
@@ -499,24 +494,19 @@ class Detector(object):
         with open(image_path, "rb") as f:
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        payload = {
-            "image": img_b64,
-            "sahi_prostprocess": "NMS",
-            "override_tilesize": None,  # tilesize to use for
-            "postprocess_match_threshold": 0.5,
-            "nms_iou": None,
-        }
+            payload = {
+                "image": img_b64,
+            }
 
-        resp = requests.post(
-            inference_service_url,
-            json=payload,
-            timeout=timeout,
-        ).json()
+            resp = requests.post(
+                inference_service_url,
+                json=payload,
+                timeout=timeout,
+            ).json()
 
         detections = resp["detections"]
-        image_gps = resp["image_gps"]
 
-        return detections, image_gps
+        return detections
 
     # TODO: to debug and optimize
     def sliced_prediction(
