@@ -48,7 +48,7 @@ class FeatureExtractor(Processor):
 
         images = [Image.fromarray(image) for image in images]
 
-        inputs = self.processor(images=images, return_tensors="pt",use_fast=True).to(self.device)
+        inputs = self.processor(images=images, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             outputs = self.extractor(**inputs)
