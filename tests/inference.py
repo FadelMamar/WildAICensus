@@ -26,7 +26,7 @@ def run_inference_engine(img_path: str, num_classes: int = 2):
     )
 
     # get image classifier
-    path = r"D:\datalabeling\src\tests\runs-classifier\best-v6.ckpt"
+    path = r"D:\datalabeling\tests\runs-classifier\best-v6.ckpt"
     model = ImageClassifier.load_from_checkpoint(
         path, cls_is_features=True, map_location="cpu"
     )
@@ -69,9 +69,9 @@ def run_inference_engine(img_path: str, num_classes: int = 2):
 
 def run_annotator(
     # image_path:str,
-    num_classes: int = 2,
-    project_id=3,
+    project_id=4,
     top_n=3,
+    add_processor=True,
     mlflow_model_alias="demo",
     mlflow_model_name="labeler",
     inference_service_url=None,
@@ -89,7 +89,7 @@ def run_annotator(
     )
 
     # get image classifier
-    path = r"D:\datalabeling\src\tests\runs-classifier\best-v6.ckpt"
+    path = r"D:\datalabeling\tests\runs-classifier\best-v6.ckpt"
     model = ImageClassifier.load_from_checkpoint(
         path, cls_is_features=True, map_location="cpu"
     )
@@ -114,9 +114,11 @@ def run_annotator(
         path_to_weights=None,
         mlflow_model_alias=mlflow_model_alias,
         mlflow_model_name=mlflow_model_name,
+        tag="-" + str(add_processor),
     )
 
-    annotator.set_processor(image_processor=None, detection_processor=processor)
+    if add_processor:
+        annotator.set_processor(image_processor=None, detection_processor=processor)
 
     annotator.upload_predictions(
         project_id=project_id, top_n=top_n, download_resources=False
@@ -144,10 +146,12 @@ if __name__ == "__main__":
     #     img = image[y1:y2,x1:x2]
     #     imsave(str(i) + "_example.jpg", img)
 
-    results = run_annotator(
-        project_id=3,
-        top_n=20,
-        mlflow_model_alias="demo",
-        mlflow_model_name="labeler",
-        inference_service_url=None,
-    )
+    for add_processor in [True, False]:
+        results = run_annotator(
+            project_id=5,
+            top_n=10,
+            mlflow_model_alias="demo",
+            add_processor=add_processor,
+            mlflow_model_name="labeler",
+            inference_service_url=None,
+        )
