@@ -8,6 +8,7 @@ from datalabeling.common.pipeline import (
     ObbToDotaStep,
     Pipeline,
     YoloToObbStep,
+    ObbToYoloStep,
 )
 
 
@@ -74,20 +75,25 @@ def yolo_to_obb_dota():
     label_handler.load_map()
 
     steps = [
-        YoloToObbStep(
-            yolo_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
+        # YoloToObbStep(
+        #     yolo_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
+        #     obb_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
+        #     skip=True,
+        # ),
+        ObbToYoloStep(
             obb_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
+            yolo_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
             skip=True,
-        ),
-        ObbToDotaStep(
-            obb_img_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
-            dota_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format_dota",
-            label_map={
-                0: "wildlife",
-            },
-            skip=True,
-            clear_old=False,
-        ),
+        )
+        # ObbToDotaStep(
+        #     obb_img_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
+        #     dota_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format_dota",
+        #     label_map={
+        #         0: "wildlife",
+        #     },
+        #     skip=True,
+        #     clear_old=False,
+        # ),
     ]
 
     pipeline = Pipeline(steps)

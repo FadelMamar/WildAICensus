@@ -42,6 +42,7 @@ dependencies = [
     "animaloc",
     "pycocotools>=2.0.8",
     "folium>=0.19.5",
+    "streamlit-folium",
 ]
 
 [project.optional-dependencies]

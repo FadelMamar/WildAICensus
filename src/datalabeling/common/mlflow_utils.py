@@ -4,6 +4,21 @@ import torch
 from ..ml import Detector
 
 
+def load_registered_model(
+    alias, name, tag_to_append: str = "", mlflow_tracking_url="http://localhost:5000"
+):
+    mlflow.set_tracking_uri(mlflow_tracking_url)
+
+    client = mlflow.MlflowClient()
+
+    version = client.get_model_version_by_alias(name=name, alias=alias).version
+    modelversion = f"{name}:{version}" + tag_to_append
+    modelURI = f"models:/{name}/{version}"
+    model = mlflow.pyfunc.load_model(modelURI)
+
+    return model, modelversion
+
+
 def get_experiment_id(name: str):
     """Gets mlflow experiments id
 

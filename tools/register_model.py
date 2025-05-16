@@ -10,6 +10,7 @@ from pathlib import Path
 import torch
 import mlflow
 from datargs import parse
+import platform
 
 
 def get_experiment_id(name: str):
@@ -58,8 +59,10 @@ class DetectorWrapper(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
-        path = Path(context.artifacts["path"]).resolve().as_posix()
-        path = path.replace("\\", "/")
+        path = Path(context.artifacts["path"]).resolve()
+
+        if platform.system().lower() != "windows":
+            path = path.as_posix().replace("\\", "/")
 
         self.detection_model = UltralyticsDetectionModel(
             model=YOLO(path, task="detect"),

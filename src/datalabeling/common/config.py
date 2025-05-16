@@ -1,8 +1,133 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
-
+import math
 import torch
+import geopy
+from PIL import Image
+
+
+@dataclass  # (frozen=True)
+class Detection:
+    x_min: int
+    x_max: int
+    y_min: int
+    y_max: int
+    label: int
+    class_name: str
+    score: float = None
+    gps_loc: str = None
+    image_gps_loc: str = None
+    parent_image: str = None
+
+    @classmethod
+    def from_coco(
+        cls,
+        coco: dict,
+        parent_image: str,
+        image_gps_loc: str = None,
+        gps_loc: str = None,
+    ):
+        bbox = coco["bbox"]
+        label = coco["category_id"]
+        class_ = coco["category_name"]
+        score = coco.get("score", None)
+
+        det = cls(
+            x_min=int(bbox[0]),
+            y_min=int(bbox[1]),
+            x_max=int(bbox[0] + bbox[2]),
+            y_max=int(bbox[1] + bbox[3]),
+            class_name=class_,
+            label=label,
+            score=score,
+            image_gps_loc=image_gps_loc,
+            gps_loc=gps_loc,
+            parent_image=parent_image,
+        )
+
+        return det
+
+    def to_dict(
+        self,
+    ):
+        return vars(self)
+
+    def to_ls(
+        self, from_name, to_name, label_type, img_height: int, img_width: int
+    ) -> dict:
+        # formatting the prediction to work with Label studio
+        score = self.score
+        if not isinstance(score, float):
+            score = 0.0
+        template = {
+            "from_name": from_name,
+            "to_name": to_name,
+            "type": label_type,
+            "original_width": img_width,
+            "original_height": img_height,
+            "image_rotation": 0,
+            "value": {
+                label_type: [
+                    self.label,
+                ],
+                "x": self.x_min / img_width * 100,
+                "y": self.y_min / img_height * 100,
+                "width": self.w / img_width * 100,
+                "height": self.h / img_height * 100,
+                "rotation": 0,
+            },
+            "score": score,
+        }
+        return template
+
+    def get_base_image(self) -> Image.Image:
+        assert self.parent_image is not None, "Parent image is not defined"
+        return Image.open(self.parent_image)
+
+    @property
+    def area(
+        self,
+    ):
+        return self.w * self.h
+
+    @property
+    def x(
+        self,
+    ):
+        return math.floor((self.x_min + self.x_max) / 2)
+
+    @property
+    def y(
+        self,
+    ):
+        return math.floor((self.y_min + self.y_max) / 2)
+
+    @property
+    def w(
+        self,
+    ):
+        return int(self.x_max - self.x_min)
+
+    @property
+    def h(
+        self,
+    ):
+        return int(self.y_max - self.y_min)
+
+    @property
+    def gps_as_decimals(
+        self,
+    ):
+        assert isinstance(self.gps_loc, str)
+
+        point = geopy.Point.from_string(self.gps_loc)
+
+        lat = point.latitude
+        long = point.longitude
+        alt = point.altitude * 1e3  # converting to meters
+
+        return lat, long, alt
 
 
 @dataclass
@@ -42,10 +167,18 @@ class DataConfig:
 
 @dataclass
 class PredictionConfig:
-    slice_width: int = 640
-    slice_height: int = 640
+    imgsz: int = 960
+    tilesize: int = 960
     overlap_ratio: float = 0.2
-    min_area_ratio: float = 0.1
+    confidence_threshold: float = 0.25
+    min_area: int = 10 * 10
+    max_area: int = None
+    use_sliding_window: bool = True
+    nms_iou: float = 0.5
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # Image classifier imgsz
+    cls_imgsz: int = 96
 
 
 @dataclass
@@ -93,9 +226,11 @@ class TrainingConfig:
     cls_data_dir:str=None
     cls_train_dir: str = None
     cls_val_dir: str = None
+    cls_data_dir: str = None
     cls_monitor_metric: str = "val_f1score"
     cls_monitor_mode: str = "max"
-    cls_auto_augment:str='augmix'
+    cls_auto_augment: str = "augmix"
+    cls_is_features: bool = False
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original
@@ -184,6 +319,7 @@ class TrainingConfig:
     hsv_v: float = 0.3
     translate: float = 0.2
     mosaic: float = 0.0
+    multi_scale: bool = False
 
 
 @dataclass

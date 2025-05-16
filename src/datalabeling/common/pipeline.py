@@ -172,28 +172,44 @@ class ClassificationDataExport(PipelineStep):
         source_dirs: list[str],
         output_dir: str,
         bbox_resize_factor: float = 2.0,
+        save_true_negatives=True,
+        feature_extractor=None,
+        tn_kwargs=dict(w=50, h=50, number=3),
     ):
         self.handler = ClassificationDatasetBuilder(
-            detector, eval_config, source_dirs=source_dirs, output_dir=output_dir
+            detector,
+            eval_config,
+            source_dirs=source_dirs,
+            output_dir=output_dir,
+            feature_extractor=feature_extractor,
         )
         self.bbox_resize_factor = bbox_resize_factor
+        self.save_true_negatives = save_true_negatives
+        self.tn_kwargs = tn_kwargs
 
     def run(self, context: Dict[str, Any] = None) -> None:
-        self.handler.process_images(bbox_resize_factor=self.bbox_resize_factor)
+        self.handler.run(
+            strategy="gt",
+            save_true_negatives=self.save_true_negatives,
+            tn_kwargs=self.tn_kwargs,
+            bbox_resize_factor=self.bbox_resize_factor,
+        )
 
 
-class ModelTraining(PipelineStep):
+class ModelTrainingStep(PipelineStep):
     def __init__(
         self,
         training_cfg: TrainingConfig,
         model_type: str = "ultralytics",
         herdnet_loss=None,
         herdnet_training_backend: str = "original",
+        classifier_training_backend: str = "ultralytics",
     ):
         self.training_cfg = training_cfg
         self.model_type = model_type
         self.herdnet_loss = herdnet_loss
         self.herdnet_training_backend = herdnet_training_backend
+        self.classifier_training_backend = classifier_training_backend
 
     def run(self, context: Dict[str, Any] = None) -> None:
         trainer = TrainingManager(
@@ -201,6 +217,7 @@ class ModelTraining(PipelineStep):
             herdnet_loss=self.herdnet_loss,
             herdnet_training_backend=self.herdnet_training_backend,
             model_type=self.model_type,
+            classifier_training_backend=self.classifier_training_backend,
         )
         trainer.run()
 

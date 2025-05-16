@@ -9,7 +9,7 @@ import yaml
 from animaloc.eval import HerdNetEvaluator, PointsMetrics
 from animaloc.eval.lmds import HerdNetLMDS
 from animaloc.models import HerdNet, LossWrapper
-
+from tqdm import tqdm
 from animaloc.train.losses import FocalLoss
 from lightning.pytorch.callbacks import (
     EarlyStopping,
@@ -30,6 +30,9 @@ from torchvision import models
 
 from ..common.config import TrainingConfig
 from ..common.io import HerdnetData, ClassifierDataModule
+from sklearn.linear_model import SGDClassifier
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import make_pipeline
 
 from .utils import (
     get_data_cfg_paths_for_cl,
@@ -254,18 +257,23 @@ class HerdnetTrainer(L.LightningModule):
 class ImageClassifier(L.LightningModule):
     def __init__(
         self,
-        model,
+        cls_is_features: bool,
+        epochs: int = 50,
         num_classes: int = 2,
         threshold: float = 0.5,
         label_smoothing: float = 0.0,
         lr: float = 1e-3,
+        lrf: float = 1e-2,
+        weight_decay: float = 5e-3,
     ):
         super().__init__()
 
         self.save_hyperparameters(ignore=["model", "threshold"])
 
         # use a pretrained ResNet backbone
-        self.model = model
+        self.model = get_image_classifier_module(
+            cls_is_features=cls_is_features, num_classes=num_classes
+        )
         # replace final layer
         # in_features = self.model.fc.in_features
         # self.model.fc = nn.Linear(in_features, num_classes)
@@ -288,7 +296,7 @@ class ImageClassifier(L.LightningModule):
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
 
-    def forward(self, x):
+    def forward(self, x) -> torch.Tensor:
         out = self.model(x)
 
         if isinstance(out, Sequence):
@@ -309,7 +317,10 @@ class ImageClassifier(L.LightningModule):
 
         logits = self(x)
         loss = F.cross_entropy(
-            logits, y, label_smoothing=self.label_smoothing, weight=weight
+            logits,
+            y.long().squeeze(1),
+            label_smoothing=self.label_smoothing,
+            weight=weight,
         )
 
         self.log("train_loss", loss, on_step=False, on_epoch=True)
@@ -318,21 +329,54 @@ class ImageClassifier(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch
+        y = y.long().squeeze(1)
 
         logits = self(x)
         loss = F.cross_entropy(logits, y, label_smoothing=self.label_smoothing)
 
         for name, metric in self.metrics.items():
             metric.update(logits, y)
-            self.log(f"val_{name}", metric)
+            self.log(f"val_{name}", metric, prog_bar=True, on_epoch=True)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
 
+    def predict_step(self, x):
+        with torch.no_grad():
+            probs = self.forward(x).softmax(dim=1)
+            pred = probs.argmax(1)
+
+        return probs, pred
+
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
-        # optional: scheduler
-        scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
-        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
+        optimizer = torch.optim.Adam(
+            params=self.model.parameters(),
+            lr=self.hparams.lr,
+            weight_decay=self.hparams.weight_decay,
+        )
+        lr_scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer,
+            T_0=self.hparams.epochs,
+            T_mult=1,
+            eta_min=self.hparams.lr * self.hparams.lrf,
+        )
+        return [optimizer], [lr_scheduler]
+
+
+def get_image_classifier_module(num_classes: int, cls_is_features: bool = False):
+    if cls_is_features:
+        model = torch.nn.Sequential(
+            torch.nn.LazyLinear(128),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(p=0.2),
+            torch.nn.LazyLinear(128),
+            torch.nn.ReLU(),
+            torch.nn.LazyLinear(num_classes),
+        )
+    else:
+        model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+        model.classifier = torch.nn.LazyLinear(num_classes)
+
+    return model
 
 
 class TrainingManager:
@@ -341,16 +385,20 @@ class TrainingManager:
         args: TrainingConfig,
         herdnet_loss: list = None,
         herdnet_training_backend: str = "original",
+        classifier_training_backend: str = "pl",
         model_type: str = "ultralytics",
     ):
         self.args = args
         self.herdnet_loss = herdnet_loss
         self.model_type = model_type
         self.herdnet_training_backend = herdnet_training_backend
+        self.classifier_training_backend = classifier_training_backend
 
         assert model_type in ["ultralytics", "herdnet", "classifier"], (
             f"this model_type ``{model_type}`` is not supported."
         )
+
+        assert classifier_training_backend in ["pl", "ultralytics", "sk"]
 
         assert herdnet_training_backend in ["original", "pl"], (
             "the provided backend is not supported."
@@ -405,33 +453,26 @@ class TrainingManager:
     def _load_classifier_model(
         self,
     ):
-        # TODO
-        # if self.args.path_weights:
-        #     model = ...
-        #     raise NotImplementedError()
-        # else:
-        #     model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-        #     model.classifier = torch.nn.Linear(576, self.args.cls_num_classes)
+        if self.classifier_training_backend == "ultralytics":
+            return self._load_ultralytics_model()
 
-        #     routine = ImageClassifier(
-        #         model=model,
-        #         num_classes=self.args.cls_num_classes,
-        #         threshold=self.args.cls_thrs,
-        #         label_smoothing=self.args.cls_thrs,
-        #         lr=self.args.lr0,
-        #     )
-        
-        
-        path = self.args.path_weights
-        if self.args.yolo_arch_yaml:
-            path = self.args.yolo_arch_yaml
-        routine = YOLO(path, task='classify', verbose=False)
-        
-        if self.args.path_weights and self.args.yolo_arch_yaml:
-            routine = routine.load(self.args.path_weights)
-                
+        elif self.classifier_training_backend == "sk":
+            # pipe = make_pipeline(StandardScaler(),SGDClassifier(loss='hinge',n_jobs=4))
+            return SGDClassifier(loss="hinge", n_jobs=4)
 
-        return routine
+        # using pl
+        model = ImageClassifier(
+            cls_is_features=self.args.cls_is_features,
+            epochs=self.args.epochs,
+            num_classes=self.args.cls_num_classes,
+            threshold=self.args.cls_thrs,
+            label_smoothing=self.args.cls_label_smoothing,
+            lr=self.args.lr0,
+            lrf=self.args.lrf,
+            weight_decay=self.args.weight_decay,
+        )
+
+        return model
 
     def _load_herdnet(
         self,
@@ -521,26 +562,57 @@ class TrainingManager:
         else:
             raise NotImplementedError
 
+    def _train_classifier_sklearn(
+        self,
+    ):
+        logger.info("Training classifier using extracted features...")
+
+        # data
+        datamodule = ClassifierDataModule(
+            data_dir=self.args.cls_data_dir,
+            batch_size=self.args.batchsize,
+            num_workers=os.cpu_count() // 4,
+            img_size=None,
+            is_features=True,
+        )
+        datamodule.setup("fit")
+        classes = np.array(datamodule.train_dataset.classes)
+        for e in tqdm(range(self.args.epochs), desc="epochs..."):
+            for features, labels in datamodule.train_dataloader():
+                self.model.partial_fit(
+                    X=features.cpu().numpy(),
+                    y=labels.cpu().long().numpy().ravel(),
+                    classes=classes,
+                )
+        return self.model
+
     def _run_classifier(
         self,
     ):
-        if isinstance(self.model, YOLO):
-            # self.model.train(data=self.args.cls_data_dir, 
-            #           epochs=self.args.epochs, 
-            #           imgsz=self.args.imgsz,
-            #           lr0=self.args.lr0,
-            #           auto_augment=self.args.cls_auto_augment,
-            #           )
-            self._train_ultralytics(self.args.cls_data_dir,imgsz=self.args.imgsz)
-            
-        # data
+        if self.classifier_training_backend == "ultralytics":
+            self._train_ultralytics(data_cfg=self.args.cls_data_dir)
+
+        elif self.classifier_training_backend == "sk":
+            mlflow.sklearn.autolog(
+                log_models=True, log_datasets=False, log_model_signatures=True
+            )
+            try:
+                with mlflow.start_run() as run:
+                    self._train_classifier_sklearn()
+            except:
+                mlflow.end_run()
+                with mlflow.start_run() as run:
+                    self._train_classifier_sklearn()
+
+        # using pytorch lightning
         datamodule = ClassifierDataModule(
-            train_dir=self.args.cls_train_dir,
-            val_dir=self.args.cls_val_dir,
+            data_dir=self.args.cls_data_dir,
             batch_size=self.args.batchsize,
             num_workers=os.cpu_count() // 4,
             img_size=self.args.imgsz,
+            is_features=self.args.cls_is_features,
         )
+
         datamodule.setup("fit")
 
         # loggers and callbacks
@@ -548,13 +620,15 @@ class TrainingManager:
             experiment_name=self.args.project_name,
             run_name=self.args.run_name,
             tracking_uri=self.args.mlflow_tracking_uri,
-            log_model=True,
-            
+            log_model=False,
+            # artifact_location='checkpoints',
+            checkpoint_path_prefix="checkpoints",
         )
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.args.cls_workdir,
             monitor=self.args.cls_monitor_metric,
             mode=self.args.cls_monitor_mode,
+            filename="best",
             save_weights_only=True,
             save_last=True,
             save_top_k=1,
@@ -575,7 +649,6 @@ class TrainingManager:
         trainer = L.Trainer(
             max_epochs=self.args.epochs,
             logger=mlf_logger,
-            # accumulate_grad_batches=max(int(128 / self.args.batchsize), 1),
             precision="bf16-mixed",
             callbacks=callbacks,
             detect_anomaly=False,
@@ -777,6 +850,7 @@ class TrainingManager:
             dirpath=workdir,
             monitor="val_f1-score",
             mode="max",
+            filename="best.ckpt",
             save_weights_only=True,
             save_last=True,
             save_top_k=1,
@@ -884,7 +958,7 @@ class TrainingManager:
             optimizer=args.optimizer,
             project=args.project_name,
             patience=args.patience,
-            multi_scale=False,
+            multi_scale=args.multi_scale,
             degrees=args.rotation_degree,
             mixup=args.mixup,
             scale=args.scale,
@@ -901,7 +975,7 @@ class TrainingManager:
             hsv_h=args.hsv_h,
             hsv_v=args.hsv_v,
             translate=args.translate,
-            auto_augment=self.args.cls_auto_augment,
+            auto_augment=args.cls_auto_augment,
             exist_ok=True,
             seed=args.seed,
             resume=resume,

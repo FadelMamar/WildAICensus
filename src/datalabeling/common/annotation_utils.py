@@ -26,6 +26,8 @@ from skimage.io import imread, imsave
 from tqdm import tqdm
 from ultralytics import SAM
 from ultralytics.data.dataset import YOLOConcatDataset, YOLODataset
+from label_studio_sdk.client import LabelStudio
+
 
 from .config import DataConfig
 from .io import save_json
@@ -61,6 +63,66 @@ def check_label_format(loaded_df: pd.DataFrame) -> str:
         raise NotImplementedError(
             f"The number of features ({num_features}) in the label file is wrong. Check yolo or yolo-obb format from ultralytics."
         )
+
+
+def resize_bbox(factor: float, x1, x2, y1, y2, img_width, img_height):
+    box_size = max(x2 - x1, y2 - y1)
+
+    x1 = max(x1 - (factor - 1.0) * box_size / 2, 0)
+    y1 = max(y1 - (factor - 1.0) * box_size / 2, 0)
+    x2 = min(x2 + (factor - 1.0) * box_size / 2, img_width)
+    y2 = min(y2 + (factor - 1.0) * box_size / 2, img_height)
+
+    out = list(map(int, [x1, x2, y1, y2]))
+    return out
+
+
+def get_project_stats(labelstudio_client: LabelStudio, project_id: int, annotator_id=0):
+    project = labelstudio_client.projects.get(id=project_id)
+
+    images_count = dict()
+
+    # Iterating
+    tasks = labelstudio_client.tasks.list(
+        project=project.id,
+    )
+    labels = []
+    for task in tasks:
+        try:
+            result = task.annotations[annotator_id]["result"]
+        except Exception:
+            # traceback.print_exc()
+            continue
+
+        img_labels = []
+        for annot in result:
+            img_labels = annot["value"]["rectanglelabels"] + img_labels
+        labels = labels + img_labels
+
+        # update stats holder
+        for label in set(img_labels):
+            if label in images_count.keys():
+                images_count[label] += 1
+            else:
+                images_count[label] = 1
+
+    instances = {
+        f"{k}": [
+            labels.count(k),
+        ]
+        for k in set(labels)
+    }
+    images_count = {
+        k: [
+            v,
+        ]
+        for k, v in images_count.items()
+    }
+
+    instances_count = pd.DataFrame.from_dict(instances)
+    images_count = pd.DataFrame.from_dict(images_count)
+
+    return instances_count, images_count
 
 
 def convert_yolo_to_obb(
@@ -1017,6 +1079,12 @@ class GPSUtils:
                 info[k] = list(v)
 
         return info
+
+    @staticmethod
+    def to_decimal(gps_coord: str):
+        lat, long, alt = geopy.Point.from_string(gps_coord)
+        coords = lat, long, alt * 1e3
+        return coords
 
     @staticmethod
     def get_gps_coord(
