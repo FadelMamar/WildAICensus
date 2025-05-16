@@ -83,11 +83,11 @@ class DataHandler:
         df_list = list()
         labels_format = set()
         num_empty = 0
-        paths = images_paths or Path(images_dir).glob("*")
+        paths = list(images_paths) or list(Path(images_dir).glob("*"))
 
         logger.info("Loading groundtruth...")
 
-        for image_path in paths:
+        for image_path in tqdm(paths):
             # as Path object
             image_path = Path(image_path)
 
@@ -240,6 +240,8 @@ class DataHandler:
         empty_ratio: Optional[float] = None,
         empty_frac: Optional[float] = None,
     ) -> Tuple[ConcatDataset, pd.DataFrame, int]:
+        
+        
         cfg = load_yaml(yaml_path)
 
         assert split in cfg, f"Unknown split {split}"
@@ -406,7 +408,7 @@ class ClassifierDataModule(L.LightningDataModule):
             shuffle=True,
             # num_workers=self.num_workers,
             # persistent_workers=True,
-            # pin_memory=torch.cuda.is_available(),
+            pin_memory=torch.cuda.is_available(),
         )
 
     def val_dataloader(self):
@@ -416,7 +418,7 @@ class ClassifierDataModule(L.LightningDataModule):
             shuffle=False,
             # num_workers=self.num_workers,
             # persistent_workers=True,
-            # pin_memory=torch.cuda.is_available(),
+            pin_memory=torch.cuda.is_available(),
         )
 
 
@@ -663,9 +665,9 @@ class HerdnetData(L.LightningDataModule):
             self.train_dataset,
             batch_size=self.batch_size,
             shuffle=True,
-            num_workers=self.num_workers,
+            # num_workers=self.num_workers,
             pin_memory=self.pin_memory,
-            persistent_workers=True,
+            # persistent_workers=True,
         )
 
     def val_dataloader(self):
@@ -676,9 +678,9 @@ class HerdnetData(L.LightningDataModule):
             batch_size=self.val_batch_size,
             shuffle=False,
             sampler=torch.utils.data.SequentialSampler(self.val_dataset),
-            num_workers=self.num_workers,
+            # num_workers=self.num_workers,
             collate_fn=self.val_collate_fn,
-            persistent_workers=True,
+            # persistent_workers=True,
         )
 
     def test_dataloader(self):

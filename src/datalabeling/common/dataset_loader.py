@@ -16,6 +16,7 @@ from .annotation_utils import (
     ImageProcessor,
     LabelstudioConverter,
     load_coco_annotations,
+    resize_bbox
 )
 from .config import DataConfig, LabelConfig, EvaluationConfig
 from .io import load_yaml, DataHandler
@@ -218,7 +219,7 @@ class ClassificationDatasetBuilder:
         self,
         strategy: str = "gt",
         detector: Detector = None,
-        feature_extractor=None,
+        feature_extractor:FeatureExtractor=None,
         bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
         tn_kwargs=dict(w=50, h=50, number=2),
@@ -241,29 +242,52 @@ class ClassificationDatasetBuilder:
         if strategy == "fp":
             assert self.detector is not None, "Provide a detector engine"
             self.save_false_positives()
-
-    def save(
+    
+    def _save(
         self,
         image: np.ndarray,
         label_name: str | int,
         file_name: str,
         tag: str,
+        ext:str='.jpg'
     ):
-        if image.sum() < 1:
+        # skipping images 80% black
+        frac = (image==0.).sum()/image.sum()
+        if frac > 0.8 and self.feature_extractor:
             logger.info(f"Skipping {os.path.basename(file_name)}. It's all black.")
             return None
 
         img_dir = Path(self.output_dir) / str(label_name)
         img_dir.mkdir(exist_ok=True, parents=False)
-        save_path = img_dir / f"{Path(file_name).stem}#{tag}.jpg"
-
-        if self.feature_extractor is None:
+        save_path = img_dir / f"{Path(file_name).stem}#{tag}"
+        save_path = save_path.with_suffix(ext)
+        
+        if ext != '.npy':
             cv2.imwrite(save_path, image)
         else:
-            save_path = save_path.with_suffix(".npy")
-            features = self.feature_extractor.get_features(image)
-            np.save(save_path, features)
-
+            np.save(save_path, image)
+        
+        return None
+        
+    
+    def _save_batch(self,batch:list[dict]):
+        
+        if len(batch) < 1:
+            return None
+        
+        if self.feature_extractor:
+            images = [data['image'] for data in batch]
+            batch_features = self.feature_extractor.run(images)
+            
+                
+        for i,data in enumerate(batch):
+            if self.feature_extractor:
+                data['image'] = batch_features[i]
+                self._save(ext='.npy',**data)
+            else:
+                self._save(ext='.jpg',**data)
+    
+            
     def resize_bbox(self, factor: float, x1, x2, y1, y2, img_width, img_height):
         box_size = max(x2 - x1, y2 - y1)
 
@@ -302,6 +326,7 @@ class ClassificationDatasetBuilder:
             size=number,
         )
         count = 0
+        batch = []
         for x, y in product(xs, ys):
             if count == number:
                 break
@@ -315,19 +340,24 @@ class ClassificationDatasetBuilder:
             y1 = y - h_ / 2
             y2 = y + h_ / 2
 
-            x1, x2, y1, y2 = self.resize_bbox(
+            x1, x2, y1, y2 = resize_bbox(
                 bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
             )
-
-            self.save(
-                image=image[y1:y2, x1:x2],
-                label_name=label_name,
-                file_name=file_name,
-                tag=f"#{y1}_{y2}_{x1}_{x2}",
-            )
-
+        
+            # record
+            data = dict(image=image[y1:y2, x1:x2],
+                        label_name=label_name,
+                        file_name=file_name,
+                        tag=f"#{y1}_{y2}_{x1}_{x2}"                        
+                        )
+            batch.append(data)
             count += 1
-
+            
+        # save data
+        self._save_batch(batch)
+        
+        return None
+        
     def _save_gt(
         self,
         df_gt,
@@ -338,7 +368,9 @@ class ClassificationDatasetBuilder:
     ):
         image = Image.open(file_name).convert("RGB")
         image = np.asarray(image)
-
+        
+        batch = []
+        count = 0
         for i, row in df_gt.iterrows():
             x1 = int(row["x_min"])
             y1 = int(row["y_min"])
@@ -357,16 +389,23 @@ class ClassificationDatasetBuilder:
 
             label_name = "groundtruth"
 
-            x1, x2, y1, y2 = self.resize_bbox(
+            x1, x2, y1, y2 = resize_bbox(
                 bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
             )
 
-            self.save(
-                image=image[y1:y2, x1:x2],
-                label_name=label_name,
-                file_name=file_name,
-                tag=f"#{y1}_{y2}_{x1}_{x2}",
-            )
+            # record
+            data = dict(image=image[y1:y2, x1:x2],
+                        label_name=label_name,
+                        file_name=file_name,
+                        tag=f"#{y1}_{y2}_{x1}_{x2}"                        
+                        )
+            batch.append(data)
+            count += 1
+            
+        # save data
+        self._save_batch(batch)
+        
+        return None
 
     def save_groundtruth(
         self,
@@ -444,7 +483,9 @@ class ClassificationDatasetBuilder:
             image = Image.open(file_name).convert("RGB")
             img_width, img_height = image.size
             image = np.asarray(image)
-
+            
+            batch = []
+            count = 0
             for i, row in df_det.iterrows():
                 try:
                     x1 = int(row["pred_x_min"])
@@ -462,16 +503,23 @@ class ClassificationDatasetBuilder:
                     # label_name = "false_negatives"
                     continue
 
-                x1, x2, y1, y2 = self.resize_bbox(
+                x1, x2, y1, y2 = resize_bbox(
                     self.bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
                 )
 
-                self.save(
-                    image=image[y1:y2, x1:x2],
-                    label_name=label_name,
-                    file_name=file_name,
-                    tag=f"#{y1}_{y2}_{x1}_{x2}",
-                )
+                # record
+                data = dict(image=image[y1:y2, x1:x2],
+                            label_name=label_name,
+                            file_name=file_name,
+                            tag=f"#{y1}_{y2}_{x1}_{x2}"                        
+                            )
+                batch.append(data)
+                count += 1
+                
+            # save data
+            self._save_batch(batch)
+            
+        return None
 
 
 class DataPreparation:

@@ -3,6 +3,7 @@ import numpy as np
 import torch
 import albumentations as A
 from abc import ABC, abstractmethod
+from typing import Sequence
 
 
 from .config import Detection
@@ -36,20 +37,25 @@ class FeatureExtractor(Processor):
         from transformers import AutoImageProcessor, AutoModel
 
         self.processor = AutoImageProcessor.from_pretrained(hf_model_path)
-        self.extractor = AutoModel.from_pretrained(hf_model_path)
+        self.extractor = AutoModel.from_pretrained(hf_model_path,torch_dtype="auto", device_map="auto")
+        self.device = self.extractor.device
 
-    def run(self, image: np.ndarray) -> np.ndarray:
-        assert isinstance(image, np.ndarray)
+    def run(self, images: Sequence[np.ndarray]) -> np.ndarray:
+        
+        assert isinstance(images, Sequence)
+        for a in images:
+            assert isinstance(a,np.ndarray)
 
-        image = Image.fromarray(image)
+        images = [Image.fromarray(image) for image in images]
 
-        inputs = self.processor(images=image, return_tensors="pt")
+        inputs = self.processor(images=images, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
             outputs = self.extractor(**inputs)
-        features = outputs.pooler_output.cpu().numpy().flatten()
+        features = outputs.pooler_output.cpu().reshape(len(images),-1).numpy()
 
         return features
+            
 
 
 class SuperResolution(Processor):
@@ -93,8 +99,8 @@ class Classifier(Processor):
         preprocessed = [self.transform(image=image)["image"] for image in images]
 
         if self.feature_extractor:
-            preprocessed = [self.feature_extractor.run(image) for image in preprocessed]
-            preprocessed = torch.Tensor(np.stack(preprocessed)).to(self.device)
+            preprocessed = self.feature_extractor.run(preprocessed)
+            preprocessed = torch.Tensor(preprocessed).to(self.device)
 
         with torch.no_grad():
             probs = self.model(preprocessed).softmax(1)

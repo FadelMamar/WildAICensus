@@ -43,6 +43,9 @@ dependencies = [
     "pycocotools>=2.0.8",
     "folium>=0.19.5",
     "streamlit-folium",
+    "huggingface-hub>=0.31.2",
+    "transformers>=4.51.3",
+    "accelerate>=1.7.0",
 ]
 
 [project.optional-dependencies]

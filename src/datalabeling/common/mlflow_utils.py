@@ -5,7 +5,9 @@ from ..ml import Detector
 
 
 def load_registered_model(
-    alias, name, tag_to_append: str = "", mlflow_tracking_url="http://localhost:5000"
+    alias, name, tag_to_append: str = "", 
+    mlflow_tracking_url="http://localhost:5000",
+    load_unwrapped:bool=False
 ):
     mlflow.set_tracking_uri(mlflow_tracking_url)
 
@@ -15,6 +17,9 @@ def load_registered_model(
     modelversion = f"{name}:{version}" + tag_to_append
     modelURI = f"models:/{name}/{version}"
     model = mlflow.pyfunc.load_model(modelURI)
+    
+    if load_unwrapped:
+        model = model.unwrap_python_model().detection_model
 
     return model, modelversion
 

@@ -11,6 +11,7 @@ import numpy as np
 from PIL import Image
 from skimage.io import imread, imsave
 import matplotlib.pyplot as plt
+from pathlib import Path
 
 
 def run(img_path: str, num_classes: int = 2):
@@ -84,4 +85,15 @@ if __name__ == "__main__":
         img = image[y1:y2, x1:x2]
         imsave(str(i) + "_example.jpg", img)
 
-        # plt.show()
+        plt.show()
+        
+        
+    # feature_extractor = get_processor("feature_extractor")()
+    
+    # images = Path(r"D:\PhD\Data per camp\IdentificationDataset\train\images").glob('*')
+    # images= list(images)[:10]
+    # images = [imread(p) for p in images]
+    
+    # features = feature_extractor.run(images)
+    
+    

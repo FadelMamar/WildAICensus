@@ -14,6 +14,6 @@ call set LABEL_STUDIO_URL=http://localhost:8080
 @REM call set TRAINING_API_URL = ...
 @REM call set TRAINING_API_KEY = ...
 
-call uv run streamlit run UI/app.py
+call streamlit run UI/app.py
 
 call deactivate

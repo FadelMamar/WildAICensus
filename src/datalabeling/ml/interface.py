@@ -9,7 +9,9 @@ import pandas as pd
 import numpy as np
 import mlflow
 from dotenv import load_dotenv
-from label_studio_ml.utils import get_local_path
+# from label_studio_ml.utils import get_local_path
+from label_studio_tools.core.utils.io import get_local_path
+
 from label_studio_sdk.client import LabelStudio
 from PIL import Image
 from tqdm import tqdm
@@ -29,9 +31,11 @@ class InferenceEnginge(object):
         self.detector = None
         self.image_processor = None
         self.detection_processor = None
+        self.model_tag = 'None'
 
-    def set_detector(self, detector: Detector):
+    def set_detector(self, detector: Detector, model_tag:str):
         self.detector = detector
+        self.model_tag = model_tag
 
     def set_processor(
         self, image_processor: Processor = None, detection_processor: Processor = None
@@ -99,14 +103,10 @@ class Annotator(InferenceEnginge):
         self,
         config: PredictionConfig,
         dotenv_path: str = None,
-        path_to_weights: str = None,
-        mlflow_model_alias: str = "default",
-        mlflow_model_name: str = "labeler",
-        tag="",
     ):
         super().__init__(config)
 
-        # Load environment variables
+        # # Load environment variables
         if dotenv_path is not None:
             load_dotenv(dotenv_path=dotenv_path)
         else:
@@ -114,44 +114,21 @@ class Annotator(InferenceEnginge):
                 msg="Pass argument `dotenv_path` to access label studio API"
             )
 
-        # label studio client
+        # # label studio client
         LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
         API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
         self.labelstudio_client = LabelStudio(
             base_url=LABEL_STUDIO_URL, api_key=API_KEY
         )
-
-        print(API_KEY)
-
-        if path_to_weights is None:
-            TRACKING_URI = os.getenv("MLFLOW_TRACKING_URI")
-            mlflow.set_tracking_uri(TRACKING_URI)
-            model, self.modelversion = load_registered_model(
-                alias=mlflow_model_alias,
-                name=mlflow_model_name,
-                mlflow_tracking_url=TRACKING_URI,
-                tag_to_append=tag,
-            )
-
-            self.detector = Detector(
-                config=config,
-                detection_model=model.unwrap_python_model().detection_model,
-            )
-
-        else:
-            self.detector = Detector(config=config, detection_model=None)
-            self.detector.set_detection_model(
-                detection_model=None, path_to_weights=path_to_weights
-            )
-            self.modelversion = Path(path_to_weights).stem + tag
-
+        
         # LS label config
         self.from_name = "label"
         self.to_name = "image"
         self.label_type = "rectanglelabels"
 
     def upload_predictions(
-        self, project_id: int, top_n: int = 0, download_resources: bool = True
+        self, project_id: int, top_n: int = 0, #download_resources: bool = True,
+        tag:str=""
     ) -> None:
         """Uploads predictions using label studio API.
         Make sure to set the API key and url inside .env
@@ -176,18 +153,26 @@ class Annotator(InferenceEnginge):
             img_url = task.data["image"]
 
             try:
-                # using unquote to deal with special characters
+            # using unquote to deal with special characters
                 img_path = get_local_path(
-                    unquote(img_url), download_resources=download_resources
+                    unquote(img_url), download_resources=False,
+                    hostname=os.getenv("LABEL_STUDIO_URL")
                 )
+                
+                if not Path(img_path).exists():
+                   img_path = get_local_path(
+                       unquote(img_url), download_resources=True,
+                       hostname=os.getenv("LABEL_STUDIO_URL")
+                   )
+                   
+                   
             except Exception:
                 traceback.print_exc()
-                img_path = get_local_path(
-                    img_url, download_resources=download_resources
-                )
-
+                logger.warn(f'Failed to load {img_path}. Skipping...')   
+                continue
+            
             logger.info(f"Uploading predictions for: {img_path}")
-
+            
             img = Image.open(img_path)
             predictions = self.inference(image=img)
 
@@ -212,7 +197,7 @@ class Annotator(InferenceEnginge):
                 task=task_id,
                 score=max_score,
                 result=formatted_pred,
-                model_version=self.modelversion,
+                model_version=self.model_tag + tag,
             )
 
             img.close()

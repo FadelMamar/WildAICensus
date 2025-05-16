@@ -47,6 +47,10 @@ class Detection:
         )
 
         return det
+    
+    @property
+    def is_empty(self):
+        return any([self.x is None, self.y is None, self.w is None, self.h is None])
 
     def to_dict(
         self,
@@ -69,7 +73,7 @@ class Detection:
             "image_rotation": 0,
             "value": {
                 label_type: [
-                    self.label,
+                    self.class_name,
                 ],
                 "x": self.x_min / img_width * 100,
                 "y": self.y_min / img_height * 100,
@@ -223,9 +227,6 @@ class TrainingConfig:
     cls_label_smoothing: float = 0.0
     cls_thrs: float = 0.5
     cls_workdir: str = "runs-classifier"
-    cls_data_dir:str=None
-    cls_train_dir: str = None
-    cls_val_dir: str = None
     cls_data_dir: str = None
     cls_monitor_metric: str = "val_f1score"
     cls_monitor_mode: str = "max"

@@ -1,5 +1,6 @@
 from datalabeling.common.config import TrainingConfig
 from datalabeling.common.pipeline import ModelTrainingStep, Pipeline
+from datalabeling.ml.train import TrainingManager
 
 
 if __name__ == "__main__":
@@ -24,11 +25,11 @@ if __name__ == "__main__":
 
     # training_cfg.ultralytics_pos_weight = 10.0
 
-    training_cfg.cls_label_smoothing = 1e-1
+    training_cfg.cls_label_smoothing = 0.
     training_cfg.cls_num_classes = 2
-    training_cfg.weight_decay = 5e-1
+    training_cfg.weight_decay = 5e-4
 
-    training_cfg.cls_data_dir = r"D:\datalabeling\.tmp\cls-features"
+    training_cfg.cls_data_dir = r"D:\PhD\Data per camp\Classification\cls-features"
     training_cfg.cls_is_features = True
 
     training_cfg.imgsz = 640  # not for cls_is_features
@@ -45,21 +46,14 @@ if __name__ == "__main__":
     training_cfg.patience = 20
 
     training_cfg.project_name = "classifier"
-    training_cfg.run_name = "demo"
+    training_cfg.run_name = "demo-RoIClassifier"
 
-    training_step = ModelTrainingStep(
-        training_cfg=training_cfg,
+    handler = TrainingManager(
+        args=training_cfg,
         herdnet_loss=None,
         herdnet_training_backend="pl",  # original or pl
         classifier_training_backend="pl",  # sk, pl, ultralytics
         model_type="classifier",
     )
-
-    pipe = Pipeline(
-        steps=[
-            training_step,
-        ]
-    )
-
-    ## uncomment to run
-    pipe.run()
+    
+    handler.run()

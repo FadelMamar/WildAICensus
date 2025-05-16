@@ -6,6 +6,7 @@ Created on Thu Apr 24 19:29:12 2025
 """
 
 from tqdm import tqdm
+import os
 # from datalabeling.common.pipeline import ClassificationDataExport
 
 
@@ -41,13 +42,15 @@ def load_herd_net():
         continue
 
 
-def load_classification_data():
-    from datalabeling.common.config import EvaluationConfig
+def create_classification_data():
+    from datalabeling.common.config import EvaluationConfig,PredictionConfig
     from datalabeling.ml.models import Detector
+    from datalabeling.common.io import load_yaml
+    from datalabeling.common.mlflow_utils import load_registered_model
     from datalabeling.common.dataset_loader import (
         ClassificationDatasetBuilder,
-        FeatureExtractor,
     )
+    from datalabeling.common.processor import get_processor
 
     eval_config = EvaluationConfig()
     eval_config.score_threshold = 0.25
@@ -56,50 +59,79 @@ def load_classification_data():
     eval_config.uncertainty_threshold = 4
     eval_config.score_col = "max_scores"
     eval_config.tp_iou_threshold = 0.2
+    
+    pred_config = PredictionConfig(
+        imgsz=800,
+        tilesize=800,
+        overlap_ratio=0.2,
+        confidence_threshold=0.2,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=128,
+        device="cpu",
+    )
 
     # =============================================================================
     eval_config.load_results = (
         True  # Set to True to load existing predictions if applicable
     )
     # =============================================================================
+    
+    
+    
+    detection_model, model_version = load_registered_model(alias='yolo11s-obb-v1',
+                                                name='labeler',
+                                                mlflow_tracking_url="http://localhost:5000",
+                                                load_unwrapped=True
+                                                )
 
     detector = Detector(
-        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
-        confidence_threshold=eval_config.score_threshold,
-        overlap_ratio=0.2,
-        tilesize=800,
-        imgsz=800,
-        use_sliding_window=False,
-        # device="cpu",
+        detection_model=detection_model,
+        config=pred_config
     )
 
     handler = ClassificationDatasetBuilder(
         eval_config,
     )
-
-    source_dirs = [
-        # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\train_tiled\images",
-        # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\val_tiled\images",
-        # r"D:\PhD\Data per camp\DetectionDataset\WAID\val\images",
-        # r"D:\PhD\Data per camp\DetectionDataset\savmap\images",
-        r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
-        # r"D:\general_dataset\tiled-data\val\images",
-        r"D:\general_dataset\tiled-data\test\images",
-    ]
-
-    handler.set_dirs(
-        source_dirs=source_dirs, output_dir=r"D:\datalabeling\.tmp\cls-features\train"
-    )
-
-    handler.run(
-        strategy="gt",
-        save_true_negatives=True,
-        feature_extractor=FeatureExtractor(),
-        detector=detector,
-        bbox_resize_factor=1,  # resizes the bbox for tn,tp,fp
-        tn_kwargs=dict(w=96, h=96, number=3),  # to disable use {}
-        tp_kwargs=dict(w=96, h=96),  # or {} to use actual bbox
-    )
+    
+    feature_extractor=get_processor('feature_extractor')(hf_model_path="facebook/dinov2-with-registers-small")
+    
+    # yaml_path = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
+    yaml_path = r"..\configs\yolo_configs\data\dataset_0-1.yaml"
+    cfg = load_yaml(yaml_path)
+    
+    root_dir = r"D:\PhD\Data per camp\Classification\cls-features"
+    
+    for split in ['train','val']:
+    
+        source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
+    
+        # source_dirs = [
+        #     # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\train_tiled\images",
+        #     # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\val_tiled\images",
+        #     # r"D:\PhD\Data per camp\DetectionDataset\WAID\val\images",
+        #     # r"D:\PhD\Data per camp\DetectionDataset\savmap\images",
+        #     r"D:\PhD\Data per camp\DetectionDataset\Identification-split\train\images",
+        #     # r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
+        #     # r"D:\general_dataset\tiled-data\val\images",
+        #     # r"D:\general_dataset\tiled-data\test\images",
+        # ]
+    
+        handler.set_dirs(
+            source_dirs=source_dirs, output_dir=os.path.join(root_dir, split)
+        )
+        
+        handler.run(
+            strategy="gt",
+            save_true_negatives=True,
+            feature_extractor=feature_extractor,
+            detector=detector,
+            bbox_resize_factor=1,  # resizes the bbox for tn,tp,fp
+            tn_kwargs=dict(w=96, h=96, number=3),  # to disable use {}
+            tp_kwargs=dict(w=96, h=96),  # or {} to use actual bbox
+        )
+    
+    
 
 
 def load_classification_features_data():
@@ -130,6 +162,6 @@ def load_classification_features_data():
 if __name__ == "__main__":
     pass
 
-    # load_classification_data()
+    # create_classification_data()
 
     # load_classification_features_data()
