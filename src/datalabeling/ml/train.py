@@ -332,7 +332,7 @@ class ImageClassifier(L.LightningModule):
         optimizer = torch.optim.Adam(self.parameters(), lr=self.hparams.lr)
         # optional: scheduler
         scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=7, gamma=0.1)
-        return [optimizer], [scheduler]
+        return [optimizer], [{"scheduler": scheduler, "interval": "epoch"}]
 
 
 class TrainingManager:
@@ -406,27 +406,30 @@ class TrainingManager:
         self,
     ):
         # TODO
-        if self.args.path_weights:
-            # self._cls_routine = ImageClassifier.load_from_checkpoint(
-            #     checkpoint_path=self.args.herdnet_pl_ckpt,
-            #     lr=self.args.lr0,
-            #     map_location=self.args.device,
-            #     weight_decay=self.args.weight_decay,
-            #     data_config_yaml=self.args.yolo_yaml,
-            #     work_dir=work_dir,
-            # )
-            pass
-        else:
-            model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-            model.classifier = torch.nn.Linear(576, self.args.cls_num_classes)
+        # if self.args.path_weights:
+        #     model = ...
+        #     raise NotImplementedError()
+        # else:
+        #     model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+        #     model.classifier = torch.nn.Linear(576, self.args.cls_num_classes)
 
-            routine = ImageClassifier(
-                model=model,
-                num_classes=self.args.cls_num_classes,
-                threshold=self.args.cls_thrs,
-                label_smoothing=self.args.cls_thrs,
-                lr=self.args.lr0,
-            )
+        #     routine = ImageClassifier(
+        #         model=model,
+        #         num_classes=self.args.cls_num_classes,
+        #         threshold=self.args.cls_thrs,
+        #         label_smoothing=self.args.cls_thrs,
+        #         lr=self.args.lr0,
+        #     )
+        
+        
+        path = self.args.path_weights
+        if self.args.yolo_arch_yaml:
+            path = self.args.yolo_arch_yaml
+        routine = YOLO(path, task='classify', verbose=False)
+        
+        if self.args.path_weights and self.args.yolo_arch_yaml:
+            routine = routine.load(self.args.path_weights)
+                
 
         return routine
 
@@ -521,6 +524,15 @@ class TrainingManager:
     def _run_classifier(
         self,
     ):
+        if isinstance(self.model, YOLO):
+            # self.model.train(data=self.args.cls_data_dir, 
+            #           epochs=self.args.epochs, 
+            #           imgsz=self.args.imgsz,
+            #           lr0=self.args.lr0,
+            #           auto_augment=self.args.cls_auto_augment,
+            #           )
+            self._train_ultralytics(self.args.cls_data_dir,imgsz=self.args.imgsz)
+            
         # data
         datamodule = ClassifierDataModule(
             train_dir=self.args.cls_train_dir,
@@ -537,6 +549,7 @@ class TrainingManager:
             run_name=self.args.run_name,
             tracking_uri=self.args.mlflow_tracking_uri,
             log_model=True,
+            
         )
         checkpoint_callback = ModelCheckpoint(
             dirpath=self.args.cls_workdir,
@@ -561,7 +574,7 @@ class TrainingManager:
         # trainer
         trainer = L.Trainer(
             max_epochs=self.args.epochs,
-            # logger=mlf_logger,
+            logger=mlf_logger,
             # accumulate_grad_batches=max(int(128 / self.args.batchsize), 1),
             precision="bf16-mixed",
             callbacks=callbacks,
@@ -888,7 +901,7 @@ class TrainingManager:
             hsv_h=args.hsv_h,
             hsv_v=args.hsv_v,
             translate=args.translate,
-            auto_augment="augmix",
+            auto_augment=self.args.cls_auto_augment,
             exist_ok=True,
             seed=args.seed,
             resume=resume,

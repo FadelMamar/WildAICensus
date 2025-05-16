@@ -90,10 +90,12 @@ class TrainingConfig:
     cls_label_smoothing: float = 0.0
     cls_thrs: float = 0.5
     cls_workdir: str = "runs-classifier"
+    cls_data_dir:str=None
     cls_train_dir: str = None
     cls_val_dir: str = None
     cls_monitor_metric: str = "val_f1score"
     cls_monitor_mode: str = "max"
+    cls_auto_augment:str='augmix'
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original
