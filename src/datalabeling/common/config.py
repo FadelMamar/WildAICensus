@@ -232,6 +232,7 @@ class TrainingConfig:
     cls_monitor_mode: str = "max"
     cls_auto_augment: str = "augmix"
     cls_is_features: bool = False
+    cls_tn_ratio:float=1.0
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original

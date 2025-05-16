@@ -23,6 +23,8 @@ from torchvision import transforms
 from tqdm import tqdm
 from torchvision.datasets import ImageFolder
 import albumentations as A
+import random
+from itertools import chain
 
 from .config import DataConfig
 
@@ -308,17 +310,58 @@ class DataHandler:
 
 
 class ClassifierFeaturesData(Dataset):
-    def __init__(self, split_data_dir: str, transform=None):
+    def __init__(self, split_data_dir: str, 
+                 transform=None,
+                 tn_ratio: float = 1.0,
+                 tn_label:str='true_negatives'
+                 ):
         super().__init__()
-
+        
         self.data_dir = Path(split_data_dir)
-        self.samples = list(self.data_dir.glob("*/**/*"))
+        
+        self.tn_label = tn_label
+               
+        self.tn_ratio=tn_ratio
+        
+        self.get_data()
 
-        labels = sorted(os.listdir(self.data_dir))
-        self.classes = list(range(len(labels)))
-        self.class_to_idx = dict(zip(labels, self.classes))
+        # self.transform=transform # not used
+        
+    def get_data(self,):
+        
+        class_names = sorted(os.listdir(self.data_dir))
+        self.classes = list(range(len(class_names)))
+        self.class_to_idx = dict(zip(class_names, self.classes))
+        
+        samples = []
+        
+        # get true positive
+        num_positive = 0
+        for c in class_names:  
+            if c == self.tn_label:
+                continue
+            tp_data = list((self.data_dir / c).glob('*'))
+            num_positive += len(tp_data)
+            samples.append(list(tp_data))
+        logger.info(f'Sampling {num_positive} True-Positives from {self.data_dir}')
+            
+        # sample true negatives                
+        if self.tn_label in class_names:
+            assert self.tn_ratio>0. 
+            tn_data = list((self.data_dir / self.tn_label).glob('*'))
+            num_tn = int(num_positive * self.tn_ratio)
+            num_tn = min(num_tn,len(tn_data))
+            random.seed(41)
+            random.shuffle(tn_data) # shuffle
+            samples.append(tn_data[:num_tn])
+            
+            logger.info(f'Sampling {num_tn} True-Negatives from {self.data_dir}')
 
-        # self.transform=transform
+        
+        self.samples = list(chain.from_iterable(samples))
+        
+        
+            
 
     def __len__(
         self,
@@ -345,6 +388,7 @@ class ClassifierDataModule(L.LightningDataModule):
         num_workers: int = 1,
         img_size: int = 96,
         is_features: bool = False,
+        tn_ratio: float = 1.0
         # train_tfms=None,
         # val_tfms=None,
     ):
@@ -355,10 +399,11 @@ class ClassifierDataModule(L.LightningDataModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.img_size = img_size
+        self.tn_ratio = tn_ratio
 
         self.loader = ImageFolder
         if is_features:
-            self.loader = ClassifierFeaturesData
+            self.loader = lambda x,transform: ClassifierFeaturesData(x,transform=transform,tn_ratio=self.tn_ratio)
 
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]

@@ -274,6 +274,7 @@ class TrainingManager:
             num_workers=os.cpu_count() // 4,
             img_size=self.args.imgsz,
             is_features=self.args.cls_is_features,
+            tn_ratio=self.args.cls_tn_ratio
         )
 
         datamodule.setup("fit")
