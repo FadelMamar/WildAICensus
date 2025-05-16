@@ -603,6 +603,7 @@ class TrainingManager:
             device=args.device,
             freeze=args.freeze,
             name=args.run_name,
+            workers=0,
             single_cls=args.is_single_cls,
             lr0=args.lr0,
             lrf=args.lrf,

@@ -255,6 +255,8 @@ class CustomLoss(v8DetectionLoss):
             .to(self.device)
         )
         self.bce = torch.nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
+        
+        logger.info(f'Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}')
 
 
 class CustomDetModel(DetectionModel):
