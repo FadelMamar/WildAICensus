@@ -9,6 +9,7 @@ import pandas as pd
 import numpy as np
 import mlflow
 from dotenv import load_dotenv
+
 # from label_studio_ml.utils import get_local_path
 from label_studio_tools.core.utils.io import get_local_path
 
@@ -20,6 +21,7 @@ from ..common.processor import Processor
 from ..common.config import Detection, PredictionConfig
 from .models import Detector
 from ..common.mlflow_utils import load_registered_model
+import torch
 
 logger = logging.getLogger(__name__)
 
@@ -31,9 +33,9 @@ class InferenceEnginge(object):
         self.detector = None
         self.image_processor = None
         self.detection_processor = None
-        self.model_tag = 'None'
+        self.model_tag = "None"
 
-    def set_detector(self, detector: Detector, model_tag:str):
+    def set_detector(self, detector: Detector, model_tag: str):
         self.detector = detector
         self.model_tag = model_tag
 
@@ -42,6 +44,10 @@ class InferenceEnginge(object):
     ):
         self.image_processor = image_processor
         self.detection_processor = detection_processor
+
+        for p in [self.detection_processor, self.image_processor]:
+            if isinstance(p, torch.nn.Module):
+                p.eval()
 
     def inference(
         self,
@@ -120,15 +126,17 @@ class Annotator(InferenceEnginge):
         self.labelstudio_client = LabelStudio(
             base_url=LABEL_STUDIO_URL, api_key=API_KEY
         )
-        
+
         # LS label config
         self.from_name = "label"
         self.to_name = "image"
         self.label_type = "rectanglelabels"
 
     def upload_predictions(
-        self, project_id: int, top_n: int = 0, #download_resources: bool = True,
-        tag:str=""
+        self,
+        project_id: int,
+        top_n: int = 0,  # download_resources: bool = True,
+        tag: str = "",
     ) -> None:
         """Uploads predictions using label studio API.
         Make sure to set the API key and url inside .env
@@ -153,26 +161,27 @@ class Annotator(InferenceEnginge):
             img_url = task.data["image"]
 
             try:
-            # using unquote to deal with special characters
+                # using unquote to deal with special characters
                 img_path = get_local_path(
-                    unquote(img_url), download_resources=False,
-                    hostname=os.getenv("LABEL_STUDIO_URL")
+                    unquote(img_url),
+                    download_resources=False,
+                    hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
-                
+
                 if not Path(img_path).exists():
-                   img_path = get_local_path(
-                       unquote(img_url), download_resources=True,
-                       hostname=os.getenv("LABEL_STUDIO_URL")
-                   )
-                   
-                   
+                    img_path = get_local_path(
+                        unquote(img_url),
+                        download_resources=True,
+                        hostname=os.getenv("LABEL_STUDIO_URL"),
+                    )
+
             except Exception:
                 traceback.print_exc()
-                logger.warn(f'Failed to load {img_path}. Skipping...')   
+                logger.warn(f"Failed to load {img_path}. Skipping...")
                 continue
-            
+
             logger.info(f"Uploading predictions for: {img_path}")
-            
+
             img = Image.open(img_path)
             predictions = self.inference(image=img)
 

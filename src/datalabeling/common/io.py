@@ -78,7 +78,7 @@ class DataHandler:
     def load_yolo_groundtruth(
         images_dir: str = None,
         images_paths: list[str] | Iterable = None,
-        load_empty: bool = False,
+        load_empty: bool = True,
     ) -> tuple[pd.DataFrame, str]:
         from .annotation_utils import check_label_format
 
@@ -178,6 +178,8 @@ class DataHandler:
 
         logger.info(f"Loading groundtruth: there are {num_empty} empty images.")
 
+        if len(labels_format) < 1:
+            labels_format = {"None"}
         return pd.concat(df_list, axis=0), labels_format.pop()
 
     @staticmethod
@@ -242,8 +244,6 @@ class DataHandler:
         empty_ratio: Optional[float] = None,
         empty_frac: Optional[float] = None,
     ) -> Tuple[ConcatDataset, pd.DataFrame, int]:
-        
-        
         cfg = load_yaml(yaml_path)
 
         assert split in cfg, f"Unknown split {split}"
@@ -310,58 +310,57 @@ class DataHandler:
 
 
 class ClassifierFeaturesData(Dataset):
-    def __init__(self, split_data_dir: str, 
-                 transform=None,
-                 tn_ratio: float = 1.0,
-                 tn_label:str='true_negatives'
-                 ):
+    def __init__(
+        self,
+        split_data_dir: str,
+        transform=None,
+        tn_ratio: float = 1.0,
+        tn_label: str = "true_negatives",
+    ):
         super().__init__()
-        
+
         self.data_dir = Path(split_data_dir)
-        
+
         self.tn_label = tn_label
-               
-        self.tn_ratio=tn_ratio
-        
+
+        self.tn_ratio = tn_ratio
+
         self.get_data()
 
         # self.transform=transform # not used
-        
-    def get_data(self,):
-        
+
+    def get_data(
+        self,
+    ):
         class_names = sorted(os.listdir(self.data_dir))
         self.classes = list(range(len(class_names)))
         self.class_to_idx = dict(zip(class_names, self.classes))
-        
+
         samples = []
-        
+
         # get true positive
         num_positive = 0
-        for c in class_names:  
+        for c in class_names:
             if c == self.tn_label:
                 continue
-            tp_data = list((self.data_dir / c).glob('*'))
+            tp_data = list((self.data_dir / c).glob("*"))
             num_positive += len(tp_data)
             samples.append(list(tp_data))
-        logger.info(f'Sampling {num_positive} True-Positives from {self.data_dir}')
-            
-        # sample true negatives                
-        if self.tn_label in class_names:
-            assert self.tn_ratio>0. 
-            tn_data = list((self.data_dir / self.tn_label).glob('*'))
-            num_tn = int(num_positive * self.tn_ratio)
-            num_tn = min(num_tn,len(tn_data))
-            random.seed(41)
-            random.shuffle(tn_data) # shuffle
-            samples.append(tn_data[:num_tn])
-            
-            logger.info(f'Sampling {num_tn} True-Negatives from {self.data_dir}')
+        logger.info(f"Sampling {num_positive} True-Positives from {self.data_dir}")
 
-        
+        # sample true negatives
+        if self.tn_label in class_names:
+            assert self.tn_ratio > 0.0
+            tn_data = list((self.data_dir / self.tn_label).glob("*"))
+            num_tn = int(num_positive * self.tn_ratio)
+            num_tn = min(num_tn, len(tn_data))
+            random.seed(41)
+            random.shuffle(tn_data)  # shuffle
+            samples.append(tn_data[:num_tn])
+
+            logger.info(f"Sampling {num_tn} True-Negatives from {self.data_dir}")
+
         self.samples = list(chain.from_iterable(samples))
-        
-        
-            
 
     def __len__(
         self,
@@ -388,7 +387,7 @@ class ClassifierDataModule(L.LightningDataModule):
         num_workers: int = 1,
         img_size: int = 96,
         is_features: bool = False,
-        tn_ratio: float = 1.0
+        tn_ratio: float = 1.0,
         # train_tfms=None,
         # val_tfms=None,
     ):
@@ -403,7 +402,9 @@ class ClassifierDataModule(L.LightningDataModule):
 
         self.loader = ImageFolder
         if is_features:
-            self.loader = lambda x,transform: ClassifierFeaturesData(x,transform=transform,tn_ratio=self.tn_ratio)
+            self.loader = lambda x, transform: ClassifierFeaturesData(
+                x, transform=transform, tn_ratio=self.tn_ratio
+            )
 
         self.normalize = transforms.Normalize(
             mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]

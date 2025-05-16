@@ -1082,6 +1082,9 @@ class GPSUtils:
 
     @staticmethod
     def to_decimal(gps_coord: str):
+        if gps_coord is None:
+            return [None] * 3
+
         lat, long, alt = geopy.Point.from_string(gps_coord)
         coords = lat, long, alt * 1e3
         return coords
