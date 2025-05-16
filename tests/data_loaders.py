@@ -8,7 +8,7 @@ Created on Thu Apr 24 19:29:12 2025
 from tqdm import tqdm
 import os
 # from datalabeling.common.pipeline import ClassificationDataExport
-
+import fire
 
 def load_herd_net():
     from datalabeling.common.io import HerdnetData
@@ -96,10 +96,11 @@ def create_classification_data():
     
     feature_extractor=get_processor('feature_extractor')(hf_model_path="facebook/dinov2-with-registers-small")
     
-    yaml_path = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
+    # yaml_path = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
+    yaml_path = r"..\configs\yolo_configs\data\dataset_pretraining.yaml"
     cfg = load_yaml(yaml_path)
     
-    root_dir = r"D:\PhD\Data per camp\Classification\cls-features"
+    root_dir = r"D:\PhD\Data per camp\Classification\cls-ptr-features"
     
     for split in ['train','val']:
     
@@ -160,8 +161,11 @@ def load_classification_features_data():
 
 
 if __name__ == "__main__":
-    pass
+    fire.Fire({
+      'create': create_classification_data,
+      'load': load_classification_features_data,
+  })
 
     # create_classification_data()
 
-    load_classification_features_data()
+    # load_classification_features_data()
