@@ -101,7 +101,7 @@ def run_annotator(
         annotator.set_processor(image_processor=None, detection_processor=processor)
 
     annotator.upload_predictions(
-        project_id=project_id, top_n=top_n, download_resources=True,tag="-"+str(add_processor)
+        project_id=project_id, top_n=top_n, tag="-"+str(add_processor)
     )
 
     return "success"
@@ -126,10 +126,10 @@ if __name__ == "__main__":
     #     img = image[y1:y2,x1:x2]
     #     imsave(str(i) + "_example.jpg", img)
 
-    for add_processor in [True, False]:
+    for add_processor in [True]:
         results = run_annotator(
             project_id=94,
-            top_n=20,
+            top_n=3,
             add_processor=add_processor,
             inference_service_url=None,
         )

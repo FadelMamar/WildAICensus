@@ -11,6 +11,24 @@ from datalabeling.common.pipeline import (
     ObbToYoloStep,
 )
 
+from datalabeling.common.io import load_yaml
+import os, traceback
+
+def load_datasets(data_config_yaml: str) -> list[str]:
+    data_config = load_yaml(data_config_yaml)
+    paths = list()
+    root = data_config["path"]
+    for split in ["train", "val", "test"]:
+        try:
+            for p in data_config[split]:
+                path = os.path.join(root, p)
+                paths.append(path)
+        except Exception as e:
+            print(f"Failed to load datasets for conversion {split} --> ", e)
+
+    return paths
+
+
 
 def ls_to_yolo():
     ## ---- Creating yolo dataset from Label studio labels
@@ -70,34 +88,50 @@ def ls_to_yolo():
 def yolo_to_obb_dota():
     label_handler = LabelHandler(config=LabelConfig())
     label_handler.config.label_map = (
-        r"D:\datalabeling\exported_annotations\label_mapping.json"
+        r"..\exported_annotations\label_mapping.json"
     )
     label_handler.load_map()
+    
+    
+    data_config_yaml = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
+    
+    paths = load_datasets(data_config_yaml)
+    
+    for p in paths:
+        
+        try:
+            
+            p = p.replace("images", "labels")
+            
 
-    steps = [
-        # YoloToObbStep(
-        #     yolo_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
-        #     obb_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
-        #     skip=True,
-        # ),
-        ObbToYoloStep(
-            obb_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
-            yolo_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
-            skip=True,
-        )
-        # ObbToDotaStep(
-        #     obb_img_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
-        #     dota_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format_dota",
-        #     label_map={
-        #         0: "wildlife",
-        #     },
-        #     skip=True,
-        #     clear_old=False,
-        # ),
-    ]
+            steps = [
+                # YoloToObbStep(
+                #     yolo_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
+                #     obb_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
+                #     skip=True,
+                # ),
+                
+                ObbToYoloStep(
+                    obb_labels_dir=p,
+                    yolo_labels_dir=p,
+                    skip=True,
+                )
+                # ObbToDotaStep(
+                #     obb_img_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
+                #     dota_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format_dota",
+                #     label_map={
+                #         0: "wildlife",
+                #     },
+                #     skip=True,
+                #     clear_old=False,
+                # ),
+            ]
 
-    pipeline = Pipeline(steps)
-    result_ctx = pipeline.run()
+            pipeline = Pipeline(steps)
+            result_ctx = pipeline.run()
+    
+        except Exception:
+            traceback.print_exc()
 
 
 if __name__ == "__main__":
@@ -113,4 +147,4 @@ if __name__ == "__main__":
     # ls_to_yolo()
 
     ## Uncomment to run
-    # yolo_to_obb_dota()
+    yolo_to_obb_dota()

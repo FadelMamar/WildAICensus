@@ -68,7 +68,7 @@ def create_classification_data():
         # min_area=100,
         # max_area=None,
         cls_imgsz=128,
-        device="cpu",
+        # device="cpu",
     )
 
     # =============================================================================
@@ -96,8 +96,7 @@ def create_classification_data():
     
     feature_extractor=get_processor('feature_extractor')(hf_model_path="facebook/dinov2-with-registers-small")
     
-    # yaml_path = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
-    yaml_path = r"..\configs\yolo_configs\data\dataset_0-1.yaml"
+    yaml_path = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
     cfg = load_yaml(yaml_path)
     
     root_dir = r"D:\PhD\Data per camp\Classification\cls-features"
@@ -127,7 +126,7 @@ def create_classification_data():
             feature_extractor=feature_extractor,
             detector=detector,
             bbox_resize_factor=1,  # resizes the bbox for tn,tp,fp
-            tn_kwargs=dict(w=96, h=96, number=3),  # to disable use {}
+            tn_kwargs=dict(w=96, h=96, number=1),  # to disable use {}
             tp_kwargs=dict(w=96, h=96),  # or {} to use actual bbox
         )
     
@@ -138,10 +137,11 @@ def load_classification_features_data():
     from datalabeling.common.io import ClassifierDataModule
 
     data = ClassifierDataModule(
-        data_dir=r"D:\datalabeling\.tmp\cls-features",
-        batch_size=32,
+        data_dir=r"D:\PhD\Data per camp\Classification\cls-features",
+        batch_size=64,
         is_features=True,
         img_size=96,
+        tn_ratio=1.0
     )
 
     data.setup("fit")
@@ -164,4 +164,4 @@ if __name__ == "__main__":
 
     # create_classification_data()
 
-    # load_classification_features_data()
+    load_classification_features_data()
