@@ -4,13 +4,16 @@
 import fire
 from dataclasses import dataclass
 from sys import version_info
-from sahi.models.ultralytics import UltralyticsDetectionModel
+
+# from sahi.models.ultralytics import UltralyticsDetectionModel
 from ultralytics import YOLO
-from sahi.predict import get_prediction, get_sliced_prediction
+
+# from sahi.predict import get_prediction, get_sliced_prediction
 from pathlib import Path
 import torch
 import mlflow
-from datargs import parse
+
+# from datargs import parse
 import platform
 from datalabeling.ml.models import ImageClassifier
 
