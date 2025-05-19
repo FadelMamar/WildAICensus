@@ -217,6 +217,8 @@ class ClassificationDatasetBuilder:
         assert isinstance(source_dirs, Sequence), (
             "Please provide a Sequence de directory, e.g. List or Tuple"
         )
+        for d in source_dirs:
+            assert os.path.exists(d) and Path(d).is_dir(), f"Directory {d} not found."
         self.source_dirs = source_dirs
         self.output_dir = output_dir
         Path(output_dir).mkdir(exist_ok=True, parents=True)

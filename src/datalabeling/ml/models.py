@@ -584,10 +584,12 @@ class Detector(object):
         """
 
         assert (path_to_dir is None) + (images_paths is None) < 2, (
-            "Both should not be given."
+            "Both 'path_to_dir' and 'images_paths' should not be given."
         )
         results = {}
-        paths = images_paths or list(Path(path_to_dir).iterdir())
+        paths = images_paths
+        if paths is None:
+            paths = list(Path(path_to_dir).iterdir())
         for image_path in tqdm(paths, desc="Computing predictions..."):
             try:
                 pred = self.predict(
