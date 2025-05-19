@@ -37,14 +37,15 @@ class FeatureExtractor(Processor):
         from transformers import AutoImageProcessor, AutoModel
 
         self.processor = AutoImageProcessor.from_pretrained(hf_model_path)
-        self.extractor = AutoModel.from_pretrained(hf_model_path,torch_dtype="auto", device_map="auto")
+        self.extractor = AutoModel.from_pretrained(
+            hf_model_path, torch_dtype="auto", device_map="auto"
+        )
         self.device = self.extractor.device
 
     def run(self, images: Sequence[np.ndarray]) -> np.ndarray:
-        
         assert isinstance(images, Sequence)
         for a in images:
-            assert isinstance(a,np.ndarray)
+            assert isinstance(a, np.ndarray)
 
         images = [Image.fromarray(image) for image in images]
 
@@ -52,10 +53,9 @@ class FeatureExtractor(Processor):
 
         with torch.no_grad():
             outputs = self.extractor(**inputs)
-        features = outputs.pooler_output.cpu().reshape(len(images),-1).numpy()
+        features = outputs.pooler_output.cpu().reshape(len(images), -1).numpy()
 
         return features
-            
 
 
 class SuperResolution(Processor):
@@ -83,6 +83,7 @@ class Classifier(Processor):
 
         self.device = device
         self.model = self.model.to(self.device)
+        self.model.eval()
 
         self.feature_extractor = feature_extractor
 
@@ -122,7 +123,6 @@ class DetectionsPostprocessor(Processor):
     def set_handler(self, handler):
         self.handler = handler
 
-    # TODO: implement
     def run(
         self,
         detections: list[Detection],

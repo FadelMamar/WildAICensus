@@ -5,15 +5,16 @@ Created on Thu Apr 24 19:29:12 2025
 @author: FADELCO
 """
 
+import fire
+
 from tqdm import tqdm
 import os
-# from datalabeling.common.pipeline import ClassificationDataExport
-import fire
+
 
 def load_herd_net():
     from datalabeling.common.io import HerdnetData
 
-    data_config_yaml = r"D:\datalabeling\configs\yolo_configs\data_config.yaml"
+    data_config_yaml = r"..\configs\yolo_configs\data_config.yaml"
     patch_size = 640
     batchsize = 4
     down_ratio = 2
@@ -42,8 +43,8 @@ def load_herd_net():
         continue
 
 
-def create_classification_data():
-    from datalabeling.common.config import EvaluationConfig,PredictionConfig
+def create_classification_data(strategies: list[str] = ["gt", "hn"], alias="demo"):
+    from datalabeling.common.config import EvaluationConfig, PredictionConfig
     from datalabeling.ml.models import Detector
     from datalabeling.common.io import load_yaml
     from datalabeling.common.mlflow_utils import load_registered_model
@@ -59,7 +60,7 @@ def create_classification_data():
     eval_config.uncertainty_threshold = 4
     eval_config.score_col = "max_scores"
     eval_config.tp_iou_threshold = 0.2
-    
+
     pred_config = PredictionConfig(
         imgsz=800,
         tilesize=800,
@@ -76,62 +77,50 @@ def create_classification_data():
         True  # Set to True to load existing predictions if applicable
     )
     # =============================================================================
-    
-    
-    
-    detection_model, model_version = load_registered_model(alias='yolo11s-obb-v1',
-                                                name='labeler',
-                                                mlflow_tracking_url="http://localhost:5000",
-                                                load_unwrapped=True
-                                                )
 
-    detector = Detector(
-        detection_model=detection_model,
-        config=pred_config
+    detection_model, model_version = load_registered_model(
+        alias=alias,
+        name="labeler",
+        mlflow_tracking_url="http://localhost:5000",
+        load_unwrapped=True,
     )
+
+    detector = Detector(detection_model=detection_model, config=pred_config)
 
     handler = ClassificationDatasetBuilder(
         eval_config,
     )
-    
-    feature_extractor=get_processor('feature_extractor')(hf_model_path="facebook/dinov2-with-registers-small")
-    
-    # yaml_path = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
-    yaml_path = r"..\configs\yolo_configs\data\dataset_pretraining.yaml"
+
+    feature_extractor = get_processor("feature_extractor")(
+        hf_model_path="facebook/dinov2-with-registers-small"
+    )
+
+    yaml_path = r"..\configs\yolo_configs\data\data_config.yaml"
     cfg = load_yaml(yaml_path)
-    
-    root_dir = r"D:\PhD\Data per camp\Classification\cls-ptr-features"
-    
-    for split in ['train','val']:
-    
+
+    root_dir = r"..\.tmp\cls-features-1"
+
+    for split in ["train", "val"]:
         source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
-    
-        # source_dirs = [
-        #     # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\train_tiled\images",
-        #     # r"D:\PhD\Data per camp\DetectionDataset\delplanque_tiled_data\val_tiled\images",
-        #     # r"D:\PhD\Data per camp\DetectionDataset\WAID\val\images",
-        #     # r"D:\PhD\Data per camp\DetectionDataset\savmap\images",
-        #     r"D:\PhD\Data per camp\DetectionDataset\Identification-split\train\images",
-        #     # r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images",
-        #     # r"D:\general_dataset\tiled-data\val\images",
-        #     # r"D:\general_dataset\tiled-data\test\images",
-        # ]
-    
+
         handler.set_dirs(
             source_dirs=source_dirs, output_dir=os.path.join(root_dir, split)
         )
-        
+
         handler.run(
-            strategy="gt",
+            strategies=strategies,
             save_true_negatives=True,
             feature_extractor=feature_extractor,
             detector=detector,
             bbox_resize_factor=1,  # resizes the bbox for tn,tp,fp
-            tn_kwargs=dict(w=96, h=96, number=1),  # to disable use {}
-            tp_kwargs=dict(w=96, h=96),  # or {} to use actual bbox
+            tn_kwargs=dict(
+                w=pred_config.cls_imgsz, h=pred_config.cls_imgsz, number=3
+            ),  # to disable use {}
+            tp_kwargs=dict(
+                w=pred_config.cls_imgsz, h=pred_config.cls_imgsz
+            ),  # or {} to use actual bbox
+            hn_kwargs=dict(w=pred_config.cls_imgsz, h=pred_config.cls_imgsz),
         )
-    
-    
 
 
 def load_classification_features_data():
@@ -142,7 +131,7 @@ def load_classification_features_data():
         batch_size=64,
         is_features=True,
         img_size=96,
-        tn_ratio=1.0
+        tn_ratio=1.0,
     )
 
     data.setup("fit")
@@ -161,10 +150,13 @@ def load_classification_features_data():
 
 
 if __name__ == "__main__":
-    fire.Fire({
-      'create': create_classification_data,
-      'load': load_classification_features_data,
-  })
+    fire.Fire(
+        {
+            "create-features": create_classification_data,
+            "load-features": load_classification_features_data,
+            "load-herdnet": load_herd_net,
+        }
+    )
 
     # create_classification_data()
 

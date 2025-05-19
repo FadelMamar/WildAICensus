@@ -4,7 +4,7 @@ import os
 import shutil
 import traceback
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Sequence
 from PIL import Image
 import cv2
 import numpy as np
@@ -16,7 +16,7 @@ from .annotation_utils import (
     ImageProcessor,
     LabelstudioConverter,
     load_coco_annotations,
-    resize_bbox
+    resize_bbox,
 )
 from .config import DataConfig, LabelConfig, EvaluationConfig
 from .io import load_yaml, DataHandler
@@ -210,49 +210,65 @@ class ClassificationDatasetBuilder:
         self.bbox_resize_factor = None
         self.feature_extractor = None
 
-    def set_dirs(self, source_dirs: list[str], output_dir: str):
+        self.tn_label = "true_negatives"
+        self.tp_label = "true_positives"
+
+    def set_dirs(self, source_dirs: Sequence[str], output_dir: str):
+        assert isinstance(source_dirs, Sequence), (
+            "Please provide a Sequence de directory, e.g. List or Tuple"
+        )
         self.source_dirs = source_dirs
         self.output_dir = output_dir
         Path(output_dir).mkdir(exist_ok=True, parents=True)
 
     def run(
         self,
-        strategy: str = "gt",
+        strategies: list[str] = ["gt", "hn"],
         detector: Detector = None,
-        feature_extractor:FeatureExtractor=None,
+        feature_extractor: FeatureExtractor = None,
         bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
-        tn_kwargs=dict(w=50, h=50, number=2),
+        tn_kwargs=dict(w=50, h=50, number=3),
         tp_kwargs=dict(w=None, h=None),
+        fp_kwargs=dict(w=None, h=None),
+        hn_kwargs=dict(w=50, h=50),
     ):
-        assert strategy in ["gt", "fp"], "Provide gt for fp as a strategy"
+        # assert strategy in ["gt", "fp",'hn'], "Provide gt for fp as a strategy"
 
         self.bbox_resize_factor = bbox_resize_factor
         self.detector = detector
         self.feature_extractor = feature_extractor
 
-        if strategy == "gt":
-            self.save_groundtruth(
-                images_dirs=self.source_dirs,
-                save_true_negatives=save_true_negatives,
-                tn_kwargs=tn_kwargs,
-                tp_kwargs=tp_kwargs,
-            )
+        for strategy in strategies:
+            if strategy == "gt":
+                self.save_groundtruth(
+                    images_dirs=self.source_dirs,
+                    save_true_negatives=save_true_negatives,
+                    tn_kwargs=tn_kwargs,
+                    tp_kwargs=tp_kwargs,
+                )
 
-        if strategy == "fp":
-            assert self.detector is not None, "Provide a detector engine"
-            self.save_false_positives()
-    
+            elif strategy == "fp":
+                assert self.detector is not None, "Provide a detector engine"
+                self._save_fp(bbox_resize_factor=bbox_resize_factor, **fp_kwargs)
+
+            elif strategy == "hn":
+                assert self.detector is not None, "Provide a detector engine"
+                self._save_hn(bbox_resize_factor=bbox_resize_factor, **hn_kwargs)
+
+            else:
+                raise NotImplementedError(f"strategy:{strategy} is not defined.")
+
     def _save(
         self,
         image: np.ndarray,
         label_name: str | int,
         file_name: str,
         tag: str,
-        ext:str='.jpg'
+        ext: str = ".jpg",
     ):
         # skipping images 80% black
-        frac = (image==0.).sum()/image.sum()
+        frac = (image == 0.0).sum() / image.sum()
         if frac > 0.8 and self.feature_extractor:
             logger.info(f"Skipping {os.path.basename(file_name)}. It's all black.")
             return None
@@ -261,49 +277,33 @@ class ClassificationDatasetBuilder:
         img_dir.mkdir(exist_ok=True, parents=False)
         save_path = img_dir / f"{Path(file_name).stem}#{tag}"
         save_path = save_path.with_suffix(ext)
-        
-        if ext != '.npy':
+
+        if ext != ".npy":
             cv2.imwrite(save_path, image)
         else:
             np.save(save_path, image)
-        
+
         return None
-        
-    
-    def _save_batch(self,batch:list[dict]):
-        
+
+    def _save_batch(self, batch: list[dict]):
         if len(batch) < 1:
             return None
-        
+
         if self.feature_extractor:
-            images = [data['image'] for data in batch]
+            images = [data["image"] for data in batch]
             batch_features = self.feature_extractor.run(images)
-            
-                
-        for i,data in enumerate(batch):
+
+        for i, data in enumerate(batch):
             if self.feature_extractor:
-                data['image'] = batch_features[i]
-                self._save(ext='.npy',**data)
+                data["image"] = batch_features[i]
+                self._save(ext=".npy", **data)
             else:
-                self._save(ext='.jpg',**data)
-    
-            
-    def resize_bbox(self, factor: float, x1, x2, y1, y2, img_width, img_height):
-        box_size = max(x2 - x1, y2 - y1)
+                self._save(ext=".jpg", **data)
 
-        x1 = max(x1 - (factor - 1.0) * box_size / 2, 0)
-        y1 = max(y1 - (factor - 1.0) * box_size / 2, 0)
-        x2 = min(x2 + (factor - 1.0) * box_size / 2, img_width)
-        y2 = min(y2 + (factor - 1.0) * box_size / 2, img_height)
-
-        out = list(map(int, [x1, x2, y1, y2]))
-
-        return out
-
-    def _save_empty(
+    def _save_tn(
         self,
-        file_name,
-        bbox_resize_factor,
+        file_name: str,
+        bbox_resize_factor: int,
         w: int = 50,
         h: int = 50,
         number: int = 2,
@@ -313,7 +313,7 @@ class ClassificationDatasetBuilder:
 
         img_height, img_width = image.shape[:2]
 
-        label_name = "true_negatives"
+        label_name = self.tn_label
 
         xs = np.random.randint(
             low=w * bbox_resize_factor,
@@ -343,32 +343,33 @@ class ClassificationDatasetBuilder:
             x1, x2, y1, y2 = resize_bbox(
                 bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
             )
-        
+
             # record
-            data = dict(image=image[y1:y2, x1:x2],
-                        label_name=label_name,
-                        file_name=file_name,
-                        tag=f"#{y1}_{y2}_{x1}_{x2}"                        
-                        )
+            data = dict(
+                image=image[y1:y2, x1:x2],
+                label_name=label_name,
+                file_name=file_name,
+                tag=f"#{y1}_{y2}_{x1}_{x2}",
+            )
             batch.append(data)
             count += 1
-            
+
         # save data
         self._save_batch(batch)
-        
+
         return None
-        
-    def _save_gt(
+
+    def _save_tp(
         self,
-        df_gt,
-        file_name,
-        bbox_resize_factor,
+        df_gt: pd.DataFrame,
+        file_name: str,
+        bbox_resize_factor: int,
         w: int = None,
         h: int = None,
     ):
         image = Image.open(file_name).convert("RGB")
         image = np.asarray(image)
-        
+
         batch = []
         count = 0
         for i, row in df_gt.iterrows():
@@ -387,30 +388,100 @@ class ClassificationDatasetBuilder:
                 y1 = y - h / 2
                 y2 = y + h / 2
 
-            label_name = "groundtruth"
-
             x1, x2, y1, y2 = resize_bbox(
                 bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
             )
 
             # record
-            data = dict(image=image[y1:y2, x1:x2],
-                        label_name=label_name,
-                        file_name=file_name,
-                        tag=f"#{y1}_{y2}_{x1}_{x2}"                        
-                        )
+            data = dict(
+                image=image[y1:y2, x1:x2],
+                label_name=self.tp_label,
+                file_name=file_name,
+                tag=f"#{y1}_{y2}_{x1}_{x2}",
+            )
             batch.append(data)
             count += 1
-            
+
         # save data
         self._save_batch(batch)
-        
+
+        return None
+
+    def _save_hn(
+        self,
+        bbox_resize_factor: int,
+        w: int = None,
+        h: int = None,
+    ):
+        logger.info("Saving Hard negatives...")
+
+        iters = [Path(p).glob("*") for p in self.source_dirs]
+        images_paths = chain.from_iterable(iters)
+        is_tn = (
+            lambda p: not Path(str(p).replace("images", "labels"))
+            .with_suffix(".txt")
+            .exists()
+        )
+        images_paths = [p for p in images_paths if is_tn(p)]
+
+        logger.info(f"Running detector on {len(images_paths)} negative samples...")
+
+        predictions = self.detector.predict_directory(
+            path_to_dir=None, images_paths=images_paths, as_dataframe=False
+        )
+
+        count = 0
+        for file_name, detections in tqdm(
+            predictions.items(), desc="Saving Hard negatives"
+        ):
+            image = Image.open(file_name).convert("RGB")
+            img_width, img_height = image.size
+            image = np.asarray(image)
+
+            batch = []
+
+            for det in detections:
+                if det.is_empty:
+                    continue
+
+                if w and h:
+                    x = det.x
+                    y = det.y
+                    x1 = x - w / 2
+                    x2 = x + w / 2
+                    y1 = y - h / 2
+                    y2 = y + h / 2
+                else:
+                    x1 = det.x_min
+                    y1 = det.y_min
+                    x2 = det.x_max
+                    y2 = det.y_max
+
+                x1, x2, y1, y2 = resize_bbox(
+                    bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
+                )
+
+                # record
+                data = dict(
+                    image=image[y1:y2, x1:x2],
+                    label_name=self.tn_label,
+                    file_name=file_name,
+                    tag=f"#{y1}_{y2}_{x1}_{x2}",
+                )
+                batch.append(data)
+                count += 1
+
+            # save data
+            self._save_batch(batch)
+
+        logger.info(f"{count} Hard negatives have been saved.")
         return None
 
     def save_groundtruth(
         self,
         images_dirs=None,
         images_paths=None,
+        save_true_positives: bool = True,
         save_true_negatives: bool = False,
         tn_kwargs: dict = {},
         tp_kwargs: dict = {},
@@ -429,16 +500,17 @@ class ClassificationDatasetBuilder:
             df_labels.groupby("file_name"), desc="Saving groundtruth"
         ):
             # save positive samples
-            self._save_gt(
-                df_gt.loc[:, cols].dropna(axis=0, how="any"),
-                file_name,
-                self.bbox_resize_factor,
-                **tp_kwargs,
-            )
+            if save_true_positives:
+                self._save_tp(
+                    df_gt.loc[:, cols].dropna(axis=0, how="any"),
+                    file_name,
+                    self.bbox_resize_factor,
+                    **tp_kwargs,
+                )
 
             # save empty samples
-            if df_gt.loc[:, cols].isna().sum().sum() > 0 and save_true_negatives:
-                self._save_empty(
+            if save_true_negatives and df_gt.loc[:, cols].isna().sum().sum() > 0:
+                self._save_tn(
                     file_name,
                     self.bbox_resize_factor,
                     **tn_kwargs,
@@ -461,8 +533,11 @@ class ClassificationDatasetBuilder:
 
         return labels, _format
 
-    def save_false_positives(
+    def _save_fp(
         self,
+        bbox_resize_factor,
+        w: int = None,
+        h: int = None,
     ):
         """Run batch detection and save cropped ROIs"""
 
@@ -483,7 +558,7 @@ class ClassificationDatasetBuilder:
             image = Image.open(file_name).convert("RGB")
             img_width, img_height = image.size
             image = np.asarray(image)
-            
+
             batch = []
             count = 0
             for i, row in df_det.iterrows():
@@ -495,30 +570,33 @@ class ClassificationDatasetBuilder:
                     # label_id = row['pred_category_id']
                     label_name = "false_positives"
                 except:
-                    # x1 = int(row["gt_x_min"])
-                    # y1 = int(row["gt_y_min"])
-                    # x2 = int(row["gt_x_max"])
-                    # y2 = int(row["gt_y_max"])
-                    # # label_id = row['gt_category_id']
-                    # label_name = "false_negatives"
                     continue
 
+                if w and h:
+                    x = int((x1 + x2) / 2)
+                    y = int((y1 + y2) / 2)
+                    x1 = x - w / 2
+                    x2 = x + w / 2
+                    y1 = y - h / 2
+                    y2 = y + h / 2
+
                 x1, x2, y1, y2 = resize_bbox(
-                    self.bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
+                    bbox_resize_factor, x1, x2, y1, y2, img_width, img_height
                 )
 
                 # record
-                data = dict(image=image[y1:y2, x1:x2],
-                            label_name=label_name,
-                            file_name=file_name,
-                            tag=f"#{y1}_{y2}_{x1}_{x2}"                        
-                            )
+                data = dict(
+                    image=image[y1:y2, x1:x2],
+                    label_name=label_name,
+                    file_name=file_name,
+                    tag=f"#{y1}_{y2}_{x1}_{x2}",
+                )
                 batch.append(data)
                 count += 1
-                
+
             # save data
             self._save_batch(batch)
-            
+
         return None
 
 

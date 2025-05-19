@@ -1,16 +1,21 @@
 """Creates/gets an MLflow experiment and registers a detection model to the Model Registry."""
 
 # import argparse
+import fire
 from dataclasses import dataclass
 from sys import version_info
-from sahi.models.ultralytics import UltralyticsDetectionModel
+
+# from sahi.models.ultralytics import UltralyticsDetectionModel
 from ultralytics import YOLO
-from sahi.predict import get_prediction, get_sliced_prediction
+
+# from sahi.predict import get_prediction, get_sliced_prediction
 from pathlib import Path
 import torch
 import mlflow
-from datargs import parse
+
+# from datargs import parse
 import platform
+from datalabeling.ml.models import ImageClassifier
 
 
 def get_experiment_id(name: str):
@@ -32,73 +37,37 @@ def get_experiment_id(name: str):
 class DetectorWrapper(mlflow.pyfunc.PythonModel):
     def __init__(
         self,
-        tilesize: int = 640,
-        confidence_threshold: float = 0.1,
-        overlap_ratio: float = 0.1,
-        imgsz: int = 640,
-        use_sliding_window: bool = True,
-        nms_iou: bool = 0.5,
     ):
-        """_summary_
-
-        Args:
-            tilesize (int, optional): _description_. Defaults to 640.
-            confidence_threshold (float, optional): _description_. Defaults to 0.1.
-            overlap_ratio (float, optional): _description_. Defaults to 0.1.
-            sahi_postprocess (str, optional): _description_. Defaults to 'NMS'.
-        """
         super(DetectorWrapper, self).__init__()
-        self.tilesize = tilesize
-        self.confidence_threshold = confidence_threshold
-        self.overlapratio = overlap_ratio
-        self.imgsz = imgsz
-        self.use_sliding_window = use_sliding_window
-        self.nms_iou = nms_iou
-        self.detection_model = None
+        self.model = None
 
     def load_context(self, context):
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
+        # device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
         path = Path(context.artifacts["path"]).resolve()
 
         if platform.system().lower() != "windows":
             path = path.as_posix().replace("\\", "/")
 
-        self.detection_model = UltralyticsDetectionModel(
-            model=YOLO(path, task="detect"),
-            confidence_threshold=self.confidence_threshold,
-            image_size=self.imgsz,
-            device=device,
-        )
+        self.model = YOLO(path, task="detect")
 
-    def predict(self, context, img):
-        if self.use_sliding_window:
-            tilesize = self.tilesize
-            result = get_sliced_prediction(
-                img,
-                self.detection_model,
-                slice_height=tilesize,
-                slice_width=tilesize,
-                overlap_height_ratio=self.overlapratio,
-                overlap_width_ratio=self.overlapratio,
-                postprocess_type="NMS",
-                postprocess_match_metric="IOU",
-                postprocess_match_threshold=self.nms_iou,
-                verbose=False,
-            )
-        else:
-            result = get_prediction(
-                image=img,
-                detection_model=self.detection_model,
-                shift_amount=[0, 0],
-                full_shape=None,
-                postprocess=None,
-                verbose=False,
-            )
 
-        result = result.to_coco_annotations()
+class RoiClassifierWrapper(mlflow.pyfunc.PythonModel):
+    def __init__(
+        self,
+    ):
+        super(RoiClassifierWrapper, self).__init__()
 
-        return result
+        self.model = None
+
+    def load_context(self, context):
+        path = Path(context.artifacts["path"]).resolve()
+
+        if platform.system().lower() != "windows":
+            path = path.as_posix().replace("\\", "/")
+
+        self.model = torch.jit.load(path, map_location="cpu")
+        self.model.eval()
 
 
 @dataclass
@@ -141,35 +110,115 @@ conda_env = {
 }
 
 
-def main():
-    args = parse(Args)
+class RegisterDetector(object):
+    def __init__(
+        self,
+        weights: str,
+        name: str = "labeler",
+        imgsz: int = 800,
+        mlflow_tracking_uri: str = "http://localhost:5000",
+    ):
+        model_path = Path(weights).resolve()
+        YOLO(model_path, task="detect").export(
+            format="torchscript", imgsz=imgsz, optimize=True, nms=True, device="cpu"
+        )
+        torchscript_path = model_path.with_suffix(".torchscript")
 
-    mlflow.set_tracking_uri(args.mlflow_tracking_uri)
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
 
-    artifacts = {"path": str(Path(args.model).resolve())}
+        artifacts = {"path": str(torchscript_path)}
 
-    model = DetectorWrapper(
-        tilesize=args.tilesize,
-        confidence_threshold=args.confidence_threshold,
-        overlap_ratio=args.overlap_ratio,
-        use_sliding_window=args.use_sliding_window,
-        nms_iou=args.nms_iou,
-        imgsz=args.imgsz,
-    )
+        exp_id = get_experiment_id(name)
 
-    exp_id = get_experiment_id(args.exp_name)
+        with mlflow.start_run(experiment_id=exp_id):
+            mlflow.pyfunc.log_model(
+                "finetuned",
+                python_model=DetectorWrapper(),
+                conda_env=conda_env,
+                artifacts=artifacts,
+                registered_model_name=name,
+            )
 
-    # cloudpickle.register_pickle_by_value(model_wrapper)
 
-    with mlflow.start_run(experiment_id=exp_id):
-        mlflow.pyfunc.log_model(
-            "finetuned",
-            python_model=model,
-            conda_env=conda_env,
-            artifacts=artifacts,
-            registered_model_name=args.model_name,
+class RegisterRoiClassifier(object):
+    def __init__(
+        self,
+        weights: str = r"D:\datalabeling\base_models_weights\roi_classifier.ckpt",
+        num_classes: int = 2,
+        cls_is_features: bool = True,
+        cls_imgsz: int = 128,
+        cls_embed_dim: int = 384,
+        name: str = "classifier",
+        mlflow_tracking_uri: str = "http://localhost:5000",
+        save_path: str = "roi_classifier_torchscript.pt",
+    ):
+        mlflow.set_tracking_uri(mlflow_tracking_uri)
+
+        model_path = Path(weights).resolve()
+        model = ImageClassifier.load_from_checkpoint(
+            model_path, num_classes=num_classes, cls_is_features=cls_is_features
+        ).model
+
+        # initialize weights
+        if cls_is_features:
+            model(torch.zeros(1, cls_embed_dim))
+        else:
+            model(torch.zeros(1, 3, cls_imgsz, cls_imgsz))
+
+        model_scripted = torch.jit.script(model)  # Export to TorchScript
+        model_scripted.save(save_path)  # Save
+
+        artifacts = {"path": save_path}
+
+        exp_id = get_experiment_id(name)
+
+        with mlflow.start_run(experiment_id=exp_id):
+            mlflow.pyfunc.log_model(
+                "finetuned",
+                python_model=RoiClassifierWrapper(),
+                conda_env=conda_env,
+                artifacts=artifacts,
+                registered_model_name=name,
+            )
+
+
+class Register(object):
+    def register_detector(
+        self,
+        weights_path: str,
+        name: str = "labeler",
+        imgsz: int = 800,
+        mlflow_tracking_uri: str = "http://localhost:5000",
+    ):
+        RegisterDetector(
+            weights=weights_path,
+            name=name,
+            imgsz=imgsz,
+            mlflow_tracking_uri=mlflow_tracking_uri,
+        )
+
+    def register_classifier(
+        self,
+        weights_path,
+        num_classes: int = 2,
+        cls_is_features: bool = True,
+        cls_imgsz: int = 128,
+        cls_embed_dim: int = 384,
+        name: str = "classifier",
+        mlflow_tracking_uri: str = "http://localhost:5000",
+        save_path: str = "roi_classifier_torchscript.pt",
+    ):
+        RegisterRoiClassifier(
+            weights=weights_path,
+            num_classes=num_classes,
+            cls_is_features=cls_is_features,
+            cls_imgsz=cls_imgsz,
+            cls_embed_dim=cls_embed_dim,
+            name=name,
+            mlflow_tracking_uri=mlflow_tracking_uri,
+            save_path=save_path,
         )
 
 
 if __name__ == "__main__":
-    main()
+    fire.Fire(Register)

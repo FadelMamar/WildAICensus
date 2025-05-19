@@ -1,18 +1,9 @@
 import litserve as ls
 import os
-
-from PIL import Image
 import torch
 import logging
-# from ray import serve
 
-from .utils import (
-    Detector,
-    decode_request,
-    postprocess_response,
-    GPSUtils,
-    ImageProcessor,
-)
+from .utils import Detector
 
 logger = logging.getLogger(__file__)
 
@@ -43,18 +34,28 @@ class MyModelAPI(ls.LitAPI):
 
         logger.info("creating model...")
 
-        self.get_image_gps_coord = GPSUtils.get_gps_coord
-        self.get_px_gps_coord = ImageProcessor.generate_pixel_coordinates
-
-    def decode_request(self, request: dict) -> Image.Image:
+    def decode_request(self, request: dict) -> dict:
         """
         Convert the JSON payload into model inputs.
         For example, extract and preprocess an image or numeric data.
         """
+        import base64
+        from io import BytesIO
+        from PIL import Image
 
-        decoded = decode_request(request)
+        try:
+            img_data = request["image"]
 
-        return decoded
+            if not isinstance(img_data, str):
+                raise ValueError("Invalid base64 format")
+
+            image_bytes = base64.b64decode(img_data)
+            img = Image.open(BytesIO(image_bytes))
+
+        except Exception as e:
+            raise ValueError(f"Image decoding failed: {str(e)}")
+
+        return {"image": img}
 
     def predict(self, x: dict):
         """
@@ -62,14 +63,10 @@ class MyModelAPI(ls.LitAPI):
         Input `x` is the output of decode_request.
         """
 
-        out = dict(image_gps=x.pop("image_gps"))
-
         logger.info("computing predictions...")
 
-        results = self.model.predict(
-            **x,
-        )
-        out["detections"] = results
+        results = self.model.predict(**x)
+        out = dict(detections=results)
 
         return out
 
@@ -79,45 +76,3 @@ class MyModelAPI(ls.LitAPI):
         """
         logger.debug("sending response...")
         return output
-
-
-# @serve.deployment()
-class DetectionService:
-    def __init__(self):
-        # One-time model load
-        device = os.environ.get("DEVICE", "cpu")
-        self.model = Detector(
-            mlflow_model_name=os.environ["MODEL_NAME"],
-            mlflow_model_alias=os.environ["MODEL_ALIAS"],
-            use_sliding_window=True,
-            confidence_threshold=0.15,
-            overlap_ratio=0.2,
-            tilesize=960,
-            imgsz=960,
-            device=device,
-            tracking_url=os.environ["MLFLOW_TRACKING_URI"],
-        )
-
-    def detect(self, request_json):
-        try:
-            # Decode and prepare inputs
-            inputs = decode_request(request_json)
-        except Exception as e:
-            # return serve.context.Response(
-            #     response=f"Request decoding error: {e}", status_code=400
-            # )
-            return f"Request decoding error: {e}"
-
-        # Run prediction
-        try:
-            with torch.no_grad():
-                detections = self.model.predict(**inputs)
-        except Exception as e:
-            # return serve.context.Response(
-            #     response=f"Model prediction error: {e}", status_code=500
-            # )
-            return f"Model prediction error: {e}"
-
-        # Format and return response
-        result = postprocess_response(inputs["image_gps"], detections)
-        return result
