@@ -1009,7 +1009,9 @@ class ImageProcessor:
         exif = GPSUtils.get_exif(file_name=image_path, image=image)
 
         if sensor_height is None:
-            sensor_height = sensor_heights[exif["Model"]]
+            sensor_height = sensor_heights.get(exif["Model"])
+            if sensor_height is None:
+                raise ValueError("Sensor height not found. Please provide it.")
 
         ##-- Compute gsd
         focal_length = exif["FocalLength"] * 0.1  # in cm
@@ -1022,7 +1024,23 @@ class ImageProcessor:
         return round(gsd, 3)
 
     @staticmethod
-    def generate_pixel_coordinates(x, y, lat_center, lon_center, W, H, gsd=0.026):
+    def generate_pixel_coordinates(
+        x, y, lat_center, lon_center, W, H, gsd=0.026
+    ) -> tuple[float, float]:
+        """computes (x,y) pixel gps coordinates
+
+        Args:
+            x (int): x center
+            y (int): y center
+            lat_center (float): latitude of center of image
+            lon_center (float): longitude of center of image
+            W (int): image width
+            H (int): image height
+            gsd (float, optional): _description_. Defaults to 0.026.
+
+        Returns:
+            tuple: latitude, longitude
+        """
         # Convert center to UTM
         easting_center, northing_center, zone_num, zone_let = utm.from_latlon(
             lat_center, lon_center
@@ -1130,13 +1148,16 @@ class GPSUtils:
         coords = gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"]
 
         if altitude is None:
-            alt = f"{gps_info['GPSAltitude']}m"
+            alt = f"{gps_info.get('GPSAltitude', None)}m"
         else:
             alt = altitude
 
-        coords = (
-            gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"] + " " + alt
-        )
+        if alt:
+            coords = (
+                gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"] + " " + alt
+            )
+        else:
+            coords = gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"]
         if return_as_decimal:
             lat, long, alt = geopy.Point.from_string(coords)
             coords = lat, long, alt * 1e3

@@ -41,6 +41,15 @@ def load_yaml(path: str):
     return cfg
 
 
+def get_images_paths(
+    images_dir: str,
+    patterns: tuple = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG"),
+):
+    images_paths = chain.from_iterable([Path(images_dir).glob(p) for p in patterns])
+    images_paths = list(images_paths)
+    return images_paths
+
+
 def save_yaml(cfg: dict, save_path: str, mode="w"):
     with open(save_path, mode, encoding="utf-8") as file:
         yaml.dump(cfg, file)

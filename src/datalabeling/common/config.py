@@ -5,6 +5,8 @@ import math
 import torch
 import geopy
 from PIL import Image
+import numpy as np
+import pandas as pd
 
 
 @dataclass  # (frozen=True)
@@ -47,7 +49,48 @@ class Detection:
         )
 
         return det
-    
+
+    @classmethod
+    def from_ls(cls, detections: list, image_path: str):
+        det_objects = []
+        for detection in detections:
+            for det in detection["result"]:
+                image_height = det["original_height"]
+                image_width = det["original_width"]
+                value = det["value"]
+                class_name = value["rectanglelabels"]  # size 1
+                x_min = value["x"] * image_width / 100
+                y_min = value["y"] * image_height / 100
+                w = value["width"] * image_width / 100
+                h = value["height"] * image_height / 100
+
+                assert len(class_name) == 1, "Error. Check out code or Labeling format."
+                class_name = class_name[0]
+
+                det = cls(
+                    x_min=int(x_min),
+                    y_min=int(y_min),
+                    x_max=int(x_min + w),
+                    y_max=int(y_min + h),
+                    class_name=class_name,
+                    label=None,
+                    score=None,
+                    image_gps_loc=None,
+                    gps_loc=None,
+                    parent_image=image_path,
+                )
+
+                det_objects.append(det)
+
+        return det_objects
+
+    def to_absolute_coords(self, x_offset: int, y_offset: int) -> None:
+        """Convert relative coordinates to absolute image coordinates."""
+        self.x_min += x_offset
+        self.x_max += x_offset
+        self.y_min += y_offset
+        self.y_max += y_offset
+
     @property
     def is_empty(self):
         return any([self.x is None, self.y is None, self.w is None, self.h is None])
@@ -55,7 +98,15 @@ class Detection:
     def to_dict(
         self,
     ):
-        return vars(self)
+        out = vars(self)
+
+        out["w"] = self.w
+        out["h"] = self.h
+        out["x"] = self.x
+        out["y"] = self.y
+        out["area"] = self.area
+
+        return out
 
     def to_ls(
         self, from_name, to_name, label_type, img_height: int, img_width: int
@@ -132,6 +183,92 @@ class Detection:
         alt = point.altitude * 1e3  # converting to meters
 
         return lat, long, alt
+
+
+@dataclass
+class TileResult:
+    """Class representing the result of a tile inference."""
+
+    tile_id: int
+    x_offset: int
+    y_offset: int
+    detections: List[Detection]
+
+
+@dataclass
+class Tile:
+    """Class representing an image tile."""
+
+    image_path: str
+    image_data: Image.Image = None
+    width: int = None
+    height: int = None
+    x_offset: int = None
+    y_offset: int = None
+    parent_image: str = None
+    image_gps_loc: str = None
+    detections: List[Detection] = None
+
+    def detections_to_df(
+        self,
+    ) -> pd.DataFrame:
+        self._set_with_height()
+
+        for det in self.detections:
+            assert self.image_path is not None, "provide the path to the tile."
+            det.parent_image = self.image_path
+
+        out = [det.to_dict() for det in self.detections]
+        out = pd.DataFrame.from_dict(out, orient="columns")
+
+        out["image_width"] = self.width
+        out["image_height"] = self.height
+
+        out.rename(columns={"parent_image": "file_name"}, inplace=True)
+
+        return out
+
+    def detections_to_yolo(
+        self,
+    ) -> pd.DataFrame:
+        df = self.detections_to_df()
+
+        df["w"] = df["w"] / self.width
+        df["h"] = df["h"] / self.height
+        df["x"] = df["x"] / self.width
+        df["y"] = df["y"] / self.height
+
+        return df
+
+    def _set_with_height(
+        self,
+    ):
+        image = self.image_data
+        if image is None:
+            image = Image.open(self.image_path)
+        if self.width is None or self.height is None:
+            self.width, self.height = image.size
+
+
+@dataclass
+class TilingConfig:
+    root: str
+    dest: str
+
+    rmheight: float
+    rmwidth: float
+
+    sensor_height: float
+    flight_height: float
+
+    overlapfactor: float
+
+    ratiowidth: float
+    ratioheight: float
+
+    patterns: Sequence[str] = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG")
+    save_coords_only: bool = False
+    metadata_save_path: str = None
 
 
 @dataclass
@@ -232,7 +369,7 @@ class TrainingConfig:
     cls_monitor_mode: str = "max"
     cls_auto_augment: str = "augmix"
     cls_is_features: bool = False
-    cls_tn_ratio:float=1.0
+    cls_tn_ratio: float = 1.0
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original

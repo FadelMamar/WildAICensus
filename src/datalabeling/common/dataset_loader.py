@@ -8,23 +8,260 @@ from typing import Dict, Sequence
 from PIL import Image
 import cv2
 import numpy as np
+import torch
 import pandas as pd
 import yaml
 from tqdm import tqdm
 from itertools import chain, product
+import math
+import geopy
+from torchvision.utils import save_image
+import torchvision.transforms
+from itertools import chain
+
 from .annotation_utils import (
     ImageProcessor,
+    GPSUtils,
     LabelstudioConverter,
     load_coco_annotations,
     resize_bbox,
 )
-from .config import DataConfig, LabelConfig, EvaluationConfig
+from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig, Tile
 from .io import load_yaml, DataHandler
 from .processor import FeatureExtractor
 from ..ml.models import Detector
 from .evaluation import PerformanceEvaluator
 
 logger = logging.getLogger(__name__)
+
+
+class TileBuilder:
+    def __init__(self, config: TilingConfig):
+        self.config = config
+
+    @staticmethod
+    def get_coordinates(
+        image_width: int,
+        tile_w: int,
+        image_height: int,
+        tile_h: int,
+        overlaping_factor: float,
+    ):
+        # x limits
+        lim = math.ceil((image_width - tile_w) / ((1 - overlaping_factor) * tile_w))
+        x_right = [
+            math.floor(tile_w + i * (1 - overlaping_factor) * tile_w)
+            for i in range(lim)
+        ]
+        x_coords = [(x - tile_w, x) for x in x_right]
+        if len(x_coords) > 0:
+            left, right = x_coords[-1]
+            x_coords[-1] = (left, image_width)  # extending to remaining pixels
+
+        # y limits
+        lim = math.ceil((image_height - tile_h) / ((1 - overlaping_factor) * tile_h))
+        y_bottom = [
+            math.floor(tile_h + i * (1 - overlaping_factor) * tile_h)
+            for i in range(lim)
+        ]
+        y_coords = [(y - tile_h, y) for y in y_bottom]
+        if len(y_coords) > 0:
+            top, bottom = y_coords[-1]
+            y_coords[-1] = (top, image_height)  # extending to remaining pixels
+
+        # tiles coordinates
+        if len(y_coords) == 0:
+            y_coords = [
+                (0, image_height),
+            ]
+
+        if len(x_coords) == 0:
+            x_coords = [
+                (0, image_width),
+            ]
+
+        coordinates = product(x_coords, y_coords)
+        return list(coordinates)
+
+    def get_patches(self, image: torch.Tensor, coords: list):
+        patches = list()
+
+        # store patches
+        for (x_left, x_right), (y_top, y_bottom) in coords:
+            patches.append(image[:, y_top:y_bottom, x_left:x_right])
+
+        return patches
+
+    def save_list_images(self, patches: list, basename: str, dest_folder: str) -> None:
+        """Save mini-batch tensors into image files
+
+        Use torchvision save_image function,
+        see https://pytorch.org/vision/stable/utils.html#torchvision.utils.save_image
+
+        Args:
+            batch (list): mini-batch tensor
+            basename (str) : parent image name, with extension
+            dest_folder (str): destination folder path
+        """
+
+        base_wo_extension, extension = basename.split(".")[0], basename.split(".")[1]
+        for i, b in enumerate(range(len(patches))):
+            full_path = "_".join([base_wo_extension, str(i) + "."]) + extension
+            save_path = os.path.join(dest_folder, full_path)
+            save_image(patches[b], fp=save_path)
+
+    def run(
+        self,
+    ) -> dict[str, list]:
+        dest = Path(self.config.dest)
+        if not dest.exists():
+            dest.mkdir(parents=True, exist_ok=True)
+
+        images_paths = chain.from_iterable(
+            [Path(self.config.root).glob(p) for p in self.config.patterns]
+        )
+        images_paths = list(images_paths)
+
+        tile_metadata = dict()
+        for img_path in tqdm(images_paths, desc="Exporting patches"):
+            try:
+                pil_img = Image.open(img_path)
+            except:
+                print("failed for: ", img_path, flush=True)
+                continue
+            img_tensor = torchvision.transforms.ToTensor()(pil_img)
+            img_name = os.path.basename(img_path)
+
+            # Cropping out image-level overlap
+            height_overlap = math.ceil(self.config.rmheight * img_tensor.shape[1])
+            width_overlap = math.ceil(self.config.rmwidth * img_tensor.shape[2])
+
+            if height_overlap * width_overlap > 0:
+                img_tensor = img_tensor[
+                    :, height_overlap:-height_overlap, width_overlap:-width_overlap
+                ]
+                print(
+                    f"Removing {2 * width_overlap} pixels to the width; and {2 * height_overlap} pixels to the height."
+                )
+            elif (height_overlap == 0) and (width_overlap != 0):
+                img_tensor = img_tensor[:, :, width_overlap:-width_overlap]
+            elif width_overlap == 0 and (height_overlap != 0):
+                img_tensor = img_tensor[:, height_overlap:-height_overlap, :]
+
+            # Computes tile width and height using the given ratios
+            assert (self.config.ratiowidth <= 1.0) and (
+                self.config.ratioheight <= 1.0
+            ), "The ratios should be at most 1.0"
+            if self.config.ratiowidth > 0.0:
+                width = math.ceil(img_tensor.shape[2] * self.config.ratiowidth)
+            if self.config.ratioheight > 0.0:
+                height = math.ceil(img_tensor.shape[1] * self.config.ratioheight)
+
+            # checking overlapfactor provided
+            assert self.config.overlapfactor < 1, "It should be less than 1."
+
+            image_width = img_tensor.shape[2]
+            image_height = img_tensor.shape[1]
+
+            # get tile coordinates
+            coords = self.get_coordinates(
+                image_width,
+                tile_w=width,
+                image_height=image_height,
+                tile_h=height,
+                overlaping_factor=self.config.overlapfactor,
+            )
+
+            # get tiles gps coordinates
+            image_gps = GPSUtils.get_gps_coord(
+                file_name=None, return_as_decimal=True, image=pil_img
+            )
+            if image_gps is not None:
+                (lat, long, alt), _ = image_gps
+                alt = alt / 1000  # conver to meters
+
+                tile_gps_coords = []
+                gsd = ImageProcessor.get_gsd(
+                    image=pil_img,
+                    image_path=None,
+                    sensor_height=self.config.sensor_height,
+                    flight_height=self.config.flight_height,
+                )
+                for (x_left, x_right), (y_top, y_bottom) in coords:
+                    x = (x_left + x_right) / 2
+                    y = (y_top + y_bottom) / 2
+                    gps = ImageProcessor.generate_pixel_coordinates(
+                        x=x,
+                        y=y,
+                        W=image_width,
+                        H=image_height,
+                        lat_center=lat,
+                        lon_center=long,
+                        gsd=gsd,
+                    )
+                    gps = geopy.Point(gps[0], gps[1], alt)
+                    tile_gps_coords.append(str(gps))
+            else:
+                tile_gps_coords = [None for _ in range(len(coords))]
+
+            tile_metadata[str(img_path)] = dict(
+                tile_coordinates=coords,
+                tile_gps_coord=tile_gps_coords,
+            )
+            # save patches
+            if not self.config.save_coords_only:
+                patches = self.get_patches(img_tensor, coords=coords)
+                self.save_list_images(patches, img_name, self.config.dest)
+
+        # saving metdata
+        json_path = self.config.metadata_save_path
+        if json_path is None:
+            json_path = Path(self.config.dest) / f"metadata.json"
+            try:
+                with open(json_path, "w") as f:
+                    json.dump(tile_metadata, f, indent=1)
+            except Exception as e:
+                # Fallback to default if previous failed
+                with open(Path(self.config.dest) / f"metadata.json", "w") as f:
+                    json.dump(tile_metadata, f, indent=1)
+
+        return tile_metadata
+
+
+class LabelingDataset:
+    def __init__(self, tiles: list[Tile] = None):
+        self._tiles = tiles or []
+        self.data = None
+
+    def add_tile(self, tile: Tile):
+        self._tiles.append(tile)
+        return
+
+    def build(
+        self,
+    ):
+        data = [tile.detections_to_df() for tile in self._tiles]
+        self.data = pd.concat(data, axis=0).reset_index(drop=True)
+        return
+
+    def __len__(
+        self,
+    ) -> int:
+        if self.data is None:
+            return 0
+
+        return len(self.data)
+
+    def __getitem__(self, index) -> dict:
+        cols = list(self.data.columns)
+        cols.remove("file_name")
+        cols.remove("score")
+
+        image = self.data.at[index, "file_name"]
+        # image = Image.open(image)
+        label = self.data.loc[index, cols].to_dict()
+
+        return dict(image=image, label=label)
 
 
 class LabelHandler:
@@ -68,8 +305,6 @@ class LabelHandler:
 
         # updaate yaml and save
         yolo_config.update({"names": self._label_map, "nc": len(self._label_map)})
-        with open(yaml_path, "w") as file:
-            yaml.dump(yolo_config, file, default_flow_style=False, sort_keys=False)
 
 
 class YOLODatasetBuilder:
