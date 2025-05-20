@@ -507,15 +507,13 @@ def get_gps_coords_from_ls(
     LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
     API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
     labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
-    # print(API_KEY)
+
     # check connection
-    project = labelstudio_client.projects.get(id=project_id)
+    labelstudio_client.projects.get(id=project_id)
 
-    print(config)
+    # print(config)
 
-    if config.root is None:
-        data_dir = labelstudio_client.import_storage.local.get(project_id).path
-        print(f"Loading data from {data_dir}")
+    assert config.root is not None, "Provide path to the original images directory"
 
     dataset = LabelingDataset.from_ls(
         labelstudio_client,
