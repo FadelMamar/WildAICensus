@@ -375,18 +375,20 @@ class Detector(object):
         self.config = config
         self.detection_model = detection_model
 
-    def set_detection_model(self, detection_model, path_to_weights=None):
+    def set_detection_model(self, detection_model, path_to_weights=None,yolo_model:YOLO=None):
         if detection_model:
             self.detection_model = detection_model
 
-        else:
-            self.detection_model = UltralyticsDetectionModel(
-                model=YOLO(path_to_weights, task="detect"),
-                confidence_threshold=self.config.confidence_threshold,
-                image_size=self.config.imgsz,
-                device=self.config.device,
-            )
-            logger.info(f"Computing device: {self.config.device}")
+        elif path_to_weights:
+            yolo_model = YOLO(path_to_weights, task="detect")
+
+        self.detection_model = UltralyticsDetectionModel(
+            model=yolo_model,
+            confidence_threshold=self.config.confidence_threshold,
+            image_size=self.config.imgsz,
+            device=self.config.device,
+        )
+        logger.info(f"Computing device: {self.config.device}")
 
     # TODO: batch predictions with slicing
     def predict(
