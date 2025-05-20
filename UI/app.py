@@ -257,7 +257,7 @@ def main():
             project_id = st.number_input("Project ID", min_value=0, step=1)
             top_n = st.number_input("top_n", min_value=0, step=1, value=0)
             overlapfactor = st.number_input(
-                "overlapfactor", min_value=0.0, max_value=0.9
+                "overlapfactor", min_value=0.0, max_value=0.9,value=0.1
             )
             ratiowidth = st.number_input(
                 "ratiowidth", min_value=0.0, max_value=1.0, value=0.5
@@ -277,6 +277,7 @@ def main():
             sensor_height = st.number_input(
                 "sensor_height in [mm]",
                 min_value=0.0,
+                value=24.0
             )
             gsd = st.number_input("gsd in [cm/px]", min_value=0.0, value=2.26)
             dest = st.text_input(
@@ -291,7 +292,7 @@ def main():
             )
 
             root_images_dir = st.text_input(
-                "Path to images directory (without quotes)",
+                "Path to UNTILED images directory (without quotes)",
                 help="something like my_map.html",
                 value=None,
             )
@@ -506,6 +507,7 @@ def get_gps_coords_from_ls(
 
     LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
     API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    # print("API-Key",API_KEY)
     labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
 
     # check connection
