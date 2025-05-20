@@ -1,13 +1,9 @@
 import logging
 import os
 from pathlib import Path
-import json
-from typing import Sequence
 import lightning as L
 import torch
-import yaml
 from animaloc.eval import HerdNetEvaluator, PointsMetrics
-from animaloc.eval.lmds import HerdNetLMDS
 from animaloc.models import HerdNet, LossWrapper
 from tqdm import tqdm
 from animaloc.train.losses import FocalLoss
@@ -19,14 +15,9 @@ from lightning.pytorch.callbacks import (
 import numpy as np
 import mlflow
 from lightning.pytorch.loggers import MLFlowLogger
-import torch.nn as nn
-from torch.nn import functional as F
 from torch.nn import CrossEntropyLoss
 from torch.optim import Adam
-from torchmetrics.classification import Accuracy, Precision, Recall, F1Score, AUROC
-from torch.utils.data import DataLoader
 from ultralytics import RTDETR, YOLO
-from torchvision import models
 
 from ..common.config import TrainingConfig
 from ..common.io import HerdnetData, ClassifierDataModule
@@ -42,9 +33,7 @@ from .utils import (
     remove_label_cache,
     CustomTrainer,
 )
-from .models import (ImageClassifier,
-                     HerdnetTrainer,
-                     get_image_classifier_module)
+from .models import ImageClassifier, HerdnetTrainer
 
 logger = logging.getLogger(__name__)
 
@@ -79,8 +68,13 @@ class TrainingManager:
     def _load_model(self):
         if self.args.mlflow_model_alias is not None:
             name = self.args.run_name
-            alias = self.args.mlflow_model_alias            
-            model, version = load_registered_model(alias=alias,name=name,mlflow_tracking_url=self.args.mlflow_tracking_uri,load_unwrapped=True)
+            alias = self.args.mlflow_model_alias
+            model, version = load_registered_model(
+                alias=alias,
+                name=name,
+                mlflow_tracking_url=self.args.mlflow_tracking_uri,
+                load_unwrapped=True,
+            )
             self.args.path_weights = model.detection_model.model.ckpt_path
             logger.info(f"Loading model registered with alias: {alias}")
 
@@ -274,7 +268,7 @@ class TrainingManager:
             num_workers=os.cpu_count() // 4,
             img_size=self.args.imgsz,
             is_features=self.args.cls_is_features,
-            tn_ratio=self.args.cls_tn_ratio
+            tn_ratio=self.args.cls_tn_ratio,
         )
 
         datamodule.setup("fit")

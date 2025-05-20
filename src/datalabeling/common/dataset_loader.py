@@ -9,22 +9,391 @@ from PIL import Image
 import cv2
 import numpy as np
 import pandas as pd
-import yaml
 from tqdm import tqdm
 from itertools import chain, product
+import math
+import geopy
+from urllib.parse import unquote
+from label_studio_tools.core.utils.io import get_local_path
+
 from .annotation_utils import (
     ImageProcessor,
+    GPSUtils,
     LabelstudioConverter,
     load_coco_annotations,
     resize_bbox,
 )
-from .config import DataConfig, LabelConfig, EvaluationConfig
+from .base import Tile, Detection
+
+from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
 from .io import load_yaml, DataHandler
 from .processor import FeatureExtractor
 from ..ml.models import Detector
 from .evaluation import PerformanceEvaluator
 
 logger = logging.getLogger(__name__)
+
+
+class TileBuilder:
+    def __init__(self, config: TilingConfig):
+        self.config = config
+        self._metadata = None
+        self.tile_metadata = None
+
+    @staticmethod
+    def get_coordinates(
+        image_width: int,
+        tile_w: int,
+        image_height: int,
+        tile_h: int,
+        overlaping_factor: float,
+    ):
+        # x limits
+        lim = math.ceil((image_width - tile_w) / ((1 - overlaping_factor) * tile_w))
+        x_right = [
+            math.floor(tile_w + i * (1 - overlaping_factor) * tile_w)
+            for i in range(lim)
+        ]
+        x_coords = [(x - tile_w, x) for x in x_right]
+        if len(x_coords) > 0:
+            left, right = x_coords[-1]
+            x_coords[-1] = (left, image_width)  # extending to remaining pixels
+
+        # y limits
+        lim = math.ceil((image_height - tile_h) / ((1 - overlaping_factor) * tile_h))
+        y_bottom = [
+            math.floor(tile_h + i * (1 - overlaping_factor) * tile_h)
+            for i in range(lim)
+        ]
+        y_coords = [(y - tile_h, y) for y in y_bottom]
+        if len(y_coords) > 0:
+            top, bottom = y_coords[-1]
+            y_coords[-1] = (top, image_height)  # extending to remaining pixels
+
+        # tiles coordinates
+        if len(y_coords) == 0:
+            y_coords = [
+                (0, image_height),
+            ]
+
+        if len(x_coords) == 0:
+            x_coords = [
+                (0, image_width),
+            ]
+
+        coordinates = product(x_coords, y_coords)
+        return list(coordinates)
+
+    def get_patches(self, image: np.ndarray, coords: list):
+        patches = list()
+
+        # store patches
+        for (x1, x2), (y1, y2) in coords:
+            patches.append(image[y1:y2, x1:x2])
+
+        return patches
+
+    def save_list_images(self, patches: list, basename: str, dest_folder: str) -> None:
+        """Save mini-batch into image files
+        Args:
+            batch (list): mini-batch
+            basename (str) : parent image name, with extension
+            dest_folder (str): destination folder path
+        """
+
+        base_wo_extension, extension = basename.split(".")[0], basename.split(".")[1]
+        for i, b in enumerate(range(len(patches))):
+            full_path = "_".join([base_wo_extension, str(i) + "."]) + extension
+            save_path = os.path.join(dest_folder, full_path)
+            cv2.imwrite(save_path, patches[b].astype("uint8"))
+
+    def run(self, load_existing_metadata: bool = False) -> dict[str, list]:
+        if load_existing_metadata:
+            json_path = self.config.metadata_save_path
+            if json_path is None:
+                json_path = Path(self.config.dest) / "metadata.json"
+            try:
+                with open(json_path, "r") as f:
+                    self._metadata = json.load(f)
+
+                return self._expand_metada()
+
+            except Exception as e:
+                print(e)
+                print("Aborting attempt to load")
+
+        dest = Path(self.config.dest)
+
+        if not dest.exists():
+            dest.mkdir(parents=True, exist_ok=True)
+
+        images_paths = chain.from_iterable(
+            [Path(self.config.root).glob(p) for p in self.config.patterns]
+        )
+        images_paths = list(set(images_paths))
+
+        tile_metadata = dict()
+        for img_path in tqdm(images_paths, desc="Exporting patches"):
+            try:
+                pil_image = Image.open(img_path)
+            except:
+                print("failed for: ", img_path, flush=True)
+                continue
+            image_array = np.asarray(pil_image.convert("RGB"))
+            img_name = os.path.basename(img_path)
+
+            # Cropping out image-level overlap
+            height_overlap = math.ceil(self.config.rmheight * image_array.shape[0])
+            width_overlap = math.ceil(self.config.rmwidth * image_array.shape[1])
+
+            if height_overlap * width_overlap > 0:
+                image_array = image_array[
+                    height_overlap:-height_overlap, width_overlap:-width_overlap
+                ]
+                print(
+                    f"Removing {2 * width_overlap} pixels to the width; and {2 * height_overlap} pixels to the height."
+                )
+            elif (height_overlap == 0) and (width_overlap != 0):
+                image_array = image_array[:, width_overlap:-width_overlap]
+            elif width_overlap == 0 and (height_overlap != 0):
+                image_array = image_array[height_overlap:-height_overlap, :]
+
+            # Computes tile width and height using the given ratios
+            assert (self.config.ratiowidth <= 1.0) and (
+                self.config.ratioheight <= 1.0
+            ), "The ratios should be at most 1.0"
+            if self.config.ratiowidth > 0.0:
+                width = math.ceil(image_array.shape[1] * self.config.ratiowidth)
+            if self.config.ratioheight > 0.0:
+                height = math.ceil(image_array.shape[0] * self.config.ratioheight)
+
+            # checking overlapfactor provided
+            assert self.config.overlapfactor < 1, "It should be less than 1."
+
+            image_width = image_array.shape[1]
+            image_height = image_array.shape[0]
+
+            # get tile coordinates
+            coords = self.get_coordinates(
+                image_width,
+                tile_w=width,
+                image_height=image_height,
+                tile_h=height,
+                overlaping_factor=self.config.overlapfactor,
+            )
+
+            # get tiles gps coordinates
+            image_gps = GPSUtils.get_gps_coord(
+                file_name=None, return_as_decimal=True, image=pil_image
+            )
+            if image_gps is not None:
+                (lat, long, alt), _ = image_gps
+                alt = alt / 1000  # conver to meters
+
+                tile_gps_coords = []
+                gsd = ImageProcessor.get_gsd(
+                    image=pil_image,
+                    image_path=None,
+                    sensor_height=self.config.sensor_height,
+                    flight_height=self.config.flight_height,
+                )
+                for (x_left, x_right), (y_top, y_bottom) in coords:
+                    x = (x_left + x_right) / 2
+                    y = (y_top + y_bottom) / 2
+                    gps = ImageProcessor.generate_pixel_coordinates(
+                        x=x,
+                        y=y,
+                        W=image_width,
+                        H=image_height,
+                        lat_center=lat,
+                        lon_center=long,
+                        gsd=gsd,
+                    )
+                    gps = geopy.Point(gps[0], gps[1], alt)
+                    tile_gps_coords.append(str(gps))
+            else:
+                tile_gps_coords = [None for _ in range(len(coords))]
+
+            tile_metadata[str(img_path)] = dict(
+                px_coordinates=coords,
+                gps_coordinates=tile_gps_coords,
+            )
+            # save patches
+            if not self.config.save_coords_only:
+                patches = self.get_patches(image_array, coords=coords)
+                self.save_list_images(patches, img_name, self.config.dest)
+
+        # saving metdata
+        json_path = self.config.metadata_save_path
+        if json_path is None:
+            json_path = Path(self.config.dest) / "metadata.json"
+            try:
+                with open(json_path, "w") as f:
+                    json.dump(tile_metadata, f, indent=1)
+            except Exception as e:
+                print(e)
+                with open(Path(self.config.dest) / "metadata.json", "w") as f:
+                    json.dump(tile_metadata, f, indent=1)
+
+        self._metadata = tile_metadata
+
+        self._expand_metada()
+
+        return self._expand_metada()
+
+    def _expand_metada(
+        self,
+    ):
+        assert self._metadata is not None
+
+        expanded_metadata = dict()
+
+        for parent_image_path, metadata in self._metadata.items():
+            stem = Path(parent_image_path).stem
+
+            tile_coords = metadata["px_coordinates"]
+            tile_gps = metadata["gps_coordinates"]
+            for i, (gps, coords) in enumerate(zip(tile_coords, tile_gps)):
+                expanded_metadata[f"{stem}_{i}"] = dict(
+                    coordinates=tile_coords[i],
+                    gps=tile_gps[i],
+                    parent_image=str(parent_image_path),
+                )
+
+        self.tile_metadata = expanded_metadata
+        return expanded_metadata
+
+
+class LabelingDataset:
+    def __init__(self, tiles: list[Tile] = None):
+        self._tiles = tiles or []
+        self.data: pd.DataFrame = None
+
+    def add_tile(self, tile: Tile):
+        self._tiles.append(tile)
+        return
+
+    def build(
+        self,
+    ):
+        data = [tile.detections_to_df() for tile in self._tiles]
+        self.data = pd.concat(data, axis=0).reset_index(drop=True)
+        return
+
+    def offset_detections(
+        self,
+    ):
+        for tile in self._tiles:
+            tile.offset_detections()
+        self.build()
+        return
+
+    def export_detections_gps(self, save_path: str = None) -> pd.DataFrame:
+        df_export = self.data[["class_name", "gps_loc", "file_name"]].copy()
+
+        df_export[["Latitude", "Longitude", "Elevation"]] = (
+            df_export["gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+        )
+        if save_path:
+            df_export.to_csv(save_path, index=False)
+
+        return df_export
+
+    def save(self, dir_path: str):
+        pass
+
+    def __len__(
+        self,
+    ) -> int:
+        if self.data is None:
+            return 0
+
+        return len(self.data)
+
+    def __getitem__(self, index) -> dict:
+        cols = list(self.data.columns)
+        # # cols.remove("file_name")
+        cols.remove("score")
+        # image = self.data.at[index, "file_name"]
+        # image = Image.open(image)
+        data = self.data.loc[index, cols].to_dict()
+
+        return data
+
+    @classmethod
+    def from_ls(
+        cls,
+        labelstudio_client,
+        project_id: int,
+        config: TilingConfig,
+        top_n=0,
+        load_existing_metadata: bool = False,
+    ):
+        project = labelstudio_client.projects.get(id=project_id)
+
+        if config.root is None:
+            data_dir = labelstudio_client.import_storage.local.get(project_id).path
+            logger.info(f"Using root directory: {data_dir}")
+
+        tile_metadata = TileBuilder(config=config).run(
+            load_existing_metadata=load_existing_metadata
+        )
+
+        # get tasks in project
+        tasks = labelstudio_client.tasks.list(
+            project=project.id,
+        )
+
+        tiles = []
+        # create
+        for i, task in enumerate(tasks):
+            if top_n > 0:
+                if i > top_n:
+                    break
+
+            img_url = unquote(task.data["image"])
+            try:
+                image_path = get_local_path(
+                    img_url,
+                    download_resources=False,
+                    hostname=os.getenv("LABEL_STUDIO_URL"),
+                )
+                value = tile_metadata.get(Path(image_path).stem, None)
+                gps_coord = None
+                x1 = y1 = None
+                if value is not None:
+                    gps_coord = value["gps"]
+                    (x1, x2), (y1, y2) = value["coordinates"]
+                    parent_image = value["parent_image"]
+
+                detection_objects = Detection.from_ls(task.annotations, image_path)
+                tile = Tile(
+                    detections=detection_objects,
+                    image_data=None,
+                    image_path=image_path,
+                    x_offset=x1,
+                    y_offset=y1,
+                    parent_image=parent_image,
+                    tile_gps_loc=gps_coord,
+                )
+                tile.update_detection_gps(
+                    sensor_height=config.sensor_height,
+                    flight_height=config.flight_height,
+                    gsd=config.gsd,
+                )
+
+                tiles.append(tile)
+
+            except Exception as e:
+                logger.warning(f"Failed for: {img_url} -> skipping")
+                traceback.print_exc()
+                continue
+
+        # build dataset
+        dataset = cls(tiles=tiles)
+        dataset.build()
+
+        return dataset
 
 
 class LabelHandler:
@@ -68,8 +437,6 @@ class LabelHandler:
 
         # updaate yaml and save
         yolo_config.update({"names": self._label_map, "nc": len(self._label_map)})
-        with open(yaml_path, "w") as file:
-            yaml.dump(yolo_config, file, default_flow_style=False, sort_keys=False)
 
 
 class YOLODatasetBuilder:

@@ -26,8 +26,9 @@ from animaloc.eval.lmds import HerdNetLMDS
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score, AUROC
 from torchvision import models
 
-from ..common.annotation_utils import GPSUtils, ImageProcessor
-from ..common.config import Detection, PredictionConfig
+from ..common.annotation_utils import GPSUtils, compute_detection_gps
+from ..common.config import PredictionConfig
+from ..common.base import Detection
 
 
 logger = logging.getLogger(__name__)
@@ -468,6 +469,9 @@ class Detector(object):
         image_path: str,
         image_gps_loc: str,
         image: Image.Image,
+        flight_height: int = 180,
+        sensor_height: float = 24,
+        gsd=None,  # cm/px
     ):
         # format detections
         detections = [
@@ -479,11 +483,14 @@ class Detector(object):
 
         # add detections gps
         for det in detections:
-            det.gps_loc = self.compute_detection_gps(
+            det.gps_loc = compute_detection_gps(
                 x_center=det.x,
                 y_center=det.y,
                 image=image,
                 image_gps_loc=det.image_gps_loc,
+                flight_height=flight_height,
+                sensor_height=sensor_height,
+                gsd=gsd,
             )
         return detections
 
@@ -620,51 +627,6 @@ class Detector(object):
                     traceback.print_exc()
 
         return results
-
-    def compute_detection_gps(
-        self,
-        x_center,
-        y_center,
-        image: Image.Image,
-        image_gps_loc: str,
-        flight_height: int = 180,
-        sensor_height: int = 24,
-        gsd: float = None,
-    ):
-        # None
-        if image_gps_loc is None:
-            return None
-
-        assert isinstance(image, Image.Image), "Provide PIL Image"
-
-        # compute detection
-        W, H = image.size
-
-        lat_center, lon_center, alt = GPSUtils.to_decimal(image_gps_loc)
-
-        if gsd is None:
-            gsd = ImageProcessor.get_gsd(
-                image=image,
-                image_path=None,
-                sensor_height=sensor_height,
-                flight_height=flight_height,
-            )
-
-        gsd *= 1e-2  # convert to m/px
-
-        px_lat, px_long = ImageProcessor.generate_pixel_coordinates(
-            x=x_center,
-            y=y_center,
-            lat_center=lat_center,
-            lon_center=lon_center,
-            W=W,
-            H=H,
-            gsd=gsd,
-        )
-
-        gps_loc = str(geopy.Point(latitude=px_lat, longitude=px_long, altitude=alt))
-
-        return gps_loc
 
     def _format_results_as_dataframe(
         self, results: dict[str, list[Detection]]

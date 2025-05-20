@@ -1009,7 +1009,9 @@ class ImageProcessor:
         exif = GPSUtils.get_exif(file_name=image_path, image=image)
 
         if sensor_height is None:
-            sensor_height = sensor_heights[exif["Model"]]
+            sensor_height = sensor_heights.get(exif["Model"])
+            if sensor_height is None:
+                raise ValueError("Sensor height not found. Please provide it.")
 
         ##-- Compute gsd
         focal_length = exif["FocalLength"] * 0.1  # in cm
@@ -1022,7 +1024,23 @@ class ImageProcessor:
         return round(gsd, 3)
 
     @staticmethod
-    def generate_pixel_coordinates(x, y, lat_center, lon_center, W, H, gsd=0.026):
+    def generate_pixel_coordinates(
+        x, y, lat_center, lon_center, W, H, gsd=0.026
+    ) -> tuple[float, float]:
+        """computes (x,y) pixel gps coordinates
+
+        Args:
+            x (int): x center
+            y (int): y center
+            lat_center (float): latitude of center of image
+            lon_center (float): longitude of center of image
+            W (int): image width
+            H (int): image height
+            gsd (float, optional): _description_. Defaults to 0.026.
+
+        Returns:
+            tuple: latitude, longitude
+        """
         # Convert center to UTM
         easting_center, northing_center, zone_num, zone_let = utm.from_latlon(
             lat_center, lon_center
@@ -1049,6 +1067,7 @@ class GPSUtils:
             with Image.open(file_name) as img:
                 exif_data = img._getexif()
         else:
+            assert isinstance(image, Image.Image), "Provide PIL Image"
             exif_data = image._getexif()
 
         if exif_data is None:
@@ -1081,9 +1100,9 @@ class GPSUtils:
         return info
 
     @staticmethod
-    def to_decimal(gps_coord: str):
+    def to_decimal(gps_coord: str) -> tuple:
         if gps_coord is None:
-            return [None] * 3
+            return (None, None, None)
 
         lat, long, alt = geopy.Point.from_string(gps_coord)
         coords = lat, long, alt * 1e3
@@ -1130,15 +1149,63 @@ class GPSUtils:
         coords = gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"]
 
         if altitude is None:
-            alt = f"{gps_info['GPSAltitude']}m"
+            alt = f"{gps_info.get('GPSAltitude', None)}m"
         else:
             alt = altitude
 
-        coords = (
-            gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"] + " " + alt
-        )
+        if alt:
+            coords = (
+                gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"] + " " + alt
+            )
+        else:
+            coords = gps_coords["GPSLatitude"] + " " + gps_coords["GPSLongitude"]
         if return_as_decimal:
             lat, long, alt = geopy.Point.from_string(coords)
             coords = lat, long, alt * 1e3
 
         return coords, gps_info
+
+
+def compute_detection_gps(
+    x_center,
+    y_center,
+    image: Image.Image,
+    image_gps_loc: str,
+    flight_height: int = 180,
+    sensor_height: int = 24,
+    gsd: float = None,  # cm/px
+) -> str:
+    # None
+    if image_gps_loc is None:
+        return None
+
+    assert isinstance(image, Image.Image), "Provide PIL Image"
+
+    # compute detection
+    W, H = image.size
+
+    lat_center, lon_center, alt = GPSUtils.to_decimal(image_gps_loc)
+    alt = alt * 1e-3  # converting to km
+    if gsd is None:
+        gsd = ImageProcessor.get_gsd(
+            image=image,
+            image_path=None,
+            sensor_height=sensor_height,
+            flight_height=flight_height,
+        )
+
+    gsd *= 1e-2  # convert to m/px
+
+    px_lat, px_long = ImageProcessor.generate_pixel_coordinates(
+        x=x_center,
+        y=y_center,
+        lat_center=lat_center,
+        lon_center=lon_center,
+        W=W,
+        H=H,
+        gsd=gsd,
+    )
+
+    gps_loc = str(geopy.Point(latitude=px_lat, longitude=px_long, altitude=alt))
+
+    return gps_loc

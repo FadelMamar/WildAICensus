@@ -1,137 +1,30 @@
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
-import math
 import torch
-import geopy
-from PIL import Image
 
 
-@dataclass  # (frozen=True)
-class Detection:
-    x_min: int
-    x_max: int
-    y_min: int
-    y_max: int
-    label: int
-    class_name: str
-    score: float = None
-    gps_loc: str = None
-    image_gps_loc: str = None
-    parent_image: str = None
+@dataclass
+class TilingConfig:
+    root: str
+    dest: str
 
-    @classmethod
-    def from_coco(
-        cls,
-        coco: dict,
-        parent_image: str,
-        image_gps_loc: str = None,
-        gps_loc: str = None,
-    ):
-        bbox = coco["bbox"]
-        label = coco["category_id"]
-        class_ = coco["category_name"]
-        score = coco.get("score", None)
+    rmheight: float
+    rmwidth: float
 
-        det = cls(
-            x_min=int(bbox[0]),
-            y_min=int(bbox[1]),
-            x_max=int(bbox[0] + bbox[2]),
-            y_max=int(bbox[1] + bbox[3]),
-            class_name=class_,
-            label=label,
-            score=score,
-            image_gps_loc=image_gps_loc,
-            gps_loc=gps_loc,
-            parent_image=parent_image,
-        )
+    sensor_height: float
+    flight_height: float
 
-        return det
-    
-    @property
-    def is_empty(self):
-        return any([self.x is None, self.y is None, self.w is None, self.h is None])
+    overlapfactor: float
 
-    def to_dict(
-        self,
-    ):
-        return vars(self)
+    ratiowidth: float
+    ratioheight: float
 
-    def to_ls(
-        self, from_name, to_name, label_type, img_height: int, img_width: int
-    ) -> dict:
-        # formatting the prediction to work with Label studio
-        score = self.score
-        if not isinstance(score, float):
-            score = 0.0
-        template = {
-            "from_name": from_name,
-            "to_name": to_name,
-            "type": label_type,
-            "original_width": img_width,
-            "original_height": img_height,
-            "image_rotation": 0,
-            "value": {
-                label_type: [
-                    self.class_name,
-                ],
-                "x": self.x_min / img_width * 100,
-                "y": self.y_min / img_height * 100,
-                "width": self.w / img_width * 100,
-                "height": self.h / img_height * 100,
-                "rotation": 0,
-            },
-            "score": score,
-        }
-        return template
+    patterns: Sequence[str] = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG")
+    save_coords_only: bool = False
+    metadata_save_path: str = None
 
-    def get_base_image(self) -> Image.Image:
-        assert self.parent_image is not None, "Parent image is not defined"
-        return Image.open(self.parent_image)
-
-    @property
-    def area(
-        self,
-    ):
-        return self.w * self.h
-
-    @property
-    def x(
-        self,
-    ):
-        return math.floor((self.x_min + self.x_max) / 2)
-
-    @property
-    def y(
-        self,
-    ):
-        return math.floor((self.y_min + self.y_max) / 2)
-
-    @property
-    def w(
-        self,
-    ):
-        return int(self.x_max - self.x_min)
-
-    @property
-    def h(
-        self,
-    ):
-        return int(self.y_max - self.y_min)
-
-    @property
-    def gps_as_decimals(
-        self,
-    ):
-        assert isinstance(self.gps_loc, str)
-
-        point = geopy.Point.from_string(self.gps_loc)
-
-        lat = point.latitude
-        long = point.longitude
-        alt = point.altitude * 1e3  # converting to meters
-
-        return lat, long, alt
+    gsd: float = None  # cm/px if not given, it's computed
 
 
 @dataclass
@@ -232,7 +125,7 @@ class TrainingConfig:
     cls_monitor_mode: str = "max"
     cls_auto_augment: str = "augmix"
     cls_is_features: bool = False
-    cls_tn_ratio:float=1.0
+    cls_tn_ratio: float = 1.0
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original

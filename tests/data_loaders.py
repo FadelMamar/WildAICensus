@@ -5,7 +5,7 @@ Created on Thu Apr 24 19:29:12 2025
 @author: FADELCO
 """
 
-import fire
+# import fire
 
 from tqdm import tqdm
 import os
@@ -151,15 +151,74 @@ def load_classification_features_data():
     # return tr_batch, val_batch
 
 
-if __name__ == "__main__":
-    fire.Fire(
-        {
-            "create-features": create_classification_data,
-            "load-features": load_classification_features_data,
-            "load-herdnet": load_herd_net,
-        }
+def load_dataset_from_ls(
+    data_dir: str, project_id=4, top_n=0, load_existing_metadata=True
+):
+    from label_studio_sdk.client import LabelStudio
+    from dotenv import load_dotenv
+    import os
+    from datalabeling.common.config import TilingConfig
+    from datalabeling.common.dataset_loader import LabelingDataset
+
+    # # Load environment variables
+    load_dotenv(dotenv_path="../.env")
+
+    # # label studio client
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+
+    # project = labelstudio_client.projects.get(id=project_id)
+
+    # if data_dir is None:
+    #     data_dir = labelstudio_client.import_storage.local.get(project_id).path
+
+    # collect tile metadata: gps coords
+    config = TilingConfig(
+        root=data_dir,
+        overlapfactor=0.1,
+        ratiowidth=0.5,
+        ratioheight=0.33,
+        rmheight=0.1,
+        rmwidth=0.1,
+        flight_height=180,
+        sensor_height=7.4,
+        gsd=2.26,
+        dest=r"D:\savmap_dataset_v2\slipts_tmp",
+        save_coords_only=True,  # set to False to save tiles i.e. patches
     )
+
+    print(config)
+    dataset = LabelingDataset.from_ls(
+        labelstudio_client,
+        project_id=project_id,
+        config=config,
+        top_n=top_n,
+        load_existing_metadata=load_existing_metadata,
+    )
+
+    return dataset
+
+
+if __name__ == "__main__":
+    #     fire.Fire(
+    #         {
+    #             "create-features": create_classification_data,
+    #             "load-features": load_classification_features_data,
+    #             "load-herdnet": load_herd_net,
+    #         }
+    #     )
 
     # create_classification_data()
 
     # load_classification_features_data()
+
+    dataset = load_dataset_from_ls(
+        project_id=4,
+        top_n=0,
+        load_existing_metadata=False,
+        data_dir=r"D:\savmap_dataset_v2\raw\images",
+    )
+
+    data = dataset.data
+    gps_data = dataset.export_detections_gps()

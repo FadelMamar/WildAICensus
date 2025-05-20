@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from typing import Sequence
 
 
-from .config import Detection
+from ..common.base import Detection
 
 
 def get_processor(name: str):
