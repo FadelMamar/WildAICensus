@@ -1,5 +1,5 @@
 import logging
-import os
+import os,json
 from pathlib import Path
 import lightning as L
 import torch
@@ -586,9 +586,9 @@ class TrainingManager:
 
         cfg = dict()
         # TODO: debug
-        # if not self.args.is_rtdetr:
-        #     os.environ["pos_weight"] = json.dumps(self.args.ultralytics_pos_weight)
-        #     cfg = dict(trainer=CustomTrainer)
+        if not self.args.is_rtdetr:
+            os.environ["pos_weight"] = json.dumps(self.args.ultralytics_pos_weight)
+            cfg = dict(trainer=CustomTrainer)
 
         self.model.train(
             data=data_cfg or args.yolo_yaml,

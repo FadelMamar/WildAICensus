@@ -152,13 +152,13 @@ def load_classification_features_data():
 
 
 def load_dataset_from_ls(
-    data_dir: str, project_id=4, top_n=0, load_existing_metadata=True
+    untiled_data_dir: str, project_id=4, top_n=0, load_existing_metadata=True
 ):
     from label_studio_sdk.client import LabelStudio
     from dotenv import load_dotenv
     import os
     from datalabeling.common.config import TilingConfig
-    from datalabeling.common.dataset_loader import LabelingDataset
+    from datalabeling.common.dataset_loader import LabelingDataset,TileBuilder
 
     # # Load environment variables
     load_dotenv(dotenv_path="../.env")
@@ -175,17 +175,21 @@ def load_dataset_from_ls(
 
     # collect tile metadata: gps coords
     config = TilingConfig(
-        root=data_dir,
+        root=untiled_data_dir,
         overlapfactor=0.1,
         ratiowidth=0.5,
-        ratioheight=0.33,
-        rmheight=0.1,
-        rmwidth=0.1,
+        ratioheight=0.5,
+        rmheight=0.0,
+        rmwidth=0.0,
         flight_height=180,
-        sensor_height=7.4,
+        sensor_height=24,
         gsd=2.26,
-        dest=r"D:\savmap_dataset_v2\slipts_tmp",
+        dest=r"..\.tmp",
         save_coords_only=True,  # set to False to save tiles i.e. patches
+    )
+    
+    tile_metadata = TileBuilder(config=config).run(
+        load_existing_metadata=load_existing_metadata
     )
 
     print(config)
@@ -197,7 +201,7 @@ def load_dataset_from_ls(
         load_existing_metadata=load_existing_metadata,
     )
 
-    return dataset
+    return tile_metadata, dataset
 
 
 if __name__ == "__main__":
@@ -213,11 +217,11 @@ if __name__ == "__main__":
 
     # load_classification_features_data()
 
-    dataset = load_dataset_from_ls(
-        project_id=4,
-        top_n=0,
-        load_existing_metadata=False,
-        data_dir=r"D:\savmap_dataset_v2\raw\images",
+    tile_metadata,dataset = load_dataset_from_ls(
+        project_id=92,
+        top_n=5,
+        load_existing_metadata=True,
+        untiled_data_dir=r"D:\PhD\Data per camp\Wet season\Leopard rock\Camp 23-28\Rep 3",
     )
 
     data = dataset.data
