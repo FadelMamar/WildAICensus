@@ -95,13 +95,15 @@ def create_classification_data(strategies: list[str] = ["gt", "hn"], alias="demo
         hf_model_path="facebook/dinov2-with-registers-small"
     )
 
-    yaml_path = r"..\configs\yolo_configs\data\data_config.yaml"
+    yaml_path = r"..\configs\yolo_configs\data\dataset_0-1.yaml"
     cfg = load_yaml(yaml_path)
 
-    root_dir = r"..\.tmp\cls-features-1"
+    root_dir = r"D:\PhD\Data per camp\Classification\cls-features"
 
     for split in ["train", "val"]:
         source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
+
+        print(f"source_dirs: {source_dirs}")
 
         handler.set_dirs(
             source_dirs=source_dirs, output_dir=os.path.join(root_dir, split)
