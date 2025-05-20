@@ -244,15 +244,14 @@ class Tile:
 
         df["image_width"] = self.width
         df["image_height"] = self.height
-
+        df["parent_image"] = self.image_path
+        
         # YOLO format
         if len(self.detections) > 0:
             df["w"] = df["w"] / self.width
             df["h"] = df["h"] / self.height
             df["x"] = df["x"] / self.width
-            df["y"] = df["y"] / self.height
-        else:
-            df["parent_image"] = self.image_path
+            df["y"] = df["y"] / self.height            
 
         df.rename(columns={"parent_image": "file_name"}, inplace=True)
 

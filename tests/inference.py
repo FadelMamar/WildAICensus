@@ -8,13 +8,14 @@ from datalabeling.ml.interface import InferenceEngine, Annotator
 from datalabeling.common.mlflow_utils import load_registered_model
 
 from ultralytics import YOLO
+from sahi.models.ultralytics import UltralyticsDetectionModel
 
 import torch
 import numpy as np
 from PIL import Image
 from skimage.io import imread, imsave
 import matplotlib.pyplot as plt
-
+from time import perf_counter
 from pathlib import Path
 
 
@@ -30,32 +31,39 @@ config = PredictionConfig(
 )
 
 # get image classifier
-# path = r"./runs-classifier/best-v2.ckpt"
-# model = ImageClassifier.load_from_checkpoint(
-#     path, cls_is_features=True, map_location=config.device
-# )
-# handler = get_processor("classifier")(
-#     model,
-#     label_map={0: "gt", 1: "tn"},
-#     device=config.device,
-#     feature_extractor=get_processor("feature_extractor")(),
-#     imgsz=config.cls_imgsz,
-# )
+path = r"./runs-classifier/best-v2.ckpt"
+model = ImageClassifier.load_from_checkpoint(
+    path, cls_is_features=True, map_location=config.device
+)
+handler = get_processor("classifier")(
+    model,
+    label_map={0: "gt", 1: "tn"},
+    device=config.device,
+    feature_extractor=get_processor("feature_extractor")(),
+    imgsz=config.cls_imgsz,
+)
 
-# # build postprocessor
-# processor = DetectionsPostprocessor(
-#     keep_classes=["gt"],
-# )
-# processor.set_handler(handler)
+# build postprocessor
+processor = DetectionsPostprocessor(
+    keep_classes=["gt"],
+)
+processor.set_handler(handler)
 
-# ALIAS='yolo12s-v1'
-# NAME='labeler'
+ALIAS='yolo11s-obb-v1' #-rt-batch8'
+NAME='labeler'
 
-# # set detector
-# detection_model,version = load_registered_model(alias=ALIAS,
-#                                                 name=NAME,
-#                                                 load_unwrapped=True)
-
+# set detector
+detection_model,version = load_registered_model(alias=ALIAS,
+                                                name=NAME,
+                                                load_unwrapped=True)
+if isinstance(detection_model, YOLO):
+    detection_model =  UltralyticsDetectionModel(
+            model=detection_model,
+            confidence_threshold=config.confidence_threshold,
+            category_mapping={"0":"wildlife"},
+            # image_size=config.imgsz,
+            device=config.device,
+        )
 
 def run_inference_engine(img_path: str, num_classes: int = 2):
     # get inference engine
@@ -105,10 +113,20 @@ def run_annotator(
 
 if __name__ == "__main__":
     # image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
-    image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
-    # image_path = r"..\.tmp\images\DJI_20231002154116_0031.JPG"
+    # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
+    image_path = r"..\.tmp\images\DJI_20240204125354_0144.JPG"
+
+   
+
+    t1_start = perf_counter() 
+
+    detections = detection_model.model(Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"),iou=0.5,batch=8)
 
     # detections  = run_inference_engine(image_path)
+
+    t1_stop = perf_counter()
+    print("Inference time: ", t1_stop - t1_start)
+    print("detections:",detections)
 
     # image = imread(img_path)
 

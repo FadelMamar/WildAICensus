@@ -277,6 +277,8 @@ class LabelingDataset:
         self,
     ):
         data = [tile.detections_to_df() for tile in self._tiles]
+        if len(data)<1:
+            raise ValueError(f"Error happened in parsing the detections. Make sure the tiles are built correctly.")
         self.data = pd.concat(data, axis=0).reset_index(drop=True)
         return
 
@@ -327,17 +329,19 @@ class LabelingDataset:
         project_id: int,
         config: TilingConfig,
         top_n=0,
+        tile_metadata:dict=None,
         load_existing_metadata: bool = False,
     ):
         project = labelstudio_client.projects.get(id=project_id)
 
-        if config.root is None:
-            data_dir = labelstudio_client.import_storage.local.get(project_id).path
-            logger.info(f"Using root directory: {data_dir}")
+        assert config.root is not None, "Provide path to untiled directory."
+            # data_dir = labelstudio_client.import_storage.local.get(project_id).path
+            # logger.info(f"Using root directory: {data_dir}")
 
-        tile_metadata = TileBuilder(config=config).run(
-            load_existing_metadata=load_existing_metadata
-        )
+        if tile_metadata is None:
+            tile_metadata = TileBuilder(config=config).run(
+                load_existing_metadata=load_existing_metadata
+            )
 
         # get tasks in project
         tasks = labelstudio_client.tasks.list(
@@ -358,14 +362,19 @@ class LabelingDataset:
                     download_resources=False,
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
+                
+                # get tile gps_coords and offsets
                 value = tile_metadata.get(Path(image_path).stem, None)
-                gps_coord = None
+                tile_gps_loc = None
                 x1 = y1 = None
-                if value is not None:
-                    gps_coord = value["gps"]
-                    (x1, x2), (y1, y2) = value["coordinates"]
-                    parent_image = value["parent_image"]
-
+                if value is None:
+                    logger.error(f"Error happended when reading metadata of {img_url} -> skipping")
+                    continue
+                tile_gps_loc = value["gps"]
+                (x1, x2), (y1, y2) = value["coordinates"]
+                parent_image = value["parent_image"]
+                
+                # build tile
                 detection_objects = Detection.from_ls(task.annotations, image_path)
                 tile = Tile(
                     detections=detection_objects,
@@ -374,8 +383,10 @@ class LabelingDataset:
                     x_offset=x1,
                     y_offset=y1,
                     parent_image=parent_image,
-                    tile_gps_loc=gps_coord,
+                    tile_gps_loc=tile_gps_loc,
                 )
+                
+                # update detections gps loc from tile_gps_loc 
                 tile.update_detection_gps(
                     sensor_height=config.sensor_height,
                     flight_height=config.flight_height,

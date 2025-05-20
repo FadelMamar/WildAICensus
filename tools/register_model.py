@@ -15,7 +15,9 @@ import mlflow
 
 # from datargs import parse
 import platform
-from datalabeling.ml.models import ImageClassifier
+import os
+
+os.environ['TORCH_XNNPACK_DISABLE'] = "1"
 
 
 def get_experiment_id(name: str):
@@ -85,6 +87,7 @@ class Args:
     nms_iou: float = 0.5  # used when use_sliding_window=False
 
     use_sliding_window: bool = False
+    export_format:str="torchscript"
 
 
 PYTHON_VERSION = "{major}.{minor}.1".format(
@@ -115,18 +118,27 @@ class RegisterDetector(object):
         self,
         weights: str,
         name: str = "labeler",
+        export_format:str="torchscript",
         imgsz: int = 800,
+        batch=8,
+        device="cpu",
         mlflow_tracking_uri: str = "http://localhost:5000",
     ):
         model_path = Path(weights).resolve()
         YOLO(model_path, task="detect").export(
-            format="torchscript", imgsz=imgsz, optimize=True, nms=True, device="cpu"
+            format=export_format, 
+            imgsz=imgsz, 
+            optimize=device == 'cpu', 
+            nms=True,
+            dynamic=True,
+            batch=batch,
+            device=device
         )
-        torchscript_path = model_path.with_suffix(".torchscript")
+        export_path = model_path.with_suffix(f".{export_format}")
 
         mlflow.set_tracking_uri(mlflow_tracking_uri)
 
-        artifacts = {"path": str(torchscript_path)}
+        artifacts = {"path": str(export_path)}
 
         exp_id = get_experiment_id(name)
 
@@ -150,8 +162,9 @@ class RegisterRoiClassifier(object):
         cls_embed_dim: int = 384,
         name: str = "classifier",
         mlflow_tracking_uri: str = "http://localhost:5000",
-        save_path: str = "roi_classifier_torchscript.pt",
     ):
+        from datalabeling.ml.models import ImageClassifier
+
         mlflow.set_tracking_uri(mlflow_tracking_uri)
 
         model_path = Path(weights).resolve()
@@ -166,6 +179,7 @@ class RegisterRoiClassifier(object):
             model(torch.zeros(1, 3, cls_imgsz, cls_imgsz))
 
         model_scripted = torch.jit.script(model)  # Export to TorchScript
+        save_path = model_path.with_suffix(".torchscript")
         model_scripted.save(save_path)  # Save
 
         artifacts = {"path": save_path}
@@ -187,13 +201,19 @@ class Register(object):
         self,
         weights_path: str,
         name: str = "labeler",
+        export_format:str="torchscript",
         imgsz: int = 800,
+        batch=8,
+        device="cpu",
         mlflow_tracking_uri: str = "http://localhost:5000",
     ):
         RegisterDetector(
             weights=weights_path,
             name=name,
             imgsz=imgsz,
+            batch=batch,
+            device=device,
+            export_format=export_format,
             mlflow_tracking_uri=mlflow_tracking_uri,
         )
 

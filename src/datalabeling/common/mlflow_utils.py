@@ -22,9 +22,12 @@ def load_registered_model(
 
     if load_unwrapped:
         try:
-            model = model.unwrap_python_model().detection_model
+            model = model.unwrap_python_model().model
         except:
-            model = model.unwrap_python_model().classifier
+            try:
+                model = model.unwrap_python_model().detection_model
+            except:
+                model = model.unwrap_python_model().classifier
 
     return model, modelversion
 
