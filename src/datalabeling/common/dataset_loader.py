@@ -23,14 +23,9 @@ from .annotation_utils import (
     load_coco_annotations,
     resize_bbox,
 )
-from .config import (
-    DataConfig,
-    LabelConfig,
-    EvaluationConfig,
-    TilingConfig,
-    Tile,
-    Detection,
-)
+from .base import Tile, Detection
+
+from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
 from .io import load_yaml, DataHandler
 from .processor import FeatureExtractor
 from ..ml.models import Detector

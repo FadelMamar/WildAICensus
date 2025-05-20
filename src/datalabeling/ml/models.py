@@ -26,8 +26,9 @@ from animaloc.eval.lmds import HerdNetLMDS
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score, AUROC
 from torchvision import models
 
-from ..common.annotation_utils import GPSUtils, ImageProcessor, compute_detection_gps
-from ..common.config import Detection, PredictionConfig
+from ..common.annotation_utils import GPSUtils, compute_detection_gps
+from ..common.config import PredictionConfig
+from ..common.base import Detection
 
 
 logger = logging.getLogger(__name__)

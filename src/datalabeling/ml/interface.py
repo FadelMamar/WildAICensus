@@ -18,7 +18,8 @@ from PIL import Image
 from tqdm import tqdm
 
 from ..common.processor import Processor
-from ..common.config import Detection, PredictionConfig
+from ..common.config import PredictionConfig
+from ..common.base import Detection
 from .models import Detector
 from ..common.mlflow_utils import load_registered_model
 import torch
