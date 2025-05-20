@@ -186,16 +186,6 @@ class Detection:
 
 
 @dataclass
-class TileResult:
-    """Class representing the result of a tile inference."""
-
-    tile_id: int
-    x_offset: int
-    y_offset: int
-    detections: List[Detection]
-
-
-@dataclass
 class Tile:
     """Class representing an image tile."""
 
@@ -206,8 +196,41 @@ class Tile:
     x_offset: int = None
     y_offset: int = None
     parent_image: str = None
-    image_gps_loc: str = None
+    tile_gps_loc: str = None
     detections: List[Detection] = None
+
+    def offset_detections(
+        self,
+    ):
+        if self.x_offset is not None and self.y_offset is not None:
+            for det in self.detections:
+                det.to_absolute_coords(self.x_offset, self.y_offset)
+
+    def update_detection_gps(
+        self,
+        sensor_height: float = 24.0,
+        flight_height: float = 180.0,
+        gsd=None,
+    ):
+        from .annotation_utils import compute_detection_gps
+
+        image = self.image_data
+        if image is None:
+            image = Image.open(self.image_path)
+
+        for det in self.detections:
+            det.image_gps_loc = self.tile_gps_loc
+
+            if det.image_gps_loc is not None:
+                det.gps_loc = compute_detection_gps(
+                    x_center=det.x,
+                    y_center=det.y,
+                    image=image,
+                    image_gps_loc=det.image_gps_loc,
+                    flight_height=flight_height,
+                    sensor_height=sensor_height,
+                    gsd=gsd,
+                )
 
     def detections_to_df(
         self,
@@ -219,24 +242,21 @@ class Tile:
             det.parent_image = self.image_path
 
         out = [det.to_dict() for det in self.detections]
-        out = pd.DataFrame.from_dict(out, orient="columns")
+        df = pd.DataFrame.from_dict(out, orient="columns")
 
-        out["image_width"] = self.width
-        out["image_height"] = self.height
+        df["image_width"] = self.width
+        df["image_height"] = self.height
 
-        out.rename(columns={"parent_image": "file_name"}, inplace=True)
+        # YOLO format
+        if len(self.detections) > 0:
+            df["w"] = df["w"] / self.width
+            df["h"] = df["h"] / self.height
+            df["x"] = df["x"] / self.width
+            df["y"] = df["y"] / self.height
+        else:
+            df["parent_image"] = self.image_path
 
-        return out
-
-    def detections_to_yolo(
-        self,
-    ) -> pd.DataFrame:
-        df = self.detections_to_df()
-
-        df["w"] = df["w"] / self.width
-        df["h"] = df["h"] / self.height
-        df["x"] = df["x"] / self.width
-        df["y"] = df["y"] / self.height
+        df.rename(columns={"parent_image": "file_name"}, inplace=True)
 
         return df
 
@@ -269,6 +289,8 @@ class TilingConfig:
     patterns: Sequence[str] = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG")
     save_coords_only: bool = False
     metadata_save_path: str = None
+
+    gsd: float = None  # cm/px if not given, it's computed
 
 
 @dataclass

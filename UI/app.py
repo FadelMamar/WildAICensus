@@ -10,7 +10,7 @@ from datalabeling.common.io import load_yaml
 from datalabeling.common.annotation_utils import GPSUtils
 import logging
 
-# from label_studio_sdk.client import LabelStudio
+from label_studio_sdk.client import LabelStudio
 from itertools import chain
 import folium
 from folium.plugins import MarkerCluster
@@ -18,7 +18,8 @@ from streamlit_folium import folium_static
 from datalabeling.ml.train import ImageClassifier
 
 from datalabeling.common.processor import get_processor, DetectionsPostprocessor
-
+from datalabeling.common.config import TilingConfig
+from datalabeling.common.dataset_loader import LabelingDataset
 from datalabeling.common.config import PredictionConfig
 from datalabeling.ml.interface import Annotator
 
@@ -33,7 +34,7 @@ load_dotenv(DOT_ENV)
 #     base_url=LABEL_STUDIO_URL, api_key=LABEL_STUDIO_API_KEY
 # )
 
-TRAINING_API_URL = ...
+# TRAINING_API_URL = ...
 
 
 class StreamlitLogHandler(logging.Handler):
@@ -52,9 +53,9 @@ def main():
     st.title("Labeling Workflow Management")
 
     # Sidebar for common controls
-    with st.sidebar:
-        st.header("API Configuration")
-        label_studio_token = st.text_input("Label Studio Token", type="password")
+    # with st.sidebar:
+    #     st.header("API Configuration")
+    #     label_studio_token = st.text_input("Label Studio Token", type="password")
     # training_api_token = st.text_input("Training API Token", type="password")
 
     # Main tabs
@@ -197,8 +198,6 @@ def main():
                 label="map stype",
                 options=[
                     "Esri.WorldImagery",
-                    # 'Cartodb Positron',
-                    # "Stamen Terrain",
                     "OpenStreetMap",
                 ],
             )
@@ -220,7 +219,7 @@ def main():
                     )
 
         st.subheader("Detections GPS")
-        with st.form("folium_map"):
+        with st.form("folium_map_det"):
             detections_path = st.text_input(
                 "Path to detections csv (without quotes)"
             ).strip()
@@ -235,8 +234,6 @@ def main():
                 label="map stype",
                 options=[
                     "Esri.WorldImagery",
-                    # 'Cartodb Positron',
-                    # "Stamen Terrain",
                     "OpenStreetMap",
                 ],
             )
@@ -250,6 +247,97 @@ def main():
                     folium_static(
                         get_map_with_detections(
                             locations=df_results_px,
+                            map_style=map_style,
+                            save_path=save_path_map if len(save_path_map) > 5 else None,
+                        )
+                    )
+
+        st.subheader("Groundtruth GPS")
+        with st.form("folium_map_gt"):
+            project_id = st.number_input("Project ID", min_value=0, step=1)
+            top_n = st.number_input("top_n", min_value=0, step=1, value=0)
+            overlapfactor = st.number_input(
+                "overlapfactor", min_value=0.0, max_value=0.9
+            )
+            ratiowidth = st.number_input(
+                "ratiowidth", min_value=0.0, max_value=1.0, value=0.5
+            )
+            ratioheight = st.number_input(
+                "ratioheight", min_value=0.0, max_value=1.0, value=0.5
+            )
+            rmheight = st.number_input(
+                "rmheight", min_value=0.0, max_value=1.0, value=0.1
+            )
+            rmwidth = st.number_input(
+                "rmwidth", min_value=0.0, max_value=1.0, value=0.1
+            )
+            flight_height = st.number_input(
+                "flight_height in [m]", min_value=10.0, value=180.0
+            )
+            sensor_height = st.number_input(
+                "sensor_height in [mm]",
+                min_value=0.0,
+            )
+            gsd = st.number_input("gsd in [cm/px]", min_value=0.0, value=2.26)
+            dest = st.text_input(
+                "destination directory (without quotes)", value="D:\Phd"
+            ).strip()
+            do_tiling = st.radio(
+                label="Tile data",
+                options=[
+                    True,
+                    False,
+                ],
+            )
+
+            root_images_dir = st.text_input(
+                "Path to images directory (without quotes)",
+                help="something like my_map.html",
+                value=None,
+            )
+            if root_images_dir:
+                root_images_dir = root_images_dir.strip()
+
+            save_path_map = st.text_input(
+                "Path to save map (without quotes)",
+                help="something like my_map.html",
+                # value='map.html'
+            ).strip()
+
+            map_style = st.radio(
+                label="map stype",
+                options=[
+                    "Esri.WorldImagery",
+                    "OpenStreetMap",
+                ],
+            )
+
+            if st.form_submit_button("Visualize"):
+                with st.spinner("Running...", show_time=True):
+                    config = TilingConfig(
+                        root=root_images_dir,
+                        overlapfactor=overlapfactor,
+                        ratiowidth=ratiowidth,
+                        ratioheight=ratioheight,
+                        rmheight=rmheight,
+                        rmwidth=rmwidth,
+                        flight_height=flight_height,
+                        sensor_height=sensor_height,
+                        gsd=gsd,
+                        dest=dest,
+                        save_coords_only=not do_tiling,  # set to False to save tiles i.e. patches
+                    )
+
+                    df_gt = get_gps_coords_from_ls(
+                        config=config,
+                        project_id=project_id,
+                        top_n=top_n,
+                        load_existing_metadata=True,
+                    )
+                    st.dataframe(df_gt, use_container_width=False)
+                    folium_static(
+                        get_map_with_detections(
+                            locations=df_gt,
                             map_style=map_style,
                             save_path=save_path_map if len(save_path_map) > 5 else None,
                         )
@@ -362,6 +450,7 @@ def run_inference(
         "*.png",
     ],
 ) -> None:
+    raise NotImplementedError
     handler = get_annotator(annotator_kwargs=annotator_kwargs)
 
     exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
@@ -409,6 +498,37 @@ def get_gps_coords(
     return gps_coords
 
 
+@st.cache_data
+def get_gps_coords_from_ls(
+    config: TilingConfig, project_id: int, top_n=0, load_existing_metadata=True
+) -> pd.DataFrame:
+    load_dotenv(DOT_ENV)
+
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+    # print(API_KEY)
+    # check connection
+    project = labelstudio_client.projects.get(id=project_id)
+
+    print(config)
+
+    if config.root is None:
+        data_dir = labelstudio_client.import_storage.local.get(project_id).path
+        print(f"Loading data from {data_dir}")
+
+    dataset = LabelingDataset.from_ls(
+        labelstudio_client,
+        project_id=project_id,
+        config=config,
+        top_n=top_n,
+        load_existing_metadata=load_existing_metadata,
+    )
+    gps_data = dataset.export_detections_gps()
+
+    return gps_data
+
+
 def get_map_with_detections(
     locations: pd.DataFrame,
     map_style: str = "Esri.WorldImagery",
@@ -450,17 +570,55 @@ def upload_to_label_studio(project_id: int, annotator_kwargs: dict, top_n: int =
     )
 
 
+@st.cache_data
 def get_project_statistics(
     project_id: int, annotator_id=0
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    instances_count, images_count = Annotator.get_project_stats(
-        LABEL_STUDIO_CLIENT, project_id=project_id, annotator_id=annotator_id
-    )
+    # instances_count, images_count = Annotator.get_project_stats(
+    #     LABEL_STUDIO_CLIENT, project_id=project_id, annotator_id=annotator_id
+    # )
 
+    load_dotenv(DOT_ENV)
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+    project = labelstudio_client.get_project(id=project_id)
+
+    images_count = dict()
+    # Iterating
+    tasks = project.get_tasks()
+    # because there is
+    labels = []
+
+    for task in tasks:
+        try:
+            result = task["annotations"][annotator_id]["result"]
+        except Exception:
+            traceback.print_exc()
+            continue
+
+        img_labels = []
+        for annot in result:
+            img_labels = annot["value"]["rectanglelabels"] + img_labels
+        labels = labels + img_labels
+        # update stats holder
+        for label in set(img_labels):
+            try:
+                images_count[label] += 1
+            except:
+                images_count[label] = 1
+
+    instances_count = {f"{k}": labels.count(k) for k in set(labels)}
+    # print("Number of instances for each label is:\n",instances_count,end="\n\n")
+    # print("Number of images for each label is:\n",images_count)
+
+    instances_count = pd.DataFrame.from_dict(instances_count)
     instances_count.rename(
         columns={col: col + "_num_instances" for col in instances_count.columns},
         inplace=True,
     )
+
+    images_count = pd.DataFrame.from_dict(images_count)
     images_count.rename(
         columns={col: col + "_num_images" for col in images_count.columns}, inplace=True
     )
@@ -468,6 +626,7 @@ def get_project_statistics(
     return instances_count, images_count
 
 
+@st.cache_data
 def visualize_splits_distribution(
     data_yaml_path: str,
     split="train",

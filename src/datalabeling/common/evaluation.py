@@ -25,6 +25,7 @@ class PerformanceEvaluator:
         self.label_format = None
         self.predictions, self.ground_truth = None, None
 
+    # TODO:  debug for negative samples
     def evaluate(
         self,
         images_dirs: list[str],
@@ -55,7 +56,7 @@ class PerformanceEvaluator:
         self, df_pred: pd.DataFrame, df_gt: pd.DataFrame
     ) -> pd.DataFrame:
         """Compute precision, recall, mAP etc."""
-        
+
         logger.info("Computing TP, FP and mAP.")
 
         m_ap = MeanAveragePrecision(
@@ -75,9 +76,8 @@ class PerformanceEvaluator:
         gt_flags = []
 
         image_paths = df_pred["file_name"].unique()
-        
+
         for image_path in tqdm(image_paths, desc="Computing metrics"):
-            
             # get gt
             mask_gt = df_gt["file_name"] == image_path
             df_gt_i = df_gt.loc[mask_gt, :].iloc[:, 1:]
@@ -201,7 +201,6 @@ class PerformanceEvaluator:
     def _get_bbox(self, gt: pd.DataFrame):
         return gt[["x_min", "y_min", "x_max", "y_max"]].to_numpy()
 
-
     def get_preds_targets(
         self,
         images_dirs: list[str],
@@ -211,7 +210,6 @@ class PerformanceEvaluator:
         load_results: bool = False,
         save_tag: str = "",
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
-        
         # when providing a list of images
         if images_paths is not None:
             assert images_dirs is None, "images_dirs should be None!"
@@ -226,11 +224,10 @@ class PerformanceEvaluator:
                     path_to_dir=None,
                     images_paths=images_paths,
                     as_dataframe=True,
-                    return_gps=True,
                     save_path=save_path,
                 )
             df_labels, label_format = DataHandler.load_yolo_groundtruth(
-                images_dir=None, images_paths=images_paths
+                images_dir=None, images_paths=images_paths, load_empty=True
             )
             self.label_format = label_format
 
@@ -260,7 +257,7 @@ class PerformanceEvaluator:
 
             # get targets
             labels, _format = DataHandler.load_yolo_groundtruth(
-                images_dir=image_dir, images_paths=None
+                images_dir=image_dir, images_paths=None, load_empty=True
             )
             df_labels.append(labels)
 
