@@ -48,13 +48,12 @@ def check_label_format(loaded_df: pd.DataFrame) -> str:
         str: yolo or yolo-obb
     """
 
-    num_features = len(loaded_df.columns)
-
     # check bounds
     # names = list(loaded_df.columns)
     assert loaded_df.iloc[:, 1:].all().max() <= 1.0, "max value <= 1"
     assert loaded_df.iloc[:, 1:].all().min() >= 0.0, "min value >=0"
 
+    num_features = len(loaded_df.columns)
     if num_features == 5:
         return "yolo"
     elif num_features == 9:
