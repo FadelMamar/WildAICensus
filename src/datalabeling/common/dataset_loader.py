@@ -15,7 +15,8 @@ import math
 import geopy
 from urllib.parse import unquote
 from label_studio_tools.core.utils.io import get_local_path
-
+from concurrent.futures import ProcessPoolExecutor
+from functools import partial
 from .annotation_utils import (
     ImageProcessor,
     GPSUtils,
@@ -107,7 +108,105 @@ class TileBuilder:
             save_path = os.path.join(dest_folder, full_path)
             cv2.imwrite(save_path, patches[b].astype("uint8"))
 
-    def run(self, load_existing_metadata: bool = False) -> dict[str, list]:
+    def _run_single_image(self, img_path: str):
+        # open image
+        pil_image = Image.open(img_path)
+        image_array = np.asarray(pil_image.convert("RGB"))
+        img_name = os.path.basename(img_path)
+        image_width = image_array.shape[1]
+        image_height = image_array.shape[0]
+
+        # Cropping out image-level overlap
+        height_overlap = math.ceil(self.config.rmheight * image_array.shape[0])
+        width_overlap = math.ceil(self.config.rmwidth * image_array.shape[1])
+
+        if height_overlap * width_overlap > 0:
+            image_array = image_array[
+                height_overlap:-height_overlap, width_overlap:-width_overlap
+            ]
+            print(
+                f"Removing {2 * width_overlap} pixels to the width; and {2 * height_overlap} pixels to the height."
+            )
+        elif (height_overlap == 0) and (width_overlap != 0):
+            image_array = image_array[:, width_overlap:-width_overlap]
+        elif width_overlap == 0 and (height_overlap != 0):
+            image_array = image_array[height_overlap:-height_overlap, :]
+
+        # Computes tile width and height using the given ratios
+        assert (self.config.ratiowidth <= 1.0) and (self.config.ratioheight <= 1.0), (
+            "The ratios should be at most 1.0"
+        )
+        width = image_array.shape[1]
+        height = image_array.shape[0]
+        if self.config.ratiowidth > 0.0:
+            width = math.ceil(image_array.shape[1] * self.config.ratiowidth)
+        if self.config.ratioheight > 0.0:
+            height = math.ceil(image_array.shape[0] * self.config.ratioheight)
+
+        # checking overlapfactor provided
+        assert self.config.overlapfactor < 1, "It should be less than 1."
+
+        # get tile coordinates
+        coords = self.get_coordinates(
+            image_width,
+            tile_w=width,
+            image_height=image_height,
+            tile_h=height,
+            overlaping_factor=self.config.overlapfactor,
+        )
+
+        # get tiles gps coordinates
+        image_gps = GPSUtils.get_gps_coord(
+            file_name=None, return_as_decimal=True, image=pil_image
+        )
+        if image_gps is not None:
+            (lat, long, alt), _ = image_gps
+            alt = alt / 1000  # conver to meters
+
+            tile_gps_coords = []
+            gsd = ImageProcessor.get_gsd(
+                image=pil_image,
+                image_path=None,
+                sensor_height=self.config.sensor_height,
+                flight_height=self.config.flight_height,
+            )
+            for (x_left, x_right), (y_top, y_bottom) in coords:
+                x = (x_left + x_right) / 2
+                y = (y_top + y_bottom) / 2
+                gps = ImageProcessor.generate_pixel_coordinates(
+                    x=x,
+                    y=y,
+                    W=image_width,
+                    H=image_height,
+                    lat_center=lat,
+                    lon_center=long,
+                    gsd=gsd,
+                )
+                gps = geopy.Point(gps[0], gps[1], alt)
+                tile_gps_coords.append(str(gps))
+        else:
+            tile_gps_coords = [None for _ in range(len(coords))]
+
+        # close pil image
+        pil_image.close()
+
+        # save patches
+        if not self.config.save_coords_only:
+            patches = self.get_patches(image_array, coords=coords)
+            self.save_list_images(patches, img_name, self.config.dest)
+
+        # record metadata
+        tile_metadata = {}
+        tile_metadata[str(img_path)] = dict(
+            px_coordinates=coords,
+            gps_coordinates=tile_gps_coords,
+        )
+
+        return tile_metadata
+
+    def run(
+        self, load_existing_metadata: bool = False, max_workers: int = 1
+    ) -> dict[str, list]:
         if load_existing_metadata:
             json_path = self.config.metadata_save_path
             if json_path is None:
@@ -131,97 +230,29 @@ class TileBuilder:
             [Path(self.config.root).glob(p) for p in self.config.patterns]
         )
         images_paths = list(set(images_paths))
-
         tile_metadata = dict()
-        for img_path in tqdm(images_paths, desc="Exporting patches"):
-            try:
-                pil_image = Image.open(img_path)
-            except:
-                print("failed for: ", img_path, flush=True)
-                continue
-            image_array = np.asarray(pil_image.convert("RGB"))
-            img_name = os.path.basename(img_path)
 
-            # Cropping out image-level overlap
-            height_overlap = math.ceil(self.config.rmheight * image_array.shape[0])
-            width_overlap = math.ceil(self.config.rmwidth * image_array.shape[1])
+        # Sequential mode
+        if max_workers < 2:
+            for img_path in tqdm(images_paths, desc="Exporting patches"):
+                try:
+                    metadata = self._run_single_image(img_path)
+                    tile_metadata.update(metadata)
+                except Exception as e:
+                    logger.error(e)
 
-            if height_overlap * width_overlap > 0:
-                image_array = image_array[
-                    height_overlap:-height_overlap, width_overlap:-width_overlap
-                ]
-                print(
-                    f"Removing {2 * width_overlap} pixels to the width; and {2 * height_overlap} pixels to the height."
-                )
-            elif (height_overlap == 0) and (width_overlap != 0):
-                image_array = image_array[:, width_overlap:-width_overlap]
-            elif width_overlap == 0 and (height_overlap != 0):
-                image_array = image_array[height_overlap:-height_overlap, :]
-
-            # Computes tile width and height using the given ratios
-            assert (self.config.ratiowidth <= 1.0) and (
-                self.config.ratioheight <= 1.0
-            ), "The ratios should be at most 1.0"
-            if self.config.ratiowidth > 0.0:
-                width = math.ceil(image_array.shape[1] * self.config.ratiowidth)
-            if self.config.ratioheight > 0.0:
-                height = math.ceil(image_array.shape[0] * self.config.ratioheight)
-
-            # checking overlapfactor provided
-            assert self.config.overlapfactor < 1, "It should be less than 1."
-
-            image_width = image_array.shape[1]
-            image_height = image_array.shape[0]
-
-            # get tile coordinates
-            coords = self.get_coordinates(
-                image_width,
-                tile_w=width,
-                image_height=image_height,
-                tile_h=height,
-                overlaping_factor=self.config.overlapfactor,
-            )
-
-            # get tiles gps coordinates
-            image_gps = GPSUtils.get_gps_coord(
-                file_name=None, return_as_decimal=True, image=pil_image
-            )
-            if image_gps is not None:
-                (lat, long, alt), _ = image_gps
-                alt = alt / 1000  # conver to meters
-
-                tile_gps_coords = []
-                gsd = ImageProcessor.get_gsd(
-                    image=pil_image,
-                    image_path=None,
-                    sensor_height=self.config.sensor_height,
-                    flight_height=self.config.flight_height,
-                )
-                for (x_left, x_right), (y_top, y_bottom) in coords:
-                    x = (x_left + x_right) / 2
-                    y = (y_top + y_bottom) / 2
-                    gps = ImageProcessor.generate_pixel_coordinates(
-                        x=x,
-                        y=y,
-                        W=image_width,
-                        H=image_height,
-                        lat_center=lat,
-                        lon_center=long,
-                        gsd=gsd,
-                    )
-                    gps = geopy.Point(gps[0], gps[1], alt)
-                    tile_gps_coords.append(str(gps))
-            else:
-                tile_gps_coords = [None for _ in range(len(coords))]
-
-            tile_metadata[str(img_path)] = dict(
-                px_coordinates=coords,
-                gps_coordinates=tile_gps_coords,
-            )
-            # save patches
-            if not self.config.save_coords_only:
-                patches = self.get_patches(image_array, coords=coords)
-                self.save_list_images(patches, img_name, self.config.dest)
+        # TODO: add error handling
+        # Parallel mode
+        else:
+            chunksize = len(images_paths) // max_workers
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                for metadata in tqdm(
+                    executor.map(
+                        self._run_single_image, images_paths, chunksize=chunksize
+                    ),
+                    desc="Exporting patches",
+                ):
+                    tile_metadata.update(metadata)
 
         # saving metdata
         json_path = self.config.metadata_save_path
@@ -277,8 +308,10 @@ class LabelingDataset:
         self,
     ):
         data = [tile.detections_to_df() for tile in self._tiles]
-        if len(data)<1:
-            raise ValueError(f"Error happened in parsing the detections. Make sure the tiles are built correctly.")
+        if len(data) < 1:
+            raise ValueError(
+                f"Error happened in parsing the detections. Make sure the tiles are built correctly."
+            )
         self.data = pd.concat(data, axis=0).reset_index(drop=True)
         return
 
@@ -329,14 +362,14 @@ class LabelingDataset:
         project_id: int,
         config: TilingConfig,
         top_n=0,
-        tile_metadata:dict=None,
+        tile_metadata: dict = None,
         load_existing_metadata: bool = False,
     ):
         project = labelstudio_client.projects.get(id=project_id)
 
         assert config.root is not None, "Provide path to untiled directory."
-            # data_dir = labelstudio_client.import_storage.local.get(project_id).path
-            # logger.info(f"Using root directory: {data_dir}")
+        # data_dir = labelstudio_client.import_storage.local.get(project_id).path
+        # logger.info(f"Using root directory: {data_dir}")
 
         if tile_metadata is None:
             tile_metadata = TileBuilder(config=config).run(
@@ -362,18 +395,20 @@ class LabelingDataset:
                     download_resources=False,
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
-                
+
                 # get tile gps_coords and offsets
                 value = tile_metadata.get(Path(image_path).stem, None)
                 tile_gps_loc = None
                 x1 = y1 = None
                 if value is None:
-                    logger.error(f"Error happended when reading metadata of {img_url} -> skipping")
+                    logger.error(
+                        f"Error happended when reading metadata of {img_url} -> skipping"
+                    )
                     continue
                 tile_gps_loc = value["gps"]
                 (x1, x2), (y1, y2) = value["coordinates"]
                 parent_image = value["parent_image"]
-                
+
                 # build tile
                 detection_objects = Detection.from_ls(task.annotations, image_path)
                 tile = Tile(
@@ -385,8 +420,8 @@ class LabelingDataset:
                     parent_image=parent_image,
                     tile_gps_loc=tile_gps_loc,
                 )
-                
-                # update detections gps loc from tile_gps_loc 
+
+                # update detections gps loc from tile_gps_loc
                 tile.update_detection_gps(
                     sensor_height=config.sensor_height,
                     flight_height=config.flight_height,
@@ -471,7 +506,59 @@ class YOLODatasetBuilder:
                 "it is likely to not work as expected."
             )
 
-    def build(self, map_imgdir_cocopath: dict, label_handler: LabelHandler) -> None:
+    def _run_single_coco_dir(
+        self,
+        image_dir: str,
+        coco_path: str,
+        name_id_map: dict,
+        labels_to_discard: list,
+        labels_to_keep: list,
+    ):
+        # slice annotations
+        coco_dict_slices = ImageProcessor.get_slices(
+            coco_path=coco_path, img_dir=image_dir, config=self.config
+        )
+        # sample tiles
+        df_tiles = ImageProcessor.sample_slices(
+            coco_dict_slices=coco_dict_slices,
+            empty_ratio=self.config.empty_ratio,
+            out_csv_path=None,
+            img_dir=image_dir,
+            save_all=self.config.save_all,
+            labels_to_discard=labels_to_discard,
+            labels_to_keep=labels_to_keep,
+            sample_only_empty=self.config.save_only_empty,
+        )
+
+        # detector_training mode
+        if self.config.is_single_cls:
+            df_tiles["label_id"] = 0
+        else:
+            df_tiles["label_id"] = df_tiles["labels"].map(name_id_map)
+            mask = ~df_tiles["label_id"].isna()
+            df_tiles.loc[mask, "label_id"] = df_tiles.loc[mask, "label_id"].apply(int)
+
+        # save labels in yolo format
+        self.save_annotations(
+            df_annotation=df_tiles.dropna(axis=0, how="any"),
+            output_dir=self.config.dest_path_labels,
+        )
+
+        # save tiles
+        ImageProcessor.save_tiles(
+            df_tiles=df_tiles,
+            output_dir=self.config.dest_path_images,
+            clear=self.config.clear_output,
+        )
+
+        return None
+
+    def build(
+        self,
+        map_imgdir_cocopath: dict,
+        label_handler: LabelHandler,
+        max_workers: int = 1,
+    ) -> None:
         """Main pipeline entry point"""
 
         # load label map and update yolo data_cfg_yaml file
@@ -481,57 +568,49 @@ class YOLODatasetBuilder:
             label_handler.update_config(self.config.yolo_data_config_yaml)
             name_id_map = {val: key for key, val in label_map.items()}
 
-        # slice coco annotations and save tiles
-        for img_dir, cocopath in tqdm(
-            map_imgdir_cocopath.items(), desc="Building yolo dataset"
-        ):
-            try:
-                # slice annotations
-                coco_dict_slices = ImageProcessor.get_slices(
-                    coco_path=cocopath, img_dir=img_dir, config=self.config
-                )
-                # sample tiles
-                df_tiles = ImageProcessor.sample_slices(
-                    coco_dict_slices=coco_dict_slices,
-                    empty_ratio=self.config.empty_ratio,
-                    out_csv_path=None,  # Path(args.dest_path_images).with_name("gt.csv"),
-                    img_dir=img_dir,
-                    save_all=self.config.save_all,
-                    labels_to_discard=label_handler.config.discard,
-                    labels_to_keep=label_handler.config.keep,
-                    sample_only_empty=self.config.save_only_empty,
-                )
+        # TODO: add error handling
+        # Parallel mode
+        if max_workers > 1 and len(map_imgdir_cocopath) > 1:
+            chunksize = len(map_imgdir_cocopath) // max_workers
+            func = partial(
+                self._run_single_coco_dir,
+                name_id_map=name_id_map,
+                labels_to_discard=label_handler.config.discard,
+                labels_to_keep=label_handler.config.keep,
+            )
 
-                # detector_training mode
-                if self.config.is_single_cls:
-                    df_tiles["label_id"] = 0
-                else:
-                    df_tiles["label_id"] = df_tiles["labels"].map(name_id_map)
-                    mask = ~df_tiles["label_id"].isna()
-                    df_tiles.loc[mask, "label_id"] = df_tiles.loc[
-                        mask, "label_id"
-                    ].apply(int)
+            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+                for _ in tqdm(
+                    executor.map(
+                        func, map_imgdir_cocopath.items(), chunksize=chunksize
+                    ),
+                    desc="Building yolo dataset",
+                ):
+                    continue
 
-                # save labels in yolo format
-                self.save_annotations(
-                    df_annotation=df_tiles.dropna(axis=0, how="any"),
-                    output_dir=self.config.dest_path_labels,
-                )
+        # Sequential mode
+        else:
+            for image_dir, cocopath in tqdm(
+                map_imgdir_cocopath.items(), desc="Building yolo dataset"
+            ):
+                try:
+                    self._run_single_coco_dir(
+                        image_dir=image_dir,
+                        coco_path=cocopath,
+                        name_id_map=name_id_map,
+                        labels_to_discard=label_handler.config.discard,
+                        labels_to_keep=label_handler.config.keep,
+                    )
 
-                # save tiles
-                ImageProcessor.save_tiles(
-                    df_tiles=df_tiles,
-                    output_dir=self.config.dest_path_images,
-                    clear=self.config.clear_output,
-                )
+                except Exception:
+                    print("--" * 25, end="\n")
+                    traceback.print_exc()
+                    print("--" * 25)
+                    print(
+                        f"Failed to build yolo dataset for for {image_dir} -- {cocopath}\n\n"
+                    )
 
-            except Exception:
-                print("--" * 25, end="\n")
-                traceback.print_exc()
-                print("--" * 25)
-                print(
-                    f"Failed to build yolo dataset for for {img_dir} -- {cocopath}\n\n"
-                )
+        return None
 
     def save_annotations(self, df_annotation: pd.DataFrame, output_dir: Path) -> None:
         """Save annotations in YOLO format"""
@@ -612,6 +691,7 @@ class ClassificationDatasetBuilder:
         tp_kwargs=dict(w=None, h=None),
         fp_kwargs=dict(w=None, h=None),
         hn_kwargs=dict(w=50, h=50),
+        max_workers: int = 1,
     ):
         # assert strategy in ["gt", "fp",'hn'], "Provide gt for fp as a strategy"
 
@@ -621,8 +701,14 @@ class ClassificationDatasetBuilder:
 
         for strategy in strategies:
             if strategy == "gt":
+                df_labels, _ = self.load_groundtruth(
+                    self.source_dirs,
+                    None,
+                    load_empty=save_true_negatives,
+                    max_workers=max_workers,
+                )
                 self.save_groundtruth(
-                    images_dirs=self.source_dirs,
+                    df_labels=df_labels,
                     save_true_negatives=save_true_negatives,
                     tn_kwargs=tn_kwargs,
                     tp_kwargs=tp_kwargs,
@@ -639,7 +725,7 @@ class ClassificationDatasetBuilder:
             else:
                 raise NotImplementedError(f"strategy:{strategy} is not defined.")
 
-    def _save(
+    def _save_one_image(
         self,
         image: np.ndarray,
         label_name: str | int,
@@ -676,9 +762,9 @@ class ClassificationDatasetBuilder:
         for i, data in enumerate(batch):
             if self.feature_extractor:
                 data["image"] = batch_features[i]
-                self._save(ext=".npy", **data)
+                self._save_one_image(ext=".npy", **data)
             else:
-                self._save(ext=".jpg", **data)
+                self._save_one_image(ext=".jpg", **data)
 
     def _save_tn(
         self,
@@ -859,20 +945,12 @@ class ClassificationDatasetBuilder:
 
     def save_groundtruth(
         self,
-        images_dirs=None,
-        images_paths=None,
+        df_labels: pd.DataFrame,
         save_true_positives: bool = True,
         save_true_negatives: bool = False,
         tn_kwargs: dict = {},
         tp_kwargs: dict = {},
     ):
-        assert (images_dirs is None) + (images_paths is None) == 1, (
-            "Give images_dirs or images_paths."
-        )
-        df_labels, _ = self.load_groundtruth(
-            images_dirs, images_paths, load_empty=save_true_negatives
-        )
-
         cols = ["x_min", "y_min", "x_max", "y_max", "width", "height"]
 
         # save labels
@@ -895,20 +973,28 @@ class ClassificationDatasetBuilder:
                     self.bbox_resize_factor,
                     **tn_kwargs,
                 )
+        return None
 
     def load_groundtruth(
         self,
         images_dirs: list[str] = None,
         images_paths: list[str] = None,
         load_empty: bool = False,
+        max_workers: int = 1,
     ) -> tuple[pd.DataFrame, str]:
         paths = images_paths
         if paths is None:
+            assert images_dirs is None, (
+                "Both images_dirs and images_paths are None. Provide exactly one."
+            )
             iters = [Path(p).glob("*") for p in images_dirs]
             paths = chain.from_iterable(iters)
 
         labels, _format = DataHandler.load_yolo_groundtruth(
-            images_dir=None, images_paths=paths, load_empty=load_empty
+            images_dir=None,
+            images_paths=paths,
+            load_empty=load_empty,
+            max_workers=max_workers,
         )
 
         return labels, _format
