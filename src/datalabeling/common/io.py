@@ -1,6 +1,9 @@
+import os
+
+os.environ["NO_ALBUMENTATIONS_UPDATE"] = "1"
+
 import json
 import logging
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 
@@ -25,7 +28,7 @@ from torchvision.datasets import ImageFolder
 import random
 from itertools import chain
 from functools import partial
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from multiprocessing.pool import ThreadPool
 
 from .config import DataConfig
 
@@ -47,7 +50,7 @@ def get_images_paths(
     patterns: tuple = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG"),
 ):
     images_paths = chain.from_iterable([Path(images_dir).glob(p) for p in patterns])
-    images_paths = list(images_paths)
+    images_paths = list(set(images_paths))
     return images_paths
 
 
@@ -85,32 +88,39 @@ def check_directory_label():
     pass
 
 
-def process_single_image(
+def load_yolo_label(
     image_path: str | Path, load_empty: bool = True
 ) -> tuple[dict, str]:
-    from .annotation_utils import check_label_format
-
     label_path = str(Path(image_path).with_suffix(".txt")).replace("images", "labels")
 
-    # image is negative sample?
-    if os.path.exists(label_path):
-        df = pd.read_csv(label_path, sep=" ", header=None).convert_dtypes()
-        _format = check_label_format(df)
-        if _format == "yolo-obb":
-            df.columns = [
-                "category_id",
-                "x1",
-                "y1",
-                "x2",
-                "y2",
-                "x3",
-                "y3",
-                "x4",
-                "y4",
-            ]
-        elif _format == "yolo":
-            df.columns = ["category_id", "x", "y", "w", "h"]
+    cols_yolo_obb = ["category_id", "x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"]
+    cols_yolo = ["category_id", "x", "y", "w", "h"]
 
+    def load_features(path: str):
+        with open(path, "r", encoding="utf-8") as file:
+            lines = [line.strip().split(" ") for line in file.readlines()]
+
+        num_features = len(lines[0])
+        if num_features == len(cols_yolo_obb):
+            cols = cols_yolo_obb
+            _format = "yolo-obb"
+        else:
+            cols = cols_yolo
+            _format = "yolo"
+
+        features = {
+            col: np.array([float(line[i]) for line in lines])
+            for i, col in enumerate(cols)
+        }
+
+        return features, _format, len(lines)
+
+    # image is negative sample?
+
+    if os.path.exists(label_path):
+        df, _format, num_lines = load_features(label_path)
+
+        if _format == "yolo":
             df["x1"] = df["x"] - df["w"] / 2.0
             df["y1"] = df["y"] - df["h"] / 2.0
 
@@ -128,40 +138,46 @@ def process_single_image(
     # emtpy images
     elif load_empty:
         _format = "empty"
-        df = pd.DataFrame(
-            {
-                "category_id": [np.nan],
-                "x1": [np.nan],
-                "y1": [np.nan],
-                "x2": [np.nan],
-                "y2": [np.nan],
-                "x3": [np.nan],
-                "y3": [np.nan],
-                "x4": [np.nan],
-                "y4": [np.nan],
-            }
-        )
+        num_lines = 1
+        df = {
+            "category_id": np.nan,
+            "x1": np.nan,
+            "y1": np.nan,
+            "x2": np.nan,
+            "y2": np.nan,
+            "x3": np.nan,
+            "y3": np.nan,
+            "x4": np.nan,
+            "y4": np.nan,
+        }
     else:
         return None, "empty"
 
     # add features
-    df["file_name"] = str(image_path)
     with Image.open(image_path) as img:
         width, height = img.size
-        df["width"] = width
-        df["height"] = height
+        df["width"] = [width] * num_lines
+        df["height"] = [height] * num_lines
+        df["file_name"] = [str(image_path)] * num_lines
 
     # unnormalize values
     for i in range(1, 5):
-        df[f"x{i}"] = df[f"x{i}"] * width
-        df[f"y{i}"] = df[f"y{i}"] * height
+        df[f"x{i}"] = df[f"x{i}"] * df["width"][0]
+        df[f"y{i}"] = df[f"y{i}"] * df["height"][0]
 
     df["x_min"] = df["x1"]
     df["y_min"] = df["y1"]
     df["x_max"] = df["x2"]
     df["y_max"] = df["y3"]
 
-    return df.to_dict(orient="records"), _format
+    # convert values to list
+    for col in df.keys():
+        if isinstance(df[col], float):
+            df[col] = [df[col]]
+        elif isinstance(df[col], np.ndarray):
+            df[col] = df[col].tolist()
+
+    return df, _format
 
 
 class DataHandler:
@@ -173,54 +189,40 @@ class DataHandler:
         images_dir: str = None,
         images_paths: list[str] | Sequence = None,
         load_empty: bool = True,
-        max_workers: int = 2,
+        max_workers: int = 1,
     ) -> tuple[pd.DataFrame, str]:
-        df_results = list()
+        results = dict()
         labels_format = set()
         num_empty = 0
 
         if images_dir:
-            assert images_paths is None, "It should ne be provided."
+            assert images_paths is None, "It should not be provided."
             images_paths = list(Path(images_dir).glob("*"))
 
-        func = partial(process_single_image, load_empty=load_empty)
+        func = partial(load_yolo_label, load_empty=load_empty)
 
-        # Sequential mode
-        if max_workers == 1:
-            for path in images_paths:
-                df, _format = func(path)
-                num_empty += _format == "empty"
-                if df is not None:
-                    df_results.append(df)
+        counter = 1
+        with ThreadPool(max_workers) as executor:
+            for df, _format in executor.map(func, images_paths):
+                if _format == "empty":
+                    num_empty += 1
+                else:
                     labels_format.add(_format)
-                    assert len(labels_format) == 1, (
-                        f"The labels format is corrupted. Labels format are {labels_format}"
-                    )
+                assert len(labels_format) <= 1, (
+                    f"Only one label format is supported. Labels format are {labels_format}"
+                )
+                if df is not None:
+                    if counter == 1:
+                        results.update(df)
+                    else:
+                        for col in results.keys():
+                            results[col] = results[col] + df[col]
+                    counter += 1
 
-            return pd.DataFrame.from_records(chain.from_iterable(df_results))
+        if len(labels_format) == 0:
+            labels_format.add("empty")
 
-        # Concurrent mode
-        total_images = len(images_paths)
-        batch_size = total_images // max_workers
-        for i in range(0, total_images, batch_size):
-            batch = images_paths[i : min(i + batch_size, total_images)]
-
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                # Submit all tasks
-                future_to_path = {executor.submit(func, path): path for path in batch}
-
-                # Process results as they complete
-                for future in as_completed(future_to_path):
-                    df, _format = future.result()
-                    num_empty += _format == "empty"
-                    if df is not None:
-                        df_results.append(df)
-                        labels_format.add(_format)
-                        assert len(labels_format) == 1, (
-                            f"The labels format is corrupted. Labels format are {labels_format}"
-                        )
-
-        return pd.DataFrame.from_records(chain.from_iterable(df_results))
+        return pd.DataFrame.from_dict(results), labels_format.pop()
 
     @staticmethod
     def load_json_predictions(path_result: str) -> pd.DataFrame:
@@ -230,51 +232,27 @@ class DataHandler:
     def load_data_herdnet_from_dir(
         yolo_images_dir: str,
     ) -> Tuple[pd.DataFrame, List[str]]:
-        from .annotation_utils import check_label_format
-
-        YOLO_COLS = ["id", "x", "y", "w", "h"]
-        OBB_COLS = ["id", "x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"]
-
         if not Path(yolo_images_dir).exists():
             raise FileNotFoundError(f"Directory {yolo_images_dir} not found")
 
         records, empties = [], []
-        for img_path in tqdm(
-            Path(yolo_images_dir).glob("*"), desc=f"loading data at {yolo_images_dir}"
-        ):
-            label_path = Path(str(img_path).replace("images", "labels")).with_suffix(
-                ".txt"
-            )
-
-            if not label_path.exists():
-                empties.append(str(img_path))
+        images_paths = list(Path(yolo_images_dir).glob("*"))
+        for image_path in tqdm(images_paths, desc=f"loading data at {yolo_images_dir}"):
+            df, _ = load_yolo_label(image_path=image_path, load_empty=False)
+            if df is None:
+                empties.append(str(image_path))
                 continue
-
-            df = pd.read_csv(label_path, sep=" ", header=None)
-            img = Image.open(img_path)
-            w, h = img.size
-            img.close()
-            fmt = check_label_format(df)
-
-            if fmt == "yolo":
-                df.columns = YOLO_COLS
-                df[["x", "y", "w", "h"]] *= [w, h, w, h]
-            else:
-                df.columns = OBB_COLS
-                df["x"] = (df.x1 + df.x2) * 0.5 * w
-                df["y"] = (df.y1 + df.y4) * 0.5 * h
-                df["w"] = (df.x2 - df.x1) * w
-                df["h"] = (df.y4 - df.y1) * h
-                df = df[["id", "x", "y", "w", "h"]]
-
-            df["images"] = str(img_path)
-            df = df.rename(columns={"id": "labels"})
             records.append(df)
 
-        all_df = pd.concat(records, ignore_index=True)
-        all_df["labels"] += 1  # shift to reserve 0 for background
+        df_results = pd.DataFrame.from_records(
+            chain.from_iterable(records)
+        ).convert_dtypes()
+        df_results = df_results.rename(
+            columns={"file_name": "images", "category_id": "labels"}
+        )
+        df_results["labels"] += 1  # shift to reserve 0 for background
 
-        return all_df, empties
+        return df_results, empties
 
     @staticmethod
     def load_data_herdnet_from_yaml(
@@ -343,10 +321,6 @@ class DataHandler:
             albu_transforms=albu_transforms,
             end_transforms=end_transforms,
         )
-
-    def save_results(self, df: pd.DataFrame, tag: str = "") -> None:
-        """Save results with optional tagging"""
-        pass
 
 
 class ClassifierFeaturesData(Dataset):
