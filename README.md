@@ -1,4 +1,4 @@
-# **DataLabeling for Aerial Wildlife Census**  
+# **Aerial Wildlife Census**  
 **An active learning pipeline for labeling and training YOLO-based detectors on aerial imagery of large herbivores.**  
 
 <div align="center">
