@@ -151,6 +151,62 @@ def load_classification_features_data():
     # return tr_batch, val_batch
 
 
+def load_engine():
+    from datalabeling.common.config import PredictionConfig
+    from datalabeling.ml.models import Detector, ImageClassifier
+    from datalabeling.ml.interface import InferenceEngine
+    from datalabeling.common.processor import get_processor, DetectionsPostprocessor
+
+    config = PredictionConfig(
+        imgsz=800,
+        tilesize=800,
+        overlap_ratio=0.2,
+        confidence_threshold=0.2,
+        inference_service_url=None,
+        sensor_height=24.0,
+        flight_height=180,
+        gsd=2.26,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=128,
+        # device="cuda:0",
+    )
+
+    # get image classifier
+    path = r"..\base_models_weights\roi_classifier.ckpt"
+    model = ImageClassifier.load_from_checkpoint(
+        path, cls_is_features=True, map_location=config.device
+    )
+    handler = get_processor("classifier")(
+        model,
+        label_map={0: "gt", 1: "tn"},
+        device=config.device,
+        feature_extractor=get_processor("feature_extractor")(),
+        imgsz=config.cls_imgsz,
+    )
+
+    # build postprocessor
+    processor = DetectionsPostprocessor(
+        keep_classes=["gt"],
+    )
+    processor.set_handler(handler)
+
+    # load detector
+    detector = Detector(config=config, detection_model=None)
+    detector.set_detection_model(
+        detection_model=None,
+        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
+        yolo_model=None,
+    )
+
+    # load engine
+    engine = InferenceEngine(config=config)
+    engine.set_detector(detector, model_tag="demo")
+    engine.set_processor(image_processor=None, detection_processor=processor)
+
+    return engine, config
+
+
 def load_dataset_from_ls(
     untiled_data_dir: str, project_id=4, top_n=0, load_existing_metadata=True
 ):
@@ -158,7 +214,7 @@ def load_dataset_from_ls(
     from dotenv import load_dotenv
     import os
     from datalabeling.common.config import TilingConfig
-    from datalabeling.common.dataset_loader import LabelingDataset,TileBuilder
+    from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
 
     # # Load environment variables
     load_dotenv(dotenv_path="../.env")
@@ -178,7 +234,7 @@ def load_dataset_from_ls(
         root=untiled_data_dir,
         overlapfactor=0.1,
         ratiowidth=0.5,
-        ratioheight=0.5,
+        ratioheight=0.33,
         rmheight=0.0,
         rmwidth=0.0,
         flight_height=180,
@@ -187,19 +243,32 @@ def load_dataset_from_ls(
         dest=r"..\.tmp",
         save_coords_only=True,  # set to False to save tiles i.e. patches
     )
-    
+
     tile_metadata = TileBuilder(config=config).run(
-        load_existing_metadata=load_existing_metadata
+        load_existing_metadata=True, max_workers=2
     )
 
-    print(config)
+    # print(config)
+
     dataset = LabelingDataset.from_ls(
         labelstudio_client,
         project_id=project_id,
         config=config,
         top_n=top_n,
+        max_workers=1,
+        tile_metadata=tile_metadata,
         load_existing_metadata=load_existing_metadata,
     )
+
+    # add predictions
+    engine, pred_config = load_engine()
+    dataset.add_predictions(engine)
+    dataset.update_detection_gps(
+        sensor_height=config.sensor_height,
+        flight_height=config.flight_height,
+        gsd=config.gsd,
+    )
+    dataset.build()
 
     return tile_metadata, dataset
 
@@ -217,11 +286,11 @@ if __name__ == "__main__":
 
     # load_classification_features_data()
 
-    tile_metadata,dataset = load_dataset_from_ls(
-        project_id=92,
+    tile_metadata, dataset = load_dataset_from_ls(
+        project_id=4,
         top_n=5,
         load_existing_metadata=True,
-        untiled_data_dir=r"D:\PhD\Data per camp\Wet season\Leopard rock\Camp 23-28\Rep 3",
+        untiled_data_dir=r"D:\savmap_dataset_v2\raw\images",
     )
 
     data = dataset.data

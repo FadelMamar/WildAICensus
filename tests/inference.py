@@ -24,62 +24,69 @@ config = PredictionConfig(
     tilesize=800,
     overlap_ratio=0.2,
     confidence_threshold=0.2,
+    inference_service_url=None,
+    flight_height=180,
+    sensor_height=24,
+    gsd=None,
     # min_area=100,
     # max_area=None,
     cls_imgsz=128,
     # device="cuda:0",
 )
 
-# get image classifier
-path = r"./runs-classifier/best-v2.ckpt"
-model = ImageClassifier.load_from_checkpoint(
-    path, cls_is_features=True, map_location=config.device
-)
-handler = get_processor("classifier")(
-    model,
-    label_map={0: "gt", 1: "tn"},
-    device=config.device,
-    feature_extractor=get_processor("feature_extractor")(),
-    imgsz=config.cls_imgsz,
-)
+ALIAS = "yolo11s-obb-v1"  # -rt-batch8'
+NAME = "labeler"
 
-# build postprocessor
-processor = DetectionsPostprocessor(
-    keep_classes=["gt"],
-)
-processor.set_handler(handler)
 
-ALIAS='yolo11s-obb-v1' #-rt-batch8'
-NAME='labeler'
+def load_engine():
+    # get image classifier
+    path = r"./runs-classifier/best-v2.ckpt"
+    model = ImageClassifier.load_from_checkpoint(
+        path, cls_is_features=True, map_location=config.device
+    )
+    handler = get_processor("classifier")(
+        model,
+        label_map={0: "gt", 1: "tn"},
+        device=config.device,
+        feature_extractor=get_processor("feature_extractor")(),
+        imgsz=config.cls_imgsz,
+    )
 
-# set detector
-detection_model,version = load_registered_model(alias=ALIAS,
-                                                name=NAME,
-                                                load_unwrapped=True)
-if isinstance(detection_model, YOLO):
-    detection_model =  UltralyticsDetectionModel(
+    # build postprocessor
+    processor = DetectionsPostprocessor(
+        keep_classes=["gt"],
+    )
+    processor.set_handler(handler)
+
+    # set detector
+    detection_model, version = load_registered_model(
+        alias=ALIAS, name=NAME, load_unwrapped=True
+    )
+    if isinstance(detection_model, YOLO):
+        detection_model = UltralyticsDetectionModel(
             model=detection_model,
             confidence_threshold=config.confidence_threshold,
-            category_mapping={"0":"wildlife"},
+            category_mapping={"0": "wildlife"},
             # image_size=config.imgsz,
             device=config.device,
         )
 
-def run_inference_engine(img_path: str, num_classes: int = 2):
+    detector = Detector(config=config, detection_model=detection_model)
+
     # get inference engine
     engine = InferenceEngine(config=config)
-
-    detector = Detector(config=config, detection_model=detection_model)
-    # detector.set_detection_model(detection_model=None,
-    #                              path_to_weights=""
-    #                              )
     engine.set_detector(detector, model_tag=ALIAS)
-
-    # set processors
     engine.set_processor(image_processor=None, detection_processor=processor)
 
+    return engine
+
+
+def run_inference_engine(img_path: str, num_classes: int = 2):
+    engine = load_engine()
+
     detections = engine.inference(
-        image_path=img_path, image=None, inference_service_url=None
+        image_path=img_path,
+        image=None,
     )
 
     return detections
@@ -116,17 +123,17 @@ if __name__ == "__main__":
     # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
     image_path = r"..\.tmp\images\DJI_20240204125354_0144.JPG"
 
-   
+    t1_start = perf_counter()
 
-    t1_start = perf_counter() 
-
-    detections = detection_model.model(Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"),iou=0.5,batch=8)
+    detections = detection_model.model(
+        Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"), iou=0.5, batch=8
+    )
 
     # detections  = run_inference_engine(image_path)
 
     t1_stop = perf_counter()
     print("Inference time: ", t1_stop - t1_start)
-    print("detections:",detections)
+    print("detections:", detections)
 
     # image = imread(img_path)
 

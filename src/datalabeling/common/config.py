@@ -74,8 +74,15 @@ class PredictionConfig:
     nms_iou: float = 0.5
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
+    flight_height: int = 180
+    sensor_height: float = 24
+    gsd: float = None  # cm/px
+
     # Image classifier imgsz
     cls_imgsz: int = 96
+
+    # inference service
+    inference_service_url: str = None
 
 
 @dataclass

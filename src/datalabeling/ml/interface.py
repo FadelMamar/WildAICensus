@@ -19,7 +19,7 @@ from tqdm import tqdm
 
 from ..common.processor import Processor
 from ..common.config import PredictionConfig
-from ..common.base import Detection
+from ..common.base import Detection, Tile
 from .models import Detector
 from ..common.mlflow_utils import load_registered_model
 import torch
@@ -53,21 +53,34 @@ class InferenceEngine(object):
     def inference(
         self,
         image_path: str = None,
+        tile: Tile = None,
         image: Image.Image = None,
-        inference_service_url=None,
     ) -> list[Detection]:
+        if tile:
+            if tile.image_path:
+                image_path = None
+                image = Image.open(tile.image_path)
+            else:
+                image_path = None
+                image = tile.image_data
+
         if image_path:
+            assert image is None
             image = Image.open(image_path)
             image_path = None
 
         if self.image_processor:
             image = self.image_processor.run(np.asarray(image))
             image = Image.fromarray(image)
+            if tile:
+                tile.image_data = image.copy()
+                image = None
 
         detections = self.detector.predict(
             image=image,
             image_path=image_path,
-            inference_service_url=inference_service_url,
+            tile=tile,
+            inference_service_url=self.config.inference_service_url,
             override_tilesize=self.config.tilesize,
         )
 
@@ -83,19 +96,37 @@ class InferenceEngine(object):
     def batch_inference(
         self,
         images_paths: list[str],
+        tiles: list[Tile] = None,
         save_path: str = None,
         as_dataframe: bool = False,
-        inference_service_url=None,
-    ) -> pd.DataFrame:
+        return_tiles: bool = False,
+    ) -> pd.DataFrame | list[Tile]:
         results = {}
 
-        for image_path in images_paths:
-            detections = self.inference(
-                image_path=image_path,
-                image=None,
-                inference_service_url=inference_service_url,
-            )
-            results[str(image_path)] = detections
+        logger.info("Batch inference...")
+
+        if tiles:
+            assert images_paths is None
+            for tile in tqdm(tiles, desc="Batch inference..."):
+                detections = self.inference(
+                    image_path=None,
+                    tile=tile,
+                    image=None,
+                )
+                tile.predictions = detections
+                assert tile.image_path, "tile.image_path is not defined!"
+                # results[str(tile.image_path)] = detections
+            if return_tiles:
+                return tiles
+
+        else:
+            for path in tqdm(images_paths, desc="Batch inference..."):
+                detections = self.inference(
+                    image_path=path,
+                    tile=None,
+                    image=None,
+                )
+                results[str(path)] = detections
 
         if as_dataframe or save_path:
             results = self.detector._format_results_as_dataframe(results=results)

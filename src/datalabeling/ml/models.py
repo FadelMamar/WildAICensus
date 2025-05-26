@@ -28,7 +28,7 @@ from torchvision import models
 
 from ..common.annotation_utils import GPSUtils, compute_detection_gps
 from ..common.config import PredictionConfig
-from ..common.base import Detection
+from ..common.base import Detection, Tile
 
 
 logger = logging.getLogger(__name__)
@@ -376,9 +376,12 @@ class Detector(object):
         self.config = config
         self.detection_model = detection_model
 
-    def set_detection_model(self, detection_model, path_to_weights=None,yolo_model:YOLO=None):
+    def set_detection_model(
+        self, detection_model, path_to_weights=None, yolo_model: YOLO = None
+    ):
         if detection_model:
             self.detection_model = detection_model
+            return None
 
         elif path_to_weights:
             yolo_model = YOLO(path_to_weights, task="detect")
@@ -394,6 +397,7 @@ class Detector(object):
     # TODO: batch predictions with slicing
     def predict(
         self,
+        tile: Tile,
         image: Image.Image = None,
         inference_service_url: str = None,
         image_path: str = None,
@@ -404,6 +408,14 @@ class Detector(object):
         nms_iou: float = None,
         verbose: int = 0,
     ) -> list[Detection]:
+        if tile:
+            image = None
+            image_path = None
+            if tile.image_data:
+                image = tile.image_data
+            else:
+                image = Image.open(tile.image_path)
+
         if image is None:
             assert image_path is not None, "Provide the image path."
             image = Image.open(image_path)
@@ -445,14 +457,17 @@ class Detector(object):
             )
             detections = result.to_coco_annotations()
 
-        # image gps coordinate
-        gps_info = GPSUtils.get_gps_coord(
-            file_name=image_path, image=image, return_as_decimal=False
-        )
-        if isinstance(gps_info, tuple):
-            gps_coords = gps_info[0]
+        if tile:
+            gps_coords = tile.tile_gps_loc
         else:
-            gps_coords = gps_info
+            # image gps coordinate
+            gps_info = GPSUtils.get_gps_coord(
+                file_name=image_path, image=image, return_as_decimal=False
+            )
+            if isinstance(gps_info, tuple):
+                gps_coords = gps_info[0]
+            else:
+                gps_coords = gps_info
 
         detections = self._format_detections(
             detections=detections,
@@ -460,6 +475,9 @@ class Detector(object):
             image_gps_loc=gps_coords,
             image=image,
         )
+
+        if tile:
+            tile.predictions = detections
 
         return detections
 
@@ -469,9 +487,6 @@ class Detector(object):
         image_path: str,
         image_gps_loc: str,
         image: Image.Image,
-        flight_height: int = 180,
-        sensor_height: float = 24,
-        gsd=None,  # cm/px
     ):
         # format detections
         detections = [
@@ -483,14 +498,16 @@ class Detector(object):
 
         # add detections gps
         for det in detections:
+            if det.image_gps_loc is not None:
+                continue
             det.gps_loc = compute_detection_gps(
                 x_center=det.x,
                 y_center=det.y,
                 image=image,
                 image_gps_loc=det.image_gps_loc,
-                flight_height=flight_height,
-                sensor_height=sensor_height,
-                gsd=gsd,
+                flight_height=self.config.flight_height,
+                sensor_height=self.config.sensor_height,
+                gsd=self.config.gsd,
             )
         return detections
 

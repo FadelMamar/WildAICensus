@@ -1,6 +1,6 @@
 import logging
 import os
-
+from pathlib import Path
 import numpy as np
 import pandas as pd
 import json
@@ -8,10 +8,11 @@ import torch
 from torchmetrics.detection import MeanAveragePrecision
 from torchmetrics.functional.detection import complete_intersection_over_union
 from tqdm import tqdm
-
+from itertools import chain
 from ..ml.models import Detector
+from ..ml.interface import InferenceEngine
 from .config import DataConfig, EvaluationConfig
-from .io import DataHandler
+from .io import DataHandler, get_images_paths
 
 logger = logging.getLogger(__name__)
 
@@ -24,33 +25,83 @@ class PerformanceEvaluator:
         self.config = config
         self.label_format = None
         self.predictions, self.ground_truth = None, None
+        self.engine: InferenceEngine = None
 
     # TODO:  debug for negative samples
     def evaluate(
         self,
         images_dirs: list[str],
         pred_results_dir: str,
-        detector: Detector,
+        engine: InferenceEngine,
         images_paths: list[str] = None,
         load_results: bool = False,
         save_tag: str = "",
     ) -> pd.DataFrame:
         """Calculate performance metrics"""
 
+        self.engine = engine
+
+        if images_paths is None:
+            assert images_dirs is not None
+            images_paths = list(
+                chain.from_iterable([get_images_paths(p) for p in images_dirs])
+            )
+
         self.predictions, self.ground_truth = self.get_preds_targets(
-            images_dirs=images_dirs,
             pred_results_dir=pred_results_dir,
-            detector=detector,
             images_paths=images_paths,
             load_results=load_results,
             save_tag=save_tag,
         )
 
         results_per_img, df_eval = self._calculate_base_metrics(
-            self.predictions.copy(), self.ground_truth.copy()
+            self.predictions, self.ground_truth
         )
-        metrics = results_per_img.merge(df_eval, on="file_name", how="left")
+
+        metrics = results_per_img
+        if not df_eval.empty:
+            metrics = results_per_img.merge(df_eval, on="file_name", how="left")
+
         return metrics
+
+    def _compute_map_iou(
+        self, m_ap: MeanAveragePrecision, image_path: str, df_gt, df_pred
+    ):
+        # get gt
+        mask_gt = df_gt["file_name"] == image_path
+        df_gt_i = df_gt.loc[mask_gt, :].iloc[:, 1:]
+        gt = torch.from_numpy(self._get_bbox(gt=df_gt_i))
+        labels = df_gt.loc[mask_gt, "label"].to_numpy().astype(int)
+
+        # get preds
+        mask_pred = df_pred["file_name"] == image_path
+        df_pred_i = df_pred.loc[mask_pred, ["x_min", "y_min", "x_max", "y_max"]]
+        pred = np.clip(df_pred_i.to_numpy(), a_min=0, a_max=df_pred_i.to_numpy().max())
+        pred = torch.from_numpy(pred)
+        pred_score = df_pred.loc[mask_pred, "score"].to_numpy()
+        classes = df_pred.loc[mask_pred, "label"].to_numpy().astype(int)
+
+        # compute mAPs
+        pred_list = [
+            {
+                "boxes": pred,
+                "scores": torch.from_numpy(pred_score),
+                "labels": torch.from_numpy(classes),
+            }
+        ]
+        target_list = [
+            {
+                "boxes": gt,
+                "labels": torch.from_numpy(labels),
+            }
+        ]
+
+        box_ious = complete_intersection_over_union(
+            preds=pred, target=gt, aggregate=False
+        )
+        metric = m_ap(preds=pred_list, target=target_list)
+
+        return metric, box_ious, pred_score
 
     def _calculate_base_metrics(
         self, df_pred: pd.DataFrame, df_gt: pd.DataFrame
@@ -66,8 +117,6 @@ class PerformanceEvaluator:
             iou_thresholds=[0.15, 0.25, 0.35, 0.5, 0.75, 0.85, 0.95],
         )
 
-        ciou = complete_intersection_over_union
-
         map_50s = list()
         maps_75s = list()
         max_scores = list()
@@ -77,65 +126,53 @@ class PerformanceEvaluator:
 
         image_paths = df_pred["file_name"].unique()
 
+        # drop True negatives
+        df_gt = df_gt.dropna(
+            axis=0,
+            subset=["category_id", "x_min", "y_min", "x_max", "y_max"],
+            how="any",
+        )
+        df_gt = df_gt.rename(
+            columns={"category_id": "label"},
+        )
+
         for image_path in tqdm(image_paths, desc="Computing metrics"):
-            # get gt
-            mask_gt = df_gt["file_name"] == image_path
-            df_gt_i = df_gt.loc[mask_gt, :].iloc[:, 1:]
-            gt = torch.from_numpy(self._get_bbox(gt=df_gt_i))
-            labels = df_gt.loc[mask_gt, "category_id"].to_numpy().astype(int)
-
-            # get preds
-            mask_pred = df_pred["file_name"] == image_path
-            df_pred_i = df_pred.loc[mask_pred, ["x_min", "y_min", "x_max", "y_max"]]
-            pred = np.clip(
-                df_pred_i.to_numpy(), a_min=0, a_max=df_pred_i.to_numpy().max()
+            metric, box_ious, pred_score = self._compute_map_iou(
+                m_ap, image_path, df_gt, df_pred
             )
-            pred = torch.from_numpy(pred)
-            pred_score = df_pred.loc[mask_pred, "score"].to_numpy()
-            classes = df_pred.loc[mask_pred, "category_id"].to_numpy().astype(int)
-            max_scores.append(pred_score.max())
+
             all_scores.append(pred_score)
+            max_scores.append(pred_score.max())
 
-            # compute mAPs
-            pred_list = [
-                {
-                    "boxes": pred,
-                    "scores": torch.from_numpy(pred_score),
-                    "labels": torch.from_numpy(classes),
-                }
-            ]
-            target_list = [
-                {
-                    "boxes": gt,
-                    "labels": torch.from_numpy(labels),
-                }
-            ]
-
-            metric = m_ap(preds=pred_list, target=target_list)
             map_50s.append(metric["map_50"].item())
             maps_75s.append(metric["map_75"].item())
 
+            mask_pred = df_pred["file_name"] == image_path
             df_pred_i = df_pred.loc[mask_pred, :].copy().reset_index(drop=True)
+            mask_gt = df_gt["file_name"] == image_path
             df_gt_i = df_gt.loc[mask_gt, :].copy().reset_index(drop=True)
+            df_gt_i[["x_min", "y_min", "x_max", "y_max"]] = self._get_bbox(
+                gt=df_gt_i.iloc[:, 1:]
+            )
+            gt = torch.from_numpy(
+                df_gt_i[["x_min", "y_min", "x_max", "y_max"]].to_numpy()
+            )
+
+            # get FPs
             if df_gt_i.empty:
                 df_pred_i["TP"] = 0
                 df_pred_i["FP"] = len(df_pred_i)
                 pred_flags.append(df_pred_i)
                 continue
 
-            df_gt_i[["x_min", "y_min", "x_max", "y_max"]] = self._get_bbox(
-                gt=df_gt_i.iloc[:, 1:]
-            )
-
             # TODO: make it work for multiclass?
-            # compute ious
-            box_ious = ciou(preds=pred, target=gt, aggregate=False)
             # For each prediction: find best-matching GT
             best_iou, best_gt_idx = box_ious.max(dim=1)
             df_pred_i["matching_gt"] = "None"
             df_pred_i["matching_gt"] = df_pred_i["matching_gt"].astype("object")
             df_pred_i["pred_label"] = "None"
             df_pred_i["file_name"] = image_path
+
             for i in range(len(df_pred_i)):
                 df_pred_i.loc[i, "TP"] = (
                     best_iou[i].item() >= self.config.tp_iou_threshold
@@ -165,6 +202,7 @@ class PerformanceEvaluator:
                 )
             gt_flags.append(df_gt_i)
 
+        # get metrics per image
         results_per_img = {
             "map50": map_50s,
             "map75": maps_75s,
@@ -174,27 +212,36 @@ class PerformanceEvaluator:
         }
         results_per_img = pd.DataFrame.from_dict(results_per_img, orient="columns")
 
-        df_pred_flagged = pd.concat(pred_flags, ignore_index=True)
-        df_pred_flagged.rename(
-            columns={
-                col: f"pred_{col}"
-                for col in df_pred_flagged.columns
-                if col != "file_name"
-            },
-            inplace=True,
-        )
+        eval_df_list = []
+        if len(pred_flags) > 0:
+            df_pred_flagged = pd.concat(pred_flags, ignore_index=True)
+            df_pred_flagged.rename(
+                columns={
+                    col: f"pred_{col}"
+                    for col in df_pred_flagged.columns
+                    if col != "file_name"
+                },
+                inplace=True,
+            )
+            eval_df_list.append(df_pred_flagged)
 
-        df_gt_flagged = pd.concat(gt_flags, ignore_index=True)
-        df_gt_flagged.rename(
-            columns={
-                col: f"gt_{col}" for col in df_gt_flagged.columns if col != "file_name"
-            },
-            inplace=True,
-        )
+        if len(gt_flags) > 0:
+            df_gt_flagged = pd.concat(gt_flags, ignore_index=True)
+            df_gt_flagged.rename(
+                columns={
+                    col: f"gt_{col}"
+                    for col in df_gt_flagged.columns
+                    if col != "file_name"
+                },
+                inplace=True,
+            )
+            eval_df_list.append(df_gt_flagged)
 
-        df_eval = pd.concat(
-            [df_pred_flagged, df_gt_flagged], ignore_index=True, sort=False
-        )  # df_gt_flagged.merge(df_pred_flagged,on='file_name',how='left')
+        df_eval = pd.DataFrame()
+        if len(eval_df_list) > 0:
+            df_eval = pd.concat(
+                eval_df_list, ignore_index=True, sort=False
+            ).reset_index(drop=True)
 
         return results_per_img, df_eval
 
@@ -203,76 +250,28 @@ class PerformanceEvaluator:
 
     def get_preds_targets(
         self,
-        images_dirs: list[str],
         pred_results_dir: str,
-        detector: Detector,
-        images_paths: list[str] = None,
+        images_paths: list[str],
         load_results: bool = False,
         save_tag: str = "",
     ) -> tuple[pd.DataFrame, pd.DataFrame]:
         # when providing a list of images
-        if images_paths is not None:
-            assert images_dirs is None, "images_dirs should be None!"
-            sfx = save_tag
-            save_path = os.path.join(pred_results_dir, f"predictions-{sfx}.json")
+        sfx = save_tag
+        save_path = os.path.join(pred_results_dir, f"predictions-{sfx}.json")
 
-            # get prediction results
-            if load_results and os.path.exists(save_path):
-                df_results = DataHandler.load_json_predictions(save_path)
-            else:
-                df_results = detector.predict_directory(
-                    path_to_dir=None,
-                    images_paths=images_paths,
-                    as_dataframe=True,
-                    save_path=save_path,
-                )
-            df_labels, label_format = DataHandler.load_yolo_groundtruth(
-                images_dir=None, images_paths=images_paths, load_empty=True
+        # load groundtruth
+        df_labels, label_format = DataHandler.load_yolo_groundtruth(
+            images_dir=None, images_paths=images_paths, load_empty=True
+        )
+        self.label_format = label_format
+
+        # get prediction results
+        if load_results and os.path.exists(save_path):
+            df_results = DataHandler.load_json_predictions(save_path)
+        else:
+            df_results = self.engine.batch_inference(
+                images_paths=images_paths, as_dataframe=True, save_path=None
             )
-            self.label_format = label_format
-
-            return df_results, df_labels
-
-        # when providing directories of images
-        df_results = list()
-        df_labels = list()
-        labels_format = set()
-        for image_dir in images_dirs:
-            sfx = str(image_dir).split(":\\")[-1].replace("\\", "_").replace("/", "_")
-            sfx = sfx + save_tag
-            save_path = os.path.join(pred_results_dir, f"predictions-{sfx}.json")
-
-            # get prediction results
-            if load_results and os.path.exists(save_path):
-                results = DataHandler.load_json_predictions(save_path)
-            else:
-                results = detector.predict_directory(
-                    path_to_dir=image_dir,
-                    images_paths=None,
-                    as_dataframe=True,
-                    return_gps=True,
-                    save_path=save_path,
-                )
-            df_results.append(results)
-
-            # get targets
-            labels, _format = DataHandler.load_yolo_groundtruth(
-                images_dir=image_dir, images_paths=None, load_empty=True
-            )
-            df_labels.append(labels)
-
-            # update and check for changes
-            labels_format.add(_format)
-            (
-                len(labels_format) == 1,
-                f"There are inconcistencies in the labels formats.Found {labels_format}",
-            )
-
-        # Labels format
-        self.label_format = labels_format.pop()
-
-        df_results = pd.concat(df_results, axis=0).reset_index(drop=True)
-        df_labels = pd.concat(df_labels, axis=0).reset_index(drop=True)
 
         return df_results, df_labels
 
@@ -357,40 +356,37 @@ class HardSampleSelector:
     ) -> None:
         df_hard_negatives["file_name"].to_csv(save_path, index=False, header=False)
 
-    def _filter(self, df_results_per_img: pd.DataFrame) -> pd.DataFrame:
-        """Apply filtering"""
+    def _filter_ratio(
+        self,
+        df_results_per_img: pd.DataFrame,
+        col: str = "pred_FP",
+        ratio_thres: float = 0.2,
+    ):
+        ratio_name = {"pred_FP": "fp_tp_ratio", "gt_FN": "fn_tp_ratio"}
 
-        # select images based on FPs and FNs
-        tps_fps_fns = (
-            df_results_per_img.groupby(by=["file_name"])[
-                ["pred_TP", "pred_FP", "gt_FN"]
-            ]
+        ratio_name = ratio_name[col]
+        # select images based on FPs
+        tps_col = (
+            df_results_per_img.groupby(by=["file_name"])[["pred_TP", col]]
             .sum()
             .sort_values("pred_TP", ascending=False)
             * 1
-        )
-        tps_fps_fns = tps_fps_fns.reset_index()
-        tps_fps_fns["fp_tp_ratio"] = tps_fps_fns["pred_FP"] / (
-            tps_fps_fns["pred_TP"] + 1e-8
-        )
-        tps_fps_fns["fn_tp_ratio"] = tps_fps_fns["gt_FN"] / (
-            tps_fps_fns["pred_TP"] + 1e-8
-        )
-
-        mask = tps_fps_fns["fn_tp_ratio"] > self.config.fn_tp_ratio_threshold
-        mask = mask + (tps_fps_fns["fp_tp_ratio"] > self.config.fp_tp_ratio_threshold)
-
-        selected_images = tps_fps_fns.loc[mask, "file_name"].tolist()
+        ).reset_index()
+        tps_col[ratio_name] = tps_col[col] / (tps_col["pred_TP"] + 1e-8)
+        mask = tps_col[ratio_name] > ratio_thres
+        selected_images = tps_col.loc[mask, "file_name"].tolist()
 
         df_hard_negatives = df_results_per_img.merge(
-            tps_fps_fns, on="file_name", how="left"
+            tps_col, on="file_name", how="left"
         )
-        df_hard_negatives = [
-            df_hard_negatives.loc[
-                df_hard_negatives["file_name"].isin(selected_images), :
-            ],
+
+        out = df_hard_negatives.loc[
+            df_hard_negatives["file_name"].isin(selected_images),
         ]
 
+        return out
+
+    def _filter_uncertainty(self, df_results_per_img):
         # select images based on mAP and uncertainty
         df_results_per_img = self.uncertainty.calculate_uncertainty(df_results_per_img)
         mask_low_map = (df_results_per_img["map50"] < self.config.map_threshold) * (
@@ -408,7 +404,34 @@ class HardSampleSelector:
             + (df_results_per_img["uncertainty"] > self.config.uncertainty_threshold)
         )
 
-        df_hard_negatives.append(df_results_per_img.loc[mask_selected])
+        out = df_results_per_img.loc[mask_selected]
+
+        return out
+
+    def _filter(self, df_results_per_img: pd.DataFrame) -> pd.DataFrame:
+        """Apply filtering"""
+
+        # select images based on FPs
+        df_hard_negatives_fp = self._filter_ratio(
+            df_results_per_img,
+            col="pred_FP",
+            ratio_thres=self.config.fp_tp_ratio_threshold,
+        )
+        df_hard_negatives = [df_hard_negatives_fp]
+
+        # select images based on FNs
+        if "gt_FN" in df_results_per_img.columns:
+            df_hard_negatives_fn = self._filter_ratio(
+                df_results_per_img,
+                col="gt_FN",
+                ratio_thres=self.config.fn_tp_ratio_threshold,
+            )
+            df_hard_negatives.append(df_hard_negatives_fn)
+        else:
+            logger.info("No False Negatives were found")
+
+        # concat results from FPs, FNs, uncertainty
+        df_hard_negatives.append(self._filter_uncertainty(df_results_per_img))
         df_hard_negatives = (
             pd.concat(df_hard_negatives)
             .reset_index(drop=True)
@@ -422,9 +445,12 @@ class HardSampleSelector:
             "map75",
             "all_scores",
             "uncertainty",
-            "fn_tp_ratio",
             "fp_tp_ratio",
         ]
+
+        if "gt_FN" in df_results_per_img.columns:
+            cols.append("fn_tp_ratio")
+
         df_hard_negatives = (
             df_hard_negatives[cols].drop_duplicates("file_name").reset_index(drop=True)
         )

@@ -201,6 +201,8 @@ class DataHandler:
 
         func = partial(load_yolo_label, load_empty=load_empty)
 
+        logger.info("Loading groundtruth")
+
         counter = 1
         with ThreadPool(max_workers) as executor:
             for df, _format in executor.map(func, images_paths):

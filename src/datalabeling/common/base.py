@@ -5,6 +5,9 @@ import math
 import geopy
 from PIL import Image
 import pandas as pd
+import logging
+
+logger = logging.getLogger(__name__)
 
 from .annotation_utils import compute_detection_gps
 
@@ -197,71 +200,112 @@ class Tile:
     y_offset: int = None
     parent_image: str = None
     tile_gps_loc: str = None
-    detections: List[Detection] = None
+    predictions: List[Detection] = None
+    annotations: List[Detection] = None
+    _pred_is_original: bool = False
+    _annot_is_original: bool = False
 
     def offset_detections(
         self,
     ):
         if self.x_offset is not None and self.y_offset is not None:
-            for det in self.detections:
-                det.to_absolute_coords(self.x_offset, self.y_offset)
+            if self.predictions and (not self._pred_is_original):
+                for det in self.predictions:
+                    det.to_absolute_coords(self.x_offset, self.y_offset)
+                self._pred_is_original = True
+
+            if self.annotations and (not self._annot_is_original):
+                for det in self.annotations:
+                    det.to_absolute_coords(self.x_offset, self.y_offset)
+                self._annot_is_original = True
 
     def update_detection_gps(
         self,
-        sensor_height: float = 24.0,
-        flight_height: float = 180.0,
-        gsd=None,
+        sensor_height: float,
+        flight_height: float,
+        gsd: float,
     ):
+        assert isinstance(self.tile_gps_loc, str), (
+            f"Expected self.tile_gps_loc to be 'str'. Found '{type(self.tile_gps_loc)}' "
+        )
+
         image = self.image_data
         if image is None:
             image = Image.open(self.image_path)
 
-        for det in self.detections:
+        array = []
+        if self.annotations:
+            array = array + self.annotations
+
+        if self.predictions:
+            array = array + self.predictions
+
+        for det in array:
             det.image_gps_loc = self.tile_gps_loc
 
             if det.image_gps_loc is not None:
-                det.gps_loc = compute_detection_gps(
-                    x_center=det.x,
-                    y_center=det.y,
-                    image=image,
-                    image_gps_loc=det.image_gps_loc,
-                    flight_height=flight_height,
-                    sensor_height=sensor_height,
-                    gsd=gsd,
-                )
+                try:
+                    det.gps_loc = compute_detection_gps(
+                        x_center=det.x,
+                        y_center=det.y,
+                        image=image,
+                        image_gps_loc=det.image_gps_loc,
+                        flight_height=flight_height,
+                        sensor_height=sensor_height,
+                        gsd=gsd,
+                    )
+                except Exception as e:
+                    # print(e)
+                    logger.error(f"Failed to compute GPS location of detections. {e}")
+                    det.gps_loc = None
 
     def detections_to_df(
         self,
     ) -> pd.DataFrame:
-        self._set_with_height()
+        self._set_width_height()
 
-        for det in self.detections:
-            assert self.image_path is not None, "provide the path to the tile."
-            det.parent_image = self.image_path
+        assert self.image_path is not None, "provide the path to the tile."
 
-        out = [det.to_dict() for det in self.detections]
+        out = []
+        # add_tag = lambda x,tag:{f"{tag}_{k}":v for k,v in x.items()}
+
+        def add_tag(out: dict, is_annot: bool):
+            out["is_annot"] = is_annot
+            return out
+
+        if self.annotations:
+            out = out + [
+                add_tag(det.to_dict(), is_annot=True) for det in self.annotations
+            ]
+
+        if self.predictions:
+            out = out + [
+                add_tag(det.to_dict(), is_annot=False) for det in self.predictions
+            ]
+
         df = pd.DataFrame.from_dict(out, orient="columns")
 
         df["image_width"] = self.width
         df["image_height"] = self.height
         df["parent_image"] = self.image_path
-        
+
         # YOLO format
-        if len(self.detections) > 0:
+        if len(out) > 0:
             df["w"] = df["w"] / self.width
             df["h"] = df["h"] / self.height
             df["x"] = df["x"] / self.width
-            df["y"] = df["y"] / self.height            
+            df["y"] = df["y"] / self.height
 
         df.rename(columns={"parent_image": "file_name"}, inplace=True)
 
         return df
 
-    def _set_with_height(
+    def _set_width_height(
         self,
     ):
         image = self.image_data
         if image is None:
             image = Image.open(self.image_path)
-        if self.width is None or self.height is None:
-            self.width, self.height = image.size
+        self.width, self.height = image.size
+
+        return None

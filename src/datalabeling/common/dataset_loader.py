@@ -16,7 +16,9 @@ import geopy
 from urllib.parse import unquote
 from label_studio_tools.core.utils.io import get_local_path
 from concurrent.futures import ProcessPoolExecutor
+from multiprocessing.pool import ThreadPool
 from functools import partial
+
 from .annotation_utils import (
     ImageProcessor,
     GPSUtils,
@@ -30,6 +32,7 @@ from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
 from .io import load_yaml, DataHandler
 from .processor import FeatureExtractor
 from ..ml.models import Detector
+from ..ml.interface import InferenceEngine
 from .evaluation import PerformanceEvaluator
 
 logger = logging.getLogger(__name__)
@@ -244,37 +247,34 @@ class TileBuilder:
         # TODO: add error handling
         # Parallel mode
         else:
-            chunksize = len(images_paths) // max_workers
-            with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            with ThreadPool(max_workers) as executor:
                 for metadata in tqdm(
-                    executor.map(
-                        self._run_single_image, images_paths, chunksize=chunksize
-                    ),
+                    executor.map(self._run_single_image, images_paths),
                     desc="Exporting patches",
                 ):
                     tile_metadata.update(metadata)
 
-        # saving metdata
+        # saving metadata
         json_path = self.config.metadata_save_path
         if json_path is None:
             json_path = Path(self.config.dest) / "metadata.json"
-            try:
-                with open(json_path, "w") as f:
-                    json.dump(tile_metadata, f, indent=1)
-            except Exception as e:
-                print(e)
-                with open(Path(self.config.dest) / "metadata.json", "w") as f:
-                    json.dump(tile_metadata, f, indent=1)
+            # try:
+            with open(json_path, "w") as f:
+                json.dump(tile_metadata, f, indent=1)
+            # except Exception as e:
+            #     print(e)
+            #     with open(Path(self.config.dest) / "metadata.json", "w") as f:
+            #         json.dump(tile_metadata, f, indent=1)
 
         self._metadata = tile_metadata
 
         self._expand_metada()
 
-        return self._expand_metada()
+        return self.tile_metadata
 
     def _expand_metada(
         self,
-    ):
+    ) -> dict:
         assert self._metadata is not None
 
         expanded_metadata = dict()
@@ -297,30 +297,58 @@ class TileBuilder:
 
 class LabelingDataset:
     def __init__(self, tiles: list[Tile] = None):
-        self._tiles = tiles or []
+        self.tiles: list[Tile] = tiles or []
         self.data: pd.DataFrame = None
 
-    def add_tile(self, tile: Tile):
-        self._tiles.append(tile)
-        return
+    def add_tile(self, tile: Tile) -> None:
+        self.tiles.append(tile)
+        return None
+
+    def add_predictions(
+        self,
+        engine: InferenceEngine,
+    ) -> None:
+        self.tiles = engine.batch_inference(
+            tiles=self.tiles, save_path=None, images_paths=None, return_tiles=True
+        )
+        return None
 
     def build(
         self,
     ):
-        data = [tile.detections_to_df() for tile in self._tiles]
+        data = [tile.detections_to_df() for tile in self.tiles if tile is not None]
         if len(data) < 1:
-            raise ValueError(
-                f"Error happened in parsing the detections. Make sure the tiles are built correctly."
-            )
+            return
+            # raise ValueError(
+            #     "Error happened in parsing the detections. Make sure the tiles are built correctly."
+            # )
         self.data = pd.concat(data, axis=0).reset_index(drop=True)
         return
 
-    def offset_detections(
-        self,
+    def update_detection_gps(
+        self, sensor_height: float, flight_height: float, gsd: float
     ):
-        for tile in self._tiles:
+        if gsd is None:
+            logger.warning(
+                "gsd=None, it might break the pipeline if the ``FocalLength`` is not available in the Exif of the image."
+            )
+
+        for tile in self.tiles:
+            try:
+                tile.update_detection_gps(
+                    sensor_height=sensor_height, flight_height=flight_height, gsd=gsd
+                )
+            except Exception as e:
+                logger.error(e)
+
+        return None
+
+    def offset_detections(self, build: bool = False):
+        for tile in self.tiles:
             tile.offset_detections()
-        self.build()
+
+        if build:
+            self.build()
         return
 
     def export_detections_gps(self, save_path: str = None) -> pd.DataFrame:
@@ -334,8 +362,9 @@ class LabelingDataset:
 
         return df_export
 
-    def save(self, dir_path: str):
-        pass
+    def save_data_csv(self, save_path: str):
+        self.data.to_csv(save_path, index=False)
+        return None
 
     def __len__(
         self,
@@ -364,6 +393,8 @@ class LabelingDataset:
         top_n=0,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,
+        max_workers: int = 1,
+        ls_download_resources: bool = False,
     ):
         project = labelstudio_client.projects.get(id=project_id)
 
@@ -376,23 +407,13 @@ class LabelingDataset:
                 load_existing_metadata=load_existing_metadata
             )
 
-        # get tasks in project
-        tasks = labelstudio_client.tasks.list(
-            project=project.id,
-        )
-
-        tiles = []
-        # create
-        for i, task in enumerate(tasks):
-            if top_n > 0:
-                if i > top_n:
-                    break
-
+        def load_unique_task(task):
             img_url = unquote(task.data["image"])
+
             try:
                 image_path = get_local_path(
                     img_url,
-                    download_resources=False,
+                    download_resources=ls_download_resources,
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
 
@@ -401,10 +422,11 @@ class LabelingDataset:
                 tile_gps_loc = None
                 x1 = y1 = None
                 if value is None:
-                    logger.error(
-                        f"Error happended when reading metadata of {img_url} -> skipping"
+                    logger.warning(
+                        f" No GPS coordinates was found when reading metadata of {img_url}. -> skipping"
                     )
-                    continue
+                    return None
+
                 tile_gps_loc = value["gps"]
                 (x1, x2), (y1, y2) = value["coordinates"]
                 parent_image = value["parent_image"]
@@ -412,7 +434,7 @@ class LabelingDataset:
                 # build tile
                 detection_objects = Detection.from_ls(task.annotations, image_path)
                 tile = Tile(
-                    detections=detection_objects,
+                    annotations=detection_objects,
                     image_data=None,
                     image_path=image_path,
                     x_offset=x1,
@@ -421,20 +443,53 @@ class LabelingDataset:
                     tile_gps_loc=tile_gps_loc,
                 )
 
-                # update detections gps loc from tile_gps_loc
+                # update detections (annotations or predictions) gps loc using tile_gps_loc
                 tile.update_detection_gps(
                     sensor_height=config.sensor_height,
                     flight_height=config.flight_height,
                     gsd=config.gsd,
                 )
-
-                tiles.append(tile)
+                return tile
 
             except Exception as e:
                 logger.warning(f"Failed for: {img_url} -> skipping")
                 traceback.print_exc()
-                continue
+                return None
 
+        # get tasks in project
+        tasks = labelstudio_client.tasks.list(
+            project=project.id,
+        )
+
+        tiles = []
+        # create
+        if top_n > 0:
+            max_workers = 1
+        logger.info("Loading annotated dataset from Label Studio")
+
+        if max_workers < 2:
+            for i, task in enumerate(tasks):
+                if top_n > 0 and i >= top_n:
+                    break
+                tile = load_unique_task(task)
+                if tile is not None:
+                    tiles.append(tile)
+
+            # build dataset
+            dataset = cls(tiles=tiles)
+            dataset.build()
+            return dataset
+
+        # with ThreadPool(max_workers) as executor:
+        #     for i, task in enumerate(executor.map(load_unique_task, tasks)):
+        #         if top_n > 0 and i > top_n:
+        #             if i > top_n:
+        #                 dataset = cls(tiles=tiles)
+        #                 dataset.build()
+        #                 return dataset
+        #         tile = load_unique_task(task)
+        #         if tile is not None:
+        # tiles.append(tile)
         # build dataset
         dataset = cls(tiles=tiles)
         dataset.build()

@@ -1176,6 +1176,9 @@ def compute_detection_gps(
 ) -> str:
     # None
     if image_gps_loc is None:
+        logger.info(
+            "GPS coordinates of detections could not be computed because ``image_gps_loc=None``. Returning None"
+        )
         return None
 
     assert isinstance(image, Image.Image), "Provide PIL Image"
