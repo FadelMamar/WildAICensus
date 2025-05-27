@@ -10,13 +10,14 @@ import torchvision.transforms as T
 from PIL import Image
 from sahi.models.ultralytics import UltralyticsDetectionModel
 from sahi.predict import get_prediction, get_sliced_prediction
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import DataLoader, TensorDataset, ConcatDataset, Dataset
 import requests, base64
 
 # from label_studio_ml.utils import (get_env, get_local_path)
 from tqdm import tqdm
 
 from ultralytics import YOLO
+from ultralytics.engine.results import Results as UltralyticsResults
 from typing import Sequence
 import lightning as L
 import yaml
@@ -25,6 +26,7 @@ from animaloc.eval.lmds import HerdNetLMDS
 
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score, AUROC
 from torchvision import models
+from torchvision.ops import nms
 
 from ..common.annotation_utils import GPSUtils, compute_detection_gps
 from ..common.config import PredictionConfig
@@ -375,16 +377,36 @@ class Detector(object):
     ):
         self.config = config
         self.detection_model = detection_model
+        self.yolo_model = None
+        if detection_model:
+            self.yolo_model = detection_model.model
 
     def set_detection_model(
-        self, detection_model, path_to_weights=None, yolo_model: YOLO = None
+        self,
+        detection_model: UltralyticsDetectionModel,
+        path_to_weights=None,
+        yolo_model: YOLO = None,
     ):
         if detection_model:
             self.detection_model = detection_model
+            self.yolo_model = detection_model.model
+
+            # warmup
+            try:
+                self.yolo_model(
+                    torch.rand(1, 3, self.config.tilesize, self.config.tilesize).to(
+                        yolo_model.device
+                    ),
+                    verbose=False,
+                )
+            except Exception as e:
+                logger.info("Warm up failed")
+
             return None
 
         elif path_to_weights:
             yolo_model = YOLO(path_to_weights, task="detect")
+            self.yolo_model = yolo_model
 
         self.detection_model = UltralyticsDetectionModel(
             model=yolo_model,
@@ -392,10 +414,21 @@ class Detector(object):
             image_size=self.config.imgsz,
             device=self.config.device,
         )
+
         logger.info(f"Computing device: {self.config.device}")
 
-    # TODO: batch predictions with slicing
-    def predict(
+        # warmup
+        try:
+            self.yolo_model(
+                torch.rand(1, 3, self.config.tilesize, self.config.tilesize).to(
+                    yolo_model.device
+                ),
+                verbose=False,
+            )
+        except Exception as e:
+            logger.info("Warm up failed")
+
+    def legacy_predict(
         self,
         tile: Tile,
         image: Image.Image = None,
@@ -457,9 +490,11 @@ class Detector(object):
             )
             detections = result.to_coco_annotations()
 
+        gps_coords = None
         if tile:
             gps_coords = tile.tile_gps_loc
-        else:
+
+        if gps_coords is not None:
             # image gps coordinate
             gps_info = GPSUtils.get_gps_coord(
                 file_name=image_path, image=image, return_as_decimal=False
@@ -483,7 +518,7 @@ class Detector(object):
 
     def _format_detections(
         self,
-        detections: list[Detection],
+        detections: list[dict],
         image_path: str,
         image_gps_loc: str,
         image: Image.Image,
@@ -511,6 +546,73 @@ class Detector(object):
             )
         return detections
 
+    def _result_to_coco(
+        self,
+        result: list[UltralyticsResults],
+        tile_width: int,
+        tile_height: int,
+        offset_info: dict,
+    ) -> list:
+        bboxs = []
+        conf = []
+        label = []
+        for i, res in enumerate(result):
+            if res.obb is not None:
+                boxes = res.obb
+            else:
+                boxes = res.boxes
+
+            if boxes.xyxy.cpu().numel() == 0:
+                continue
+
+            # mapping to untiled coordinates
+            bbox = boxes.xyxy.cpu()
+            bbox[:, [0, 2]] += offset_info["x_offset"][i]
+            bbox[:, [1, 3]] += offset_info["y_offset"][i]
+
+            bboxs.append(bbox)
+            conf.append(boxes.conf.cpu())
+            label.append(boxes.cls.cpu())
+
+        if len(bboxs) == 0:
+            return []
+
+        bboxs = torch.vstack(bboxs)
+        conf = torch.hstack(conf)
+        label = torch.hstack(label)
+
+        assert (
+            torch.max(bboxs[:, [0, 2]]) <= tile_width
+        )  # x_offset + self.config.tilesize
+        assert (
+            torch.max(bboxs[:, [1, 3]]) <= tile_height
+        )  # y_offset + self.config.tilesize
+
+        # Non-max suppression
+        indx = nms(boxes=bboxs, scores=conf, iou_threshold=self.config.nms_iou)
+
+        # xyxy -> coco xywh
+        bboxs[:, 2] = bboxs[:, 2] - bboxs[:, 0]
+        bboxs[:, 3] = bboxs[:, 3] - bboxs[:, 1]
+
+        # retaining selected boxes
+        bboxs = bboxs[indx].tolist()
+        conf = conf[indx].tolist()
+        label = label[indx].tolist()
+
+        # to coco format
+        coco = [
+            dict(
+                bbox=bboxs[i],
+                category_id=label[i],
+                category_name=self.yolo_model.names[label[i]],
+                score=conf[i],
+            )
+            for i in range(len(label))
+        ]
+
+        return coco
+
     @staticmethod
     def predict_url(
         image_path: str,
@@ -534,61 +636,101 @@ class Detector(object):
 
         return detections
 
-    # TODO: to debug and optimize
-    def sliced_prediction(
-        self,
-        image_path: str,
-        image: Image = None,
-        patchsize: int = 640,
-        stride: int = 128,
-    ):
-        if image is None:
-            assert image_path is not None, "Provide the image path."
-            image = Image.open(image_path)
+    # TODO : debug
+    def batch_predict(self, tiles: Sequence[Tile], verbose: bool = False):
+        assert isinstance(tiles, Sequence)
 
-        image = image.convert("RGB")
-        to_tensor = T.ToTensor()
-        image = to_tensor(image).unsqueeze(0)
-        image = image[:, ::-1, :, :]
+        datasets = []
+        offsets = []
+        for i, tile in enumerate(tiles):
+            dataset, offset_info = self._load_tile_as_patches(tile)
+            datasets.append(dataset)
+            if i == 0:
+                offsets = offset_info
+            else:
+                for k, v in offset_info:
+                    offsets[k] = offsets[k] + v
 
-        # unfold gives shape [1, C*ph*pw, L] where L = number of patches
-        patches_flat = F.unfold(
-            image, kernel_size=(patchsize, patchsize), stride=(stride, stride)
-        )
-        batch_of_patches = patches_flat.transpose(1, 2).reshape(
-            -1, 3, patchsize, patchsize
+        self.predict(
+            tile=None,
+            dataset=ConcatDataset(datasets),
+            offset_info=offsets,
+            verbose=verbose,
         )
 
-        # number of patches along width, height:
-        H, W = image.shape[2:]
-        n_w = (W - patchsize) // stride + 1
-        n_h = (H - patchsize) // stride + 1
+    def _load_tile_as_patches(self, tile: Tile):
+        stride = int((1 - self.config.overlap_ratio) * self.config.tilesize)
+        batch_of_patches, offset_info = tile.as_batch(
+            tile_size=self.config.tilesize, stride=stride
+        )
 
-        # for patch index k in [0..L-1]:
-        row_idx = lambda k: k // n_h
-        col_idx = lambda k: k % n_w
+        logger.debug(f"Tiled image shape: {batch_of_patches.shape}")
 
-        # top‐left pixel of this patch in original:
-        y0 = lambda i: row_idx(i) * stride
-        x0 = lambda j: col_idx(j) * stride
+        if batch_of_patches.max() > 1.0:
+            batch_of_patches = batch_of_patches / 255.0
 
         dataset = TensorDataset(batch_of_patches)
-        loader = DataLoader(dataset, batch_size=8, shuffle=False)
+
+        return dataset, offset_info
+
+    def predict(
+        self,
+        tile: Tile,
+        dataset: Dataset = None,
+        offset_info: dict = None,
+        verbose: bool = False,
+    ):
+        if dataset is None or offset_info is None:
+            dataset, offset_info = self._load_tile_as_patches(tile)
+
+        loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=False)
+
+        if verbose:
+            loader = tqdm(loader, desc="sliced_inference")
 
         results = []
-        indexes = []
-        offset = 0
+
+        self.yolo_model.eval()
+
         with torch.no_grad():
             for (batch,) in loader:
-                res = self.detection_model.model(batch)
-                results.append(res)
-                indexes = indexes + list(range(offset, offset + batch.shape[0]))
-                offset += batch.shape[0]
+                res = self.yolo_model(batch, verbose=False)
+                results = results + res
 
-        # TODO: debug top-left pixels in the original image
-        y0_x0 = [(y0(i), x0(i)) for i in indexes]
+        detections = self._result_to_coco(
+            results,
+            offset_info=offset_info,
+            tile_width=tile.width,
+            tile_height=tile.height,
+        )
 
-        return results, y0_x0
+        # TODO: debug batch predictions
+        if tile is None:
+            raise NotImplementedError()
+
+        else:
+            gps_coords = tile.tile_gps_loc
+            if gps_coords is None:
+                # image gps coordinate
+                gps_info = GPSUtils.get_gps_coord(
+                    file_name=tile.image_path, image=None, return_as_decimal=False
+                )
+                if isinstance(gps_info, tuple):
+                    gps_coords = gps_info[0]
+                else:
+                    gps_coords = gps_info
+
+            detections = self._format_detections(
+                detections=detections,
+                image_path=tile.image_path,
+                image_gps_loc=gps_coords,
+                image=None,
+            )
+
+            # set predictions
+            tile.set_predictions(detections)
+
+            return detections
 
     def predict_directory(
         self,
@@ -619,8 +761,7 @@ class Detector(object):
         for image_path in tqdm(paths, desc="Computing predictions..."):
             try:
                 pred = self.predict(
-                    image=None,
-                    image_path=image_path,
+                    tile=Tile(image_path=image_path),
                 )
             except Exception as e:
                 logger.error(e)

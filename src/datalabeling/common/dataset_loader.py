@@ -29,11 +29,11 @@ from .annotation_utils import (
 from .base import Tile, Detection
 
 from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
-from .io import load_yaml, DataHandler
+from .io import load_yaml, DataHandler, get_images_from_dirs
 from .processor import FeatureExtractor
 from ..ml.models import Detector
 from ..ml.interface import InferenceEngine
-from .evaluation import PerformanceEvaluator
+
 
 logger = logging.getLogger(__name__)
 
@@ -296,13 +296,18 @@ class TileBuilder:
 
 
 class LabelingDataset:
-    def __init__(self, tiles: list[Tile] = None):
-        self.tiles: list[Tile] = tiles or []
-        self.data: pd.DataFrame = None
+    def __init__(self, tiles: list[Tile], data: pd.DataFrame = None):
+        self.tiles: list[Tile] = tiles
+        self.data: pd.DataFrame = data
+        self._is_built: bool = data is not None
+
+        if self.data is not None:
+            self.data = self.data.convert_dtypes()
+
+        assert self.tiles is not None
 
     def add_tile(self, tile: Tile) -> None:
         self.tiles.append(tile)
-        return None
 
     def add_predictions(
         self,
@@ -313,17 +318,28 @@ class LabelingDataset:
         )
         return None
 
-    def build(
-        self,
-    ):
+    def import_data(self, path: str) -> None:
+        self.data = pd.read_csv(
+            path,
+        )
+        return None
+
+    def build(self, force_rebuild: bool = False):
+        if force_rebuild:
+            pass
+        elif self._is_built:
+            logger.info(
+                "Disabling the build...Dataset is already built. Use force_rebuild=True"
+            )
+            return
+
         data = [tile.detections_to_df() for tile in self.tiles if tile is not None]
         if len(data) < 1:
-            return
-            # raise ValueError(
-            #     "Error happened in parsing the detections. Make sure the tiles are built correctly."
-            # )
-        self.data = pd.concat(data, axis=0).reset_index(drop=True)
-        return
+            return None
+
+        self.data = pd.concat(data, axis=0).reset_index(drop=True).convert_dtypes()
+        self._is_built = True
+        return None
 
     def update_detection_gps(
         self, sensor_height: float, flight_height: float, gsd: float
@@ -385,6 +401,52 @@ class LabelingDataset:
         return data
 
     @classmethod
+    def from_paths(cls, paths: Sequence[str]):
+        tiles = [Tile(image_path=p) for p in paths]
+        o = cls(tiles=tiles, data=None)
+        o.build()
+        o.data["is_annot"] = None
+        return o
+
+    @classmethod
+    def from_dirs(cls, images_dirs: Sequence[str]):
+        paths = get_images_from_dirs(images_dirs=images_dirs)
+        return cls.from_paths(paths)
+
+    @classmethod
+    def from_yolo(
+        cls,
+        images_dirs: Sequence[str] = None,
+        paths: Sequence[str] = None,
+        load_empty: bool = True,
+        max_workers=1,
+    ):
+        assert (images_dirs is None) + (paths is None) == 1, (
+            "Exactly one of 'paths' or 'images_dirs' should be given."
+        )
+
+        if paths is None:
+            assert isinstance(images_dirs, Sequence)
+            paths = get_images_from_dirs(images_dirs=images_dirs)
+        else:
+            assert isinstance(paths, Sequence)
+
+        # load groundtruth
+        df_labels, label_format = DataHandler.load_yolo_groundtruth(
+            images_dir=None,
+            images_paths=paths,
+            load_empty=load_empty,
+            max_workers=max_workers,
+        )
+
+        # load tiles
+        tiles = [Tile(image_path=p) for p in df_labels["file_name"].unique()]
+
+        df_labels["is_annot"] = True
+
+        return cls(data=df_labels, tiles=tiles)
+
+    @classmethod
     def from_ls(
         cls,
         labelstudio_client,
@@ -407,7 +469,7 @@ class LabelingDataset:
                 load_existing_metadata=load_existing_metadata
             )
 
-        def load_unique_task(task):
+        def load_unique_task(task) -> Tile | None:
             img_url = unquote(task.data["image"])
 
             try:
@@ -433,6 +495,7 @@ class LabelingDataset:
 
                 # build tile
                 detection_objects = Detection.from_ls(task.annotations, image_path)
+
                 tile = Tile(
                     annotations=detection_objects,
                     image_data=None,
@@ -451,7 +514,7 @@ class LabelingDataset:
                 )
                 return tile
 
-            except Exception as e:
+            except Exception:
                 logger.warning(f"Failed for: {img_url} -> skipping")
                 traceback.print_exc()
                 return None
@@ -467,6 +530,7 @@ class LabelingDataset:
             max_workers = 1
         logger.info("Loading annotated dataset from Label Studio")
 
+        # Single thread
         if max_workers < 2:
             for i, task in enumerate(tasks):
                 if top_n > 0 and i >= top_n:
@@ -480,16 +544,13 @@ class LabelingDataset:
             dataset.build()
             return dataset
 
-        # with ThreadPool(max_workers) as executor:
-        #     for i, task in enumerate(executor.map(load_unique_task, tasks)):
-        #         if top_n > 0 and i > top_n:
-        #             if i > top_n:
-        #                 dataset = cls(tiles=tiles)
-        #                 dataset.build()
-        #                 return dataset
-        #         tile = load_unique_task(task)
-        #         if tile is not None:
-        # tiles.append(tile)
+        # Multi threads
+        with ThreadPool(max_workers) as executor:
+            for i, task in enumerate(executor.map(load_unique_task, tasks)):
+                tile = load_unique_task(task)
+                if tile is not None:
+                    tiles.append(tile)
+
         # build dataset
         dataset = cls(tiles=tiles)
         dataset.build()
@@ -714,6 +775,8 @@ class ClassificationDatasetBuilder:
         self,
         eval_config: EvaluationConfig,
     ):
+        from .evaluation import PerformanceEvaluator
+
         self.config = eval_config
         self.detector = None
         self.source_dirs = None

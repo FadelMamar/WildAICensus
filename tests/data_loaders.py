@@ -9,6 +9,10 @@ Created on Thu Apr 24 19:29:12 2025
 
 from tqdm import tqdm
 import os
+from datalabeling.common.config import TilingConfig
+from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
+from dotenv import load_dotenv
+import os
 
 
 def load_herd_net():
@@ -211,10 +215,6 @@ def load_dataset_from_ls(
     untiled_data_dir: str, project_id=4, top_n=0, load_existing_metadata=True
 ):
     from label_studio_sdk.client import LabelStudio
-    from dotenv import load_dotenv
-    import os
-    from datalabeling.common.config import TilingConfig
-    from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
 
     # # Load environment variables
     load_dotenv(dotenv_path="../.env")
@@ -273,6 +273,28 @@ def load_dataset_from_ls(
     return tile_metadata, dataset
 
 
+def load_dataset_from_dirs():
+    images_dirs = [
+        r"D:\savmap_dataset_v2\images_tmp",
+    ]
+
+    dataset = LabelingDataset.from_dirs(images_dirs)
+
+    return dataset
+
+
+def load_dataset_from_yolo():
+    images_dirs = [
+        r"D:\savmap_dataset_v2\raw\images",
+    ]
+
+    dataset = LabelingDataset.from_yolo(
+        images_dirs=images_dirs, paths=None, load_empty=True, max_workers=1
+    )
+
+    return dataset
+
+
 if __name__ == "__main__":
     #     fire.Fire(
     #         {
@@ -286,12 +308,18 @@ if __name__ == "__main__":
 
     # load_classification_features_data()
 
-    tile_metadata, dataset = load_dataset_from_ls(
-        project_id=4,
-        top_n=5,
-        load_existing_metadata=True,
-        untiled_data_dir=r"D:\savmap_dataset_v2\raw\images",
-    )
+    # tile_metadata, dataset = load_dataset_from_ls(
+    #     project_id=4,
+    #     top_n=5,
+    #     load_existing_metadata=True,
+    #     untiled_data_dir=r"D:\savmap_dataset_v2\raw\images",
+    # )
 
-    data = dataset.data
-    gps_data = dataset.export_detections_gps()
+    # data = dataset.data
+    # gps_data = dataset.export_detections_gps()
+
+    dataset = load_dataset_from_dirs()
+
+    # dataset = load_dataset_from_yolo()
+
+    pass

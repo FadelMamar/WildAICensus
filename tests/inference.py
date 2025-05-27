@@ -17,17 +17,19 @@ from skimage.io import imread, imsave
 import matplotlib.pyplot as plt
 from time import perf_counter
 from pathlib import Path
-
+from datalabeling.common.base import Tile
 
 config = PredictionConfig(
     imgsz=800,
     tilesize=800,
+    batch_size=8,
     overlap_ratio=0.2,
     confidence_threshold=0.2,
     inference_service_url=None,
     flight_height=180,
     sensor_height=24,
     gsd=None,
+    nms_iou=0.5,
     # min_area=100,
     # max_area=None,
     cls_imgsz=128,
@@ -92,6 +94,38 @@ def run_inference_engine(img_path: str, num_classes: int = 2):
     return detections
 
 
+def run_sliced_inference(
+    tile: Tile,
+):
+    # engine = load_engine()
+
+    detector = Detector(config=config, detection_model=None)
+    detector.set_detection_model(
+        detection_model=None,
+        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
+        yolo_model=None,
+    )
+
+    # tile.as_batch(tile_size, stride)
+
+    t1_start = perf_counter()
+    results = detector.predict(tile=tile, verbose=True)
+
+    # print(tile.predictions)
+
+    perf1 = perf_counter() - t1_start
+    print("Inference time improved: ", perf1)
+
+    # t1_start = perf_counter()
+    # results = detector.legacy_predict(tile=None,image_path=tile.image_path)
+    # perf2 = perf_counter() - t1_start
+    # print("Inference time SAHI: ", perf_counter() - t1_start)
+
+    # print("speed up:", perf2/perf1)
+
+    return results
+
+
 def run_annotator(
     project_id=4,
     top_n=3,
@@ -120,20 +154,26 @@ def run_annotator(
 
 if __name__ == "__main__":
     # image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
-    # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
-    image_path = r"..\.tmp\images\DJI_20240204125354_0144.JPG"
+    image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
+    # image_path = r"..\.tmp\images\DJI_20240204125354_0144.JPG"
 
-    t1_start = perf_counter()
+    tile = Tile(image_path=image_path, parent_image=image_path)
 
-    detections = detection_model.model(
-        Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"), iou=0.5, batch=8
-    )
+    results = run_sliced_inference(tile)
+
+    data = tile.detections_to_df()
+
+    # t1_start = perf_counter()
+
+    # detections = detection_model.model(
+    #     Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"), iou=0.5, batch=8
+    # )
 
     # detections  = run_inference_engine(image_path)
 
-    t1_stop = perf_counter()
-    print("Inference time: ", t1_stop - t1_start)
-    print("detections:", detections)
+    # t1_stop = perf_counter()
+    # print("Inference time: ", t1_stop - t1_start)
+    # print("detections:", detections)
 
     # image = imread(img_path)
 

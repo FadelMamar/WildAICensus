@@ -3,6 +3,8 @@ from pathlib import Path
 from typing import List, Optional, Sequence
 import math
 import geopy
+import torch
+from torchvision.transforms import PILToTensor
 from PIL import Image
 import pandas as pd
 import logging
@@ -199,11 +201,34 @@ class Tile:
     x_offset: int = None
     y_offset: int = None
     parent_image: str = None
+    date: str = None
+    parent_image_date: str = None
     tile_gps_loc: str = None
     predictions: List[Detection] = None
     annotations: List[Detection] = None
     _pred_is_original: bool = False
     _annot_is_original: bool = False
+
+    def __post_init__(self):
+        if self.parent_image:
+            try:
+                self.parent_image_date = Image.open(self.parent_image)._getexif()[36867]
+            except:
+                pass
+
+        if self.image_path:
+            try:
+                self.date = Image.open(self.image_path)._getexif()[36867]
+            except:
+                pass
+
+        if self.image_data is None:
+            self.width, self.height = Image.open(self.image_path).size
+
+        else:
+            self.width, self.height = self.image_data.size
+
+        return None
 
     def offset_detections(
         self,
@@ -262,8 +287,6 @@ class Tile:
     def detections_to_df(
         self,
     ) -> pd.DataFrame:
-        self._set_width_height()
-
         assert self.image_path is not None, "provide the path to the tile."
 
         out = []
@@ -285,9 +308,13 @@ class Tile:
 
         df = pd.DataFrame.from_dict(out, orient="columns")
 
+        if df.empty:
+            df.at[0, "image_width"] = self.width
+
         df["image_width"] = self.width
         df["image_height"] = self.height
         df["parent_image"] = self.image_path
+        df["original_date"] = self.parent_image_date
 
         # YOLO format
         if len(out) > 0:
@@ -298,14 +325,87 @@ class Tile:
 
         df.rename(columns={"parent_image": "file_name"}, inplace=True)
 
+        # check detections
+        self.check_detections(df)
+
         return df
 
-    def _set_width_height(
-        self,
-    ):
-        image = self.image_data
-        if image is None:
-            image = Image.open(self.image_path)
-        self.width, self.height = image.size
+    def set_predictions(self, data: List[Detection]) -> None:
+        self.predictions = data
+        return None
+
+    def set_annotations(self, data: List[Detection]) -> None:
+        self.annotations = data
+        return None
+
+    def check_detections(self, df: pd.DataFrame):
+        df = df[["x_min", "x_max", "y_min", "y_max"]].dropna().copy()
+
+        assert df.to_numpy().min() >= 0
+        assert df[["x_min", "x_max"]].to_numpy().max() <= self.width
+        assert df[["y_min", "y_max"]].to_numpy().max() <= self.height
 
         return None
+
+    # TODO: debug
+    def as_batch(self, tile_size: int, stride: int) -> tuple[torch.Tensor, dict]:
+        assert self.image_path is not None
+
+        def get_tiles(image: torch.Tensor):
+            if image.dim() == 2:
+                image = image.unsqueeze(0)  # Add channel dimension
+                squeeze_output = True
+            else:
+                squeeze_output = False
+
+            C, H, W = image.shape
+
+            # Calculate number of tiles in each dimension
+            num_tiles_h = (H - tile_size) // stride + 1
+            num_tiles_w = (W - tile_size) // stride + 1
+
+            # Use unfold to create tiles
+            # First unfold along height dimension
+            unfolded_h = image.unfold(
+                1, tile_size, stride
+            )  # Shape: (C, num_tiles_h, W, tile_size)
+
+            # Then unfold along width dimension
+            tiles = unfolded_h.unfold(
+                2, tile_size, stride
+            )  # Shape: (C, num_tiles_h, num_tiles_w, tile_size, tile_size)
+
+            # Reshape to get individual tiles
+            tiles = tiles.contiguous().view(
+                C, num_tiles_h * num_tiles_w, tile_size, tile_size
+            )
+            tiles = tiles.permute(
+                1, 0, 2, 3
+            )  # Shape: (num_tiles, C, tile_size, tile_size)
+
+            if squeeze_output:
+                tiles = tiles.squeeze(1)
+
+            return tiles, num_tiles_h, num_tiles_w
+
+        image = Image.open(self.image_path).convert("RGB")
+        image = PILToTensor()(image)
+
+        tiles, num_tiles_h, num_tiles_w = get_tiles(image)
+
+        C, H, W = image.shape
+        x_indices = torch.arange(W).reshape(1, -1).expand(H, W)
+        y_indices = torch.arange(H).reshape(-1, 1).expand(H, W)
+        x_indices, _, _ = get_tiles(x_indices)
+        y_indices, _, _ = get_tiles(y_indices)
+        x_min = y_indices.min(1, True)[0].min(2)[0].squeeze().cpu().numpy()
+        y_min = y_indices.min(1, True)[0].min(2)[0].squeeze().cpu().numpy()
+
+        offset_info = {
+            "y_offset": y_min.tolist(),
+            "x_offset": x_min.tolist(),
+            "y_end": (y_min + tile_size).tolist(),
+            "x_end": (x_min + tile_size).tolist(),
+        }
+
+        return tiles, offset_info

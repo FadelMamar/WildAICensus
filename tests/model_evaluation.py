@@ -2,6 +2,7 @@ from datalabeling.common.evaluation import PerformanceEvaluator, HardSampleSelec
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
 from datalabeling.ml.models import Detector, ImageClassifier
 from datalabeling.ml.interface import InferenceEngine
+from datalabeling.common.dataset_loader import LabelingDataset
 from datalabeling.common.processor import get_processor, DetectionsPostprocessor
 
 
@@ -65,21 +66,31 @@ def run_perf_evaluator():
 
     perf_eval = PerformanceEvaluator(config=eval_config)
 
-    df_metrics_per_img = perf_eval.evaluate(
-        images_dirs=[
-            r"D:\savmap_dataset_v2\images_tmp",
-        ],
+    images_dirs = [
+        r"D:\savmap_dataset_v2\images_tmp",
+    ]
+
+    load_results = True
+
+    # creating dataset and adding predictions
+    dataset = LabelingDataset.from_dirs(images_dirs)
+    if not load_results:
+        dataset.add_predictions(engine=engine)
+        dataset.build(force_rebuild=True)
+
+    # run evaluator
+    df_metrics_per_img = perf_eval.run(
+        dataset=dataset,
         pred_results_dir=r"D:\savmap_dataset_v2\images_tmp",
-        load_results=False,
-        engine=engine,
+        load_results=load_results,
     )
 
-    print("results: ", df_metrics_per_img)
+    # print("results: ", df_metrics_per_img)
 
     # mining hard sampels
     sample_selector = HardSampleSelector(config=eval_config)
 
-    df_hard_negatives = sample_selector.select_hard_samples(df_metrics_per_img)
+    df_hard_negatives = sample_selector.run(df_metrics_per_img)
 
     return df_metrics_per_img, df_hard_negatives
 

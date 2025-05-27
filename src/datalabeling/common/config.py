@@ -78,6 +78,8 @@ class PredictionConfig:
     sensor_height: float = 24
     gsd: float = None  # cm/px
 
+    batch_size: int = 8
+
     # Image classifier imgsz
     cls_imgsz: int = 96
 

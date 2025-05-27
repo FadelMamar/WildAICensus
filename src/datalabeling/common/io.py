@@ -54,6 +54,13 @@ def get_images_paths(
     return images_paths
 
 
+def get_images_from_dirs(images_dirs: Sequence[str]) -> list:
+    c = chain.from_iterable([get_images_paths(d) for d in images_dirs])
+    c = list(set(c))
+
+    return c
+
+
 def save_yaml(cfg: dict, save_path: str, mode="w"):
     with open(save_path, mode, encoding="utf-8") as file:
         yaml.dump(cfg, file)
@@ -93,8 +100,8 @@ def load_yolo_label(
 ) -> tuple[dict, str]:
     label_path = str(Path(image_path).with_suffix(".txt")).replace("images", "labels")
 
-    cols_yolo_obb = ["category_id", "x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"]
-    cols_yolo = ["category_id", "x", "y", "w", "h"]
+    cols_yolo_obb = ["label", "x1", "y1", "x2", "y2", "x3", "y3", "x4", "y4"]
+    cols_yolo = ["label", "x", "y", "w", "h"]
 
     def load_features(path: str):
         with open(path, "r", encoding="utf-8") as file:
@@ -162,8 +169,12 @@ def load_yolo_label(
 
     # unnormalize values
     for i in range(1, 5):
-        df[f"x{i}"] = df[f"x{i}"] * df["width"][0]
-        df[f"y{i}"] = df[f"y{i}"] * df["height"][0]
+        df[f"x{i}"] = np.clip(
+            df[f"x{i}"] * df["width"][0], a_min=0, a_max=df["width"][0]
+        )
+        df[f"y{i}"] = np.clip(
+            df[f"y{i}"] * df["height"][0], a_min=0, a_max=df["height"][0]
+        )
 
     df["x_min"] = df["x1"]
     df["y_min"] = df["y1"]
@@ -205,7 +216,9 @@ class DataHandler:
 
         counter = 1
         with ThreadPool(max_workers) as executor:
-            for df, _format in executor.map(func, images_paths):
+            for df, _format in tqdm(
+                executor.map(func, images_paths), desc="Loading..."
+            ):
                 if _format == "empty":
                     num_empty += 1
                 else:
@@ -250,7 +263,7 @@ class DataHandler:
             chain.from_iterable(records)
         ).convert_dtypes()
         df_results = df_results.rename(
-            columns={"file_name": "images", "category_id": "labels"}
+            columns={"file_name": "images", "label": "labels"}
         )
         df_results["labels"] += 1  # shift to reserve 0 for background
 
