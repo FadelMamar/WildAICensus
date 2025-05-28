@@ -17,13 +17,13 @@ import requests, base64
 from tqdm import tqdm
 
 from ultralytics import YOLO
+
 from ultralytics.engine.results import Results as UltralyticsResults
 from typing import Sequence
 import lightning as L
 import yaml
 from animaloc.eval import HerdNetEvaluator, PointsMetrics
 from animaloc.eval.lmds import HerdNetLMDS
-
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score, AUROC
 from torchvision import models
 from torchvision.ops import nms
@@ -354,7 +354,9 @@ class ImageClassifier(L.LightningModule):
         return [optimizer], [lr_scheduler]
 
 
-def get_image_classifier_module(num_classes: int, cls_is_features: bool = False):
+def get_image_classifier_module(
+    num_classes: int, cls_is_features: bool = False
+) -> torch.nn.Module:
     if cls_is_features:
         model = torch.nn.Sequential(
             torch.nn.LazyLinear(128),
@@ -548,7 +550,7 @@ class Detector(object):
 
     def _result_to_coco(
         self,
-        result: list[UltralyticsResults],
+        result: list,
         tile_width: int,
         tile_height: int,
         offset_info: dict,
@@ -556,12 +558,8 @@ class Detector(object):
         bboxs = []
         conf = []
         label = []
-        for i, res in enumerate(result):
-            if res.obb is not None:
-                boxes = res.obb
-            else:
-                boxes = res.boxes
 
+        for i, boxes in enumerate(result):
             if boxes.xyxy.cpu().numel() == 0:
                 continue
 
@@ -579,14 +577,10 @@ class Detector(object):
 
         bboxs = torch.vstack(bboxs)
         conf = torch.hstack(conf)
-        label = torch.hstack(label)
+        label = torch.hstack(label).long()
 
-        assert (
-            torch.max(bboxs[:, [0, 2]]) <= tile_width
-        )  # x_offset + self.config.tilesize
-        assert (
-            torch.max(bboxs[:, [1, 3]]) <= tile_height
-        )  # y_offset + self.config.tilesize
+        assert torch.max(bboxs[:, [0, 2]]) <= tile_width
+        assert torch.max(bboxs[:, [1, 3]]) <= tile_height
 
         # Non-max suppression
         indx = nms(boxes=bboxs, scores=conf, iou_threshold=self.config.nms_iou)
@@ -596,9 +590,9 @@ class Detector(object):
         bboxs[:, 3] = bboxs[:, 3] - bboxs[:, 1]
 
         # retaining selected boxes
-        bboxs = bboxs[indx].tolist()
-        conf = conf[indx].tolist()
-        label = label[indx].tolist()
+        bboxs = bboxs.tolist()
+        conf = conf.tolist()
+        label = label.tolist()
 
         # to coco format
         coco = [
@@ -607,8 +601,9 @@ class Detector(object):
                 category_id=label[i],
                 category_name=self.yolo_model.names[label[i]],
                 score=conf[i],
+                file_name=offset_info["file_name"][i],
             )
-            for i in range(len(label))
+            for i in indx.tolist()
         ]
 
         return coco
@@ -641,12 +636,12 @@ class Detector(object):
         assert isinstance(tiles, Sequence)
 
         datasets = []
-        offsets = []
+        offsets = dict()
         for i, tile in enumerate(tiles):
             dataset, offset_info = self._load_tile_as_patches(tile)
             datasets.append(dataset)
             if i == 0:
-                offsets = offset_info
+                offsets.update(offset_info)
             else:
                 for k, v in offset_info:
                     offsets[k] = offsets[k] + v
@@ -680,10 +675,21 @@ class Detector(object):
         offset_info: dict = None,
         verbose: bool = False,
     ):
-        if dataset is None or offset_info is None:
+        if dataset is None and offset_info is None:
+            assert tile is not None, "Either tile or dataset should be provided."
             dataset, offset_info = self._load_tile_as_patches(tile)
 
         loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=False)
+
+        def trim_result(results: list[UltralyticsResults]) -> list:
+            trimmed = []
+            for res in results:
+                if res.obb is not None:
+                    boxes = res.obb
+                else:
+                    boxes = res.boxes
+                trimmed.append(boxes)
+            return trimmed
 
         if verbose:
             loader = tqdm(loader, desc="sliced_inference")
@@ -695,7 +701,7 @@ class Detector(object):
         with torch.no_grad():
             for (batch,) in loader:
                 res = self.yolo_model(batch, verbose=False)
-                results = results + res
+                results = results + trim_result(res)
 
         detections = self._result_to_coco(
             results,
@@ -706,7 +712,7 @@ class Detector(object):
 
         # TODO: debug batch predictions
         if tile is None:
-            raise NotImplementedError()
+            return detections
 
         else:
             gps_coords = tile.tile_gps_loc

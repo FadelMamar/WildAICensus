@@ -2,21 +2,26 @@ import logging
 import os
 import traceback
 from pathlib import Path
-
+from typing import Any, Dict, Tuple
 import pandas as pd
 import yaml, json
 
 from ultralytics.utils.loss import v8DetectionLoss, E2EDetectLoss
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.nn.tasks import DetectionModel
+from ultralytics.utils.tal import make_anchors
+from ultralytics import YOLO
 
 import torch
-
+import torch.nn as nn
+import torch.nn.functional as F
+import torchvision.models
+from torchmetrics.functional.detection import complete_intersection_over_union
 
 from ..common.config import EvaluationConfig, TrainingConfig
 from ..common.evaluation import PerformanceEvaluator, HardSampleSelector
 from ..common.io import load_yaml, save_yolo_yaml_cfg
-from .models import Detector
+
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +177,8 @@ def get_data_cfg_paths_for_HN(
         _type_: _description_
     """
 
+    from .models import Detector
+
     pred_results_dir = args.hn_save_dir
     save_path_samples = os.path.join(args.hn_save_dir, "hard_samples.txt")
     save_path = os.path.join(args.hn_save_dir, "hard_samples.yaml")
@@ -243,8 +250,29 @@ RANK = int(os.getenv("RANK", -1))
 class CustomLoss(v8DetectionLoss):
     """Custom YOLO loss that inherits from Ultralytics default loss"""
 
-    def __init__(self, pos_weight: float = 1.0, *args, **kwargs):
-        super().__init__(*args, **kwargs)
+    def __init__(
+        self,
+        model,
+        pos_weight: float = 1.0,
+        fp_tp_enabled=True,
+        fp_tp_loss_weight=0.1,
+        fp_tp_iou_threshold=0.5,
+        count_loss_weight=0.1,
+        area_loss_weight=0.1,
+        tal_topk: int = 10,
+    ):
+        super().__init__(model=model, tal_topk=tal_topk)
+
+        self.fp_tp_enabled = fp_tp_enabled
+        self.fp_tp_loss_weight = fp_tp_loss_weight
+        self.fp_tp_iou_threshold = fp_tp_iou_threshold
+        self.count_loss_weight = count_loss_weight
+        self.area_loss_weight = area_loss_weight
+
+        self.model = model
+        self.count_loss = nn.SmoothL1Loss()
+        self.area_loss = nn.SmoothL1Loss()
+
         pos_weight = (
             torch.Tensor(
                 [
@@ -255,8 +283,165 @@ class CustomLoss(v8DetectionLoss):
             .to(self.device)
         )
         self.bce = torch.nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
-        
-        logger.info(f'Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}')
+
+        logger.info(
+            f"Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}"
+        )
+
+    def compute_count_area_loss(self, target_bboxes: torch.Tensor, scale_tensor):
+        loss = torch.zeros(2, device=self.device)
+        pred_count = self.model.pred_aux.get("pred_count", None)
+        pred_area = self.model.pred_aux.get("pred_area", None)
+
+        target_bboxes[..., 1:5] = target_bboxes[..., 1:5].div_(scale_tensor)
+
+        if pred_count is not None:
+            target_count = torch.zeros_like(pred_count)
+            if target_bboxes.shape[1] != 0:
+                target_count = (
+                    (target_bboxes[..., 0] > 0).sum(dim=1).unsqueeze(1)
+                )  # count number of bboxes with positive class_id i.e. label
+            loss[0] = self.count_loss(pred_count, target_count) * self.count_loss_weight
+
+        if pred_area is not None:
+            target_area = torch.zeros_like(pred_area)
+            if target_bboxes.shape[1] != 0:
+                w = target_bboxes[..., 3] - target_bboxes[..., 1]  # x2-x1
+                h = target_bboxes[..., 4] - target_bboxes[..., 2]  # y2-y1
+                target_area = (w * h).sum(dim=1).unsqueeze(1)
+            loss[1] = self.area_loss(pred_area, target_area) * self.area_loss_weight
+
+        return loss.sum()
+
+    # TODO: debug
+    def compute_fptp_loss(
+        self, fptp_preds, pred_bboxes, gt_bboxes, target_gt_idx, fg_mask, stride_tensor
+    ):
+        """Compute FP/TP classification loss."""
+        fp_tp_loss = torch.tensor(0.0, device=self.device)
+
+        # Concatenate FP/TP predictions from all levels
+        fptp_scores = []
+        for i, fptp_pred in enumerate(fptp_preds):
+            b, c, h, w = fptp_pred.shape
+            fptp_scores.append(fptp_pred.view(b, c, h * w).permute(0, 2, 1))
+        fptp_scores = torch.cat(fptp_scores, dim=1)  # (batch, total_anchors, 1)
+        fptp_scores = fptp_scores.squeeze(-1)  # (batch, total_anchors)
+
+        batch_size = fptp_scores.shape[0]
+
+        for b in range(batch_size):
+            if gt_bboxes[b].sum() == 0:  # No ground truth objects
+                # All predictions are FP
+                fp_tp_targets = torch.zeros_like(fptp_scores[b])
+                fp_tp_loss += F.binary_cross_entropy(
+                    fptp_scores[b], fp_tp_targets, reduction="mean"
+                )
+                continue
+
+            # Get IoU between all predictions and ground truth boxes for this batch
+            pred_boxes_scaled = pred_bboxes[b] * stride_tensor
+            gt_boxes_valid = gt_bboxes[b][
+                gt_bboxes[b].sum(dim=1) > 0
+            ]  # Remove empty gt boxes
+
+            if len(gt_boxes_valid) == 0:
+                fp_tp_targets = torch.zeros_like(fptp_scores[b])
+            else:
+                # Compute IoU matrix
+                ious = complete_intersection_over_union(
+                    pred_boxes_scaled, gt_boxes_valid, aggregate=False
+                )  # (num_preds, num_gts)
+                max_ious, _ = ious.max(
+                    dim=1
+                )  # Best IoU for each prediction -> match to GT
+
+                # Create FP/TP labels based on IoU threshold
+                fp_tp_targets = (max_ious > self.fp_tp_iou_threshold).float()
+
+            # Compute binary cross entropy loss
+            fp_tp_loss += F.binary_cross_entropy(
+                fptp_scores[b], fp_tp_targets, reduction="mean"
+            )
+
+        return fp_tp_loss / batch_size
+
+        pass
+
+    def __call__(
+        self, preds: Any, batch: Dict[str, torch.Tensor]
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Calculate the sum of the loss for box, cls and dfl multiplied by batch size."""
+        loss = torch.zeros(4, device=self.device)  # box, cls, dfl
+        feats = preds[1] if isinstance(preds, tuple) else preds
+        pred_distri, pred_scores = torch.cat(
+            [xi.view(feats[0].shape[0], self.no, -1) for xi in feats], 2
+        ).split((self.reg_max * 4, self.nc), 1)
+
+        pred_scores = pred_scores.permute(0, 2, 1).contiguous()
+        pred_distri = pred_distri.permute(0, 2, 1).contiguous()
+
+        dtype = pred_scores.dtype
+        batch_size = pred_scores.shape[0]
+        imgsz = (
+            torch.tensor(feats[0].shape[2:], device=self.device, dtype=dtype)
+            * self.stride[0]
+        )  # image size (h,w)
+        anchor_points, stride_tensor = make_anchors(feats, self.stride, 0.5)
+
+        # Targets
+        targets = torch.cat(
+            (batch["batch_idx"].view(-1, 1), batch["cls"].view(-1, 1), batch["bboxes"]),
+            1,
+        )
+        targets = self.preprocess(
+            targets.to(self.device), batch_size, scale_tensor=imgsz[[1, 0, 1, 0]]
+        )
+        gt_labels, gt_bboxes = targets.split((1, 4), 2)  # cls, xyxy
+        mask_gt = gt_bboxes.sum(2, keepdim=True).gt_(0.0)
+
+        # Pboxes
+        pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
+
+        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
+            pred_scores.detach().sigmoid(),
+            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+            anchor_points * stride_tensor,
+            gt_labels,
+            gt_bboxes,
+            mask_gt,
+        )
+
+        # compute auxilary losses
+        loss[3] = self.compute_count_area_loss(
+            targets, scale_tensor=imgsz[[1, 0, 1, 0]]
+        )
+
+        target_scores_sum = max(target_scores.sum(), 1)
+
+        # Cls loss
+        loss[1] = (
+            self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
+        )  # BCE
+
+        # Bbox loss
+        if fg_mask.sum():
+            target_bboxes /= stride_tensor
+            loss[0], loss[2] = self.bbox_loss(
+                pred_distri,
+                pred_bboxes,
+                anchor_points,
+                target_bboxes,
+                target_scores,
+                target_scores_sum,
+                fg_mask,
+            )
+
+        loss[0] *= self.hyp.box  # box gain
+        loss[1] *= self.hyp.cls  # cls gain
+        loss[2] *= self.hyp.dfl  # dfl gain
+
+        return loss * batch_size, loss.detach()  # loss(box, cls, dfl)
 
 
 class CustomDetModel(DetectionModel):
@@ -285,3 +470,231 @@ class CustomTrainer(DetectionTrainer):
             model.load(weights)
 
         return model
+
+
+class RegressorHead(torch.nn.Module):
+    def __init__(self, out_channels: int = 64):
+        super().__init__()
+
+        self.reducer = nn.Sequential(
+            nn.LazyConv2d(out_channels, kernel_size=1, stride=1, padding=0),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            # nn.BatchNorm2d(out_channels),
+            nn.SiLU(),
+            nn.LazyLinear(128),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.SiLU(),
+            nn.LazyLinear(1),
+        )
+
+        self.mlp = nn.Sequential(
+            nn.LazyLinear(128),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.SiLU(),
+            nn.LazyLinear(1),
+        )
+
+    def forward(self, x):
+        x = self.reducer(x)
+        x = x.flatten(1)
+        return self.mlp(x)
+
+
+# TODO debug
+class RoiClassifierHead(torch.nn.Module):
+    def __init__(self, num_classes: int = 2, num_inputs: int = 3):
+        super().__init__()
+
+        self.p2 = nn.Sequential(
+            nn.UpsamplingNearest2d(scale_factor=2),
+            nn.LazyConv2d(32, kernel_size=1, stride=1, padding=0),
+        )
+
+        self.p3 = nn.LazyConv2d(32, kernel_size=1, stride=1, padding=0)
+
+        self.p4 = nn.LazyConv2d(64, kernel_size=1, stride=1, padding=0)
+        # self.model = torchvision.models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+        # self.model.classifier = nn.LazyLinear(num_classes)
+
+    def forward(self, p3: torch.Tensor, p4: torch.Tensor):
+        p2 = self.p2(p3)
+
+        pass
+
+
+class DetectionSystem(DetectionModel):
+    def __init__(
+        self,
+        *args,
+        roi_classifier_layers: set = set(),
+        count_regressor_layers: int = None,
+        area_regressor_layers: int = None,
+        cls_num_classes=2,
+        **kwargs,
+    ):
+        self._is_operational = False
+        super().__init__(*args, **kwargs)
+
+        assert isinstance(roi_classifier_layers, set)
+        assert (
+            isinstance(count_regressor_layers, int) or count_regressor_layers is None
+        ), f"Found type:'{type(count_regressor_layers)}'"
+        assert (
+            isinstance(area_regressor_layers, int) or area_regressor_layers is None
+        ), f"Found type:'{type(area_regressor_layers)}'"
+
+        # auxilary tasks
+        self.activations = dict()
+        self.pred_aux = dict()
+
+        self.roi_classifier_layers = roi_classifier_layers
+        if self.roi_classifier_layers:
+            self.roi_classifier = RoiClassifierHead()
+
+        self.count_regressor_layers = count_regressor_layers
+        if count_regressor_layers:
+            self.count_regressor = RegressorHead(out_channels=64)
+
+        self.area_regressor_layers = area_regressor_layers
+        if self.area_regressor_layers:
+            self.area_regressor = RegressorHead(out_channels=64)
+
+        # registering hooks to intermediate layers
+        layers = [count_regressor_layers, area_regressor_layers] + list(
+            roi_classifier_layers
+        )
+        layers_to_register = [a for a in layers if a is not None]
+        for l in layers_to_register:
+            self.model[l].register_forward_hook(self.hook_get_activation(l))
+
+        self._is_operational = True
+
+        with torch.no_grad():
+            self._predict_once(torch.rand(1, 3, 256, 256))
+            self.activations = dict()
+
+    def hook_get_activation(self, name):
+        def hook(module, args, output):
+            self.activations[name] = output  # .detach()
+            return None
+
+        return hook
+
+    def _forward_aux(
+        self,
+    ) -> None:
+        if not self._is_operational:
+            return
+        # count regressor
+        if self.count_regressor_layers:
+            pred_count = self.count_regressor(
+                self.activations[self.count_regressor_layers]
+            )
+            self.pred_aux["pred_count"] = pred_count
+
+        # area regressor
+        if self.area_regressor_layers:
+            pred_area = self.area_regressor(
+                self.activations[self.area_regressor_layers]
+            )
+            self.pred_aux["pred_area"] = pred_area
+
+        # roi classifier
+        if self.roi_classifier_layers:
+            logits_fptp = self.roi_classifier(
+                [self.activations[a] for a in self.roi_classifier_layers]
+            )
+            self.pred_aux["logits_fptp"] = logits_fptp
+
+        return None
+
+    def _predict_once(self, x, profile=False, visualize=False, embed=None):
+        """
+        Perform a forward pass through the network.
+
+        Args:
+            x (torch.Tensor): The input tensor to the model.
+            profile (bool): Print the computation time of each layer if True.
+            visualize (bool): Save the feature maps of the model if True.
+            embed (list, optional): A list of feature vectors/embeddings to return.
+
+        Returns:
+            (torch.Tensor): The last output of the model.
+        """
+        y, dt, embeddings = [], [], []  # outputs
+        embed = frozenset(embed) if embed is not None else {-1}
+        max_idx = max(embed)
+        for m in self.model:
+            if m.f != -1:  # if not from previous layer
+                x = (
+                    y[m.f]
+                    if isinstance(m.f, int)
+                    else [x if j == -1 else y[j] for j in m.f]
+                )  # from earlier layers
+
+            x = m(x)  # run
+            y.append(x if m.i in self.save else None)  # save output
+
+            if m.i in embed:
+                embeddings.append(
+                    torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
+                    .squeeze(-1)
+                    .squeeze(-1)
+                )  # flatten
+                if m.i == max_idx:
+                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
+        # return x
+
+        # run auxlary tasks
+        self._forward_aux()
+
+        return x
+
+    def init_criterion(self):
+        """Initialize the loss criterion for the DetectionModel."""
+        return CustomLoss(self)
+
+
+class DetectionSystemTrainer(DetectionTrainer):
+    def get_model(self, cfg, weights, verbose=True):
+        """Returns a customized detection model instance configured with specified config and weights."""
+
+        count_regressor_layers = json.loads(
+            os.environ.get("count_regressor_layers", "19")
+        )
+        area_regressor_layers = json.loads(
+            os.environ.get("area_regressor_layers", "16")
+        )
+
+        model = DetectionSystem(
+            roi_classifier_layers=set(),
+            count_regressor_layers=count_regressor_layers,
+            area_regressor_layers=area_regressor_layers,
+            cls_num_classes=2,  # FP/TP for now. To be extended later
+            cfg=cfg,
+            ch=3,
+            nc=self.data["nc"],
+            verbose=verbose and RANK == -1,
+        )
+        if weights:
+            model.load(weights)
+
+        return model
+
+
+class CustomYOLO(YOLO):
+    @property
+    def task_map(self) -> Dict[str, Dict[str, Any]]:
+        """Map head to model, trainer, validator, and predictor classes."""
+        from ultralytics.models import yolo
+
+        return {
+            "detect": {
+                "model": DetectionSystem,
+                "trainer": DetectionSystemTrainer,
+                "validator": yolo.detect.DetectionValidator,
+                "predictor": yolo.detect.DetectionPredictor,
+            },
+        }
