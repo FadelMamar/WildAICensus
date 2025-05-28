@@ -117,10 +117,10 @@ class Classifier(Processor):
 # =============================================================================
 class DetectionsPostprocessor(Processor):
     def __init__(self, keep_classes: list[str] = ["groundtruth"]):
-        self.handler = None
+        self.handler: Processor = None
         self.keep = keep_classes
 
-    def set_handler(self, handler):
+    def set_handler(self, handler: Processor):
         self.handler = handler
 
     def run(

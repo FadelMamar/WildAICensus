@@ -338,7 +338,7 @@ class Tile:
         self.annotations = data
         return None
 
-    def check_detections(self, df: pd.DataFrame):
+    def check_detections(self, df: pd.DataFrame) -> None:
         df = df[["x_min", "x_max", "y_min", "y_max"]].dropna().copy()
 
         assert df.to_numpy().min() >= 0
@@ -406,6 +406,7 @@ class Tile:
             "x_offset": x_min.tolist(),
             "y_end": (y_min + tile_size).tolist(),
             "x_end": (x_min + tile_size).tolist(),
+            "file_name": [str(self.image_path)] * len(x_min),
         }
 
         return tiles, offset_info
