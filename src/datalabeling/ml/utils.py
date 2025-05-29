@@ -10,11 +10,13 @@ from ultralytics.utils.loss import v8DetectionLoss, E2EDetectLoss
 from ultralytics.models.yolo.detect import DetectionTrainer
 from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tal import make_anchors
+from ultralytics.utils.ops import xywh2xyxy
 from ultralytics import YOLO
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torchvision.ops import roi_align
 import torchvision.models
 from torchmetrics.functional.detection import complete_intersection_over_union
 
@@ -284,7 +286,7 @@ class CustomLoss(v8DetectionLoss):
         )
         self.bce = torch.nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
 
-        logger.info(
+        logger.debug(
             f"Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}"
         )
 
@@ -314,59 +316,34 @@ class CustomLoss(v8DetectionLoss):
         return loss.sum()
 
     # TODO: debug
-    def compute_fptp_loss(
-        self, fptp_preds, pred_bboxes, gt_bboxes, target_gt_idx, fg_mask, stride_tensor
+    def get_cnf_scores_multiplier_from_fptp(
+        self,
+        target_bboxes: torch.Tensor,
+        pred_bboxes: torch.Tensor,
+        batch_images: torch.Tensor,
+        target_labels: torch.Tensor,
+        target_scores: torch.Tensor,
+        fg_mask: torch.Tensor,
+        image_idx: torch.Tensor,
     ):
-        """Compute FP/TP classification loss."""
-        fp_tp_loss = torch.tensor(0.0, device=self.device)
+        p3_layer_idx = self.model.roi_classifier_layers["p3"]
+        p4_layer_idx = self.model.roi_classifier_layers["p4"]
+        x = dict(
+            p3=self.model.activations[p3_layer_idx][image_idx],
+            p4=self.model.activations[p4_layer_idx][image_idx],
+            img=batch_images[image_idx],
+        )
 
-        # Concatenate FP/TP predictions from all levels
-        fptp_scores = []
-        for i, fptp_pred in enumerate(fptp_preds):
-            b, c, h, w = fptp_pred.shape
-            fptp_scores.append(fptp_pred.view(b, c, h * w).permute(0, 2, 1))
-        fptp_scores = torch.cat(fptp_scores, dim=1)  # (batch, total_anchors, 1)
-        fptp_scores = fptp_scores.squeeze(-1)  # (batch, total_anchors)
-
-        batch_size = fptp_scores.shape[0]
-
-        for b in range(batch_size):
-            if gt_bboxes[b].sum() == 0:  # No ground truth objects
-                # All predictions are FP
-                fp_tp_targets = torch.zeros_like(fptp_scores[b])
-                fp_tp_loss += F.binary_cross_entropy(
-                    fptp_scores[b], fp_tp_targets, reduction="mean"
-                )
-                continue
-
-            # Get IoU between all predictions and ground truth boxes for this batch
-            pred_boxes_scaled = pred_bboxes[b] * stride_tensor
-            gt_boxes_valid = gt_bboxes[b][
-                gt_bboxes[b].sum(dim=1) > 0
-            ]  # Remove empty gt boxes
-
-            if len(gt_boxes_valid) == 0:
-                fp_tp_targets = torch.zeros_like(fptp_scores[b])
-            else:
-                # Compute IoU matrix
-                ious = complete_intersection_over_union(
-                    pred_boxes_scaled, gt_boxes_valid, aggregate=False
-                )  # (num_preds, num_gts)
-                max_ious, _ = ious.max(
-                    dim=1
-                )  # Best IoU for each prediction -> match to GT
-
-                # Create FP/TP labels based on IoU threshold
-                fp_tp_targets = (max_ious > self.fp_tp_iou_threshold).float()
-
-            # Compute binary cross entropy loss
-            fp_tp_loss += F.binary_cross_entropy(
-                fptp_scores[b], fp_tp_targets, reduction="mean"
+        x.update(
+            dict(
+                gt_bboxes=target_bboxes[fg_mask],
+                pred_bboxes=pred_bboxes[fg_mask],
+                target_labels=target_labels[fg_mask],
             )
+        )
+        scores_multipliers = self.model.roi_classifier(x)
 
-        return fp_tp_loss / batch_size
-
-        pass
+        return scores_multipliers
 
     def __call__(
         self, preds: Any, batch: Dict[str, torch.Tensor]
@@ -403,19 +380,36 @@ class CustomLoss(v8DetectionLoss):
         # Pboxes
         pred_bboxes = self.bbox_decode(anchor_points, pred_distri)  # xyxy, (b, h*w, 4)
 
-        _, target_bboxes, target_scores, fg_mask, _ = self.assigner(
-            pred_scores.detach().sigmoid(),
-            (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
-            anchor_points * stride_tensor,
-            gt_labels,
-            gt_bboxes,
-            mask_gt,
+        target_labels, target_bboxes, target_scores, fg_mask, target_gt_idx = (
+            self.assigner(
+                pred_scores.detach().sigmoid(),
+                (pred_bboxes.detach() * stride_tensor).type(gt_bboxes.dtype),
+                anchor_points * stride_tensor,
+                gt_labels,
+                gt_bboxes,
+                mask_gt,
+            )
         )
 
         # compute auxilary losses
         loss[3] = self.compute_count_area_loss(
             targets, scale_tensor=imgsz[[1, 0, 1, 0]]
         )
+        # try:
+        bbox_idx = target_gt_idx[fg_mask]  # valid bbox indices
+        image_idx = batch["batch_idx"][bbox_idx].long()  # mapping img -> bbox
+        scores_multipliers = self.get_cnf_scores_multiplier_from_fptp(
+            target_bboxes=target_bboxes,
+            pred_bboxes=pred_bboxes.detach(),
+            batch_images=batch["img"],
+            target_labels=target_labels,
+            target_scores=target_scores,
+            image_idx=image_idx,
+            fg_mask=fg_mask,
+        )
+        pred_scores[fg_mask] *= scores_multipliers
+        # except Exception as e:
+        #     print(e)
 
         target_scores_sum = max(target_scores.sum(), 1)
 
@@ -478,21 +472,17 @@ class RegressorHead(torch.nn.Module):
 
         self.reducer = nn.Sequential(
             nn.LazyConv2d(out_channels, kernel_size=1, stride=1, padding=0),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            # nn.BatchNorm2d(out_channels),
-            nn.SiLU(),
-            nn.LazyLinear(128),
-            nn.SiLU(),
-            nn.Dropout(p=0.2),
-            nn.SiLU(),
-            nn.LazyLinear(1),
+            nn.BatchNorm2d(out_channels),
+            nn.AdaptiveAvgPool2d((1, 1)),  # gives (B,out_channels,1,1)
         )
 
         self.mlp = nn.Sequential(
             nn.LazyLinear(128),
             nn.SiLU(),
             nn.Dropout(p=0.2),
+            nn.LazyLinear(128),
             nn.SiLU(),
+            nn.Dropout(p=0.2),
             nn.LazyLinear(1),
         )
 
@@ -504,40 +494,205 @@ class RegressorHead(torch.nn.Module):
 
 # TODO debug
 class RoiClassifierHead(torch.nn.Module):
-    def __init__(self, num_classes: int = 2, num_inputs: int = 3):
+    def __init__(self, nc: int, scale_factor: list = [2.0, 3.0]):
         super().__init__()
 
-        self.p2 = nn.Sequential(
-            nn.UpsamplingNearest2d(scale_factor=2),
-            nn.LazyConv2d(32, kernel_size=1, stride=1, padding=0),
+        assert isinstance(nc, int), f"Expected 'int' but received {type(nc)}"
+        assert isinstance(scale_factor, list), (
+            f"Expected 'list' but received {type(scale_factor)}"
+        )
+        assert all([a > 0.99 for a in scale_factor]), (
+            "All scaling factors must be greater than 1.0"
         )
 
-        self.p3 = nn.LazyConv2d(32, kernel_size=1, stride=1, padding=0)
+        self.mlp = nn.Sequential(
+            nn.AdaptiveAvgPool1d(384),
+            nn.Linear(384, 128),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(128, 128),
+            nn.SiLU(),
+            nn.Dropout(p=0.2),
+            nn.Linear(128, nc),
+        )
 
-        self.p4 = nn.LazyConv2d(64, kernel_size=1, stride=1, padding=0)
-        # self.model = torchvision.models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-        # self.model.classifier = nn.LazyLinear(num_classes)
+        self.image_encoder = torch.hub.load(
+            "facebookresearch/dinov2", "dinov2_vits14_reg"
+        )
 
-    def forward(self, p3: torch.Tensor, p4: torch.Tensor):
-        p2 = self.p2(p3)
+        self.register_buffer(
+            "scale_factor", torch.Tensor(scale_factor), persistent=True
+        )
 
-        pass
+    def forward(self, x: dict):
+        p3 = x.get("p3", None)
+        p4 = x.get("p4", None)
+        gt_boxes = x.get("gt_bboxes")
+        pred_boxes = x.get("pred_bboxes")
+        target_labels = x.get("target_labels")
+        img = x.get("img")
+
+        if p3 is None or p4 is None:
+            raise ValueError("p3 or p4 are not available")
+
+        # Predict confidence multipliers
+        multiscale_features = self._extract_multiscale_roi_features(
+            target=gt_boxes,
+            pred_boxes=pred_boxes,
+            p3=p3,
+            p4=p4,
+            roi_align_shape=(7, 7),
+            img=img,
+        )
+
+        confidence_multipliers = self.mlp(multiscale_features)  # (M, nc)
+        confidence_multipliers = confidence_multipliers.sigmoid().squeeze()  # (M,)
+
+        return confidence_multipliers
+
+    def _extract_multiscale_roi_features(
+        self, target, pred_boxes, p3, p4, img, roi_align_shape=(7, 7)
+    ):
+        """
+        Extract multi-scale RoI features and compute confidence multipliers
+
+        Args:
+            target: tensor (M, 4) with [x1, y1, x2, y2,]
+            pred: tensor (M, 4) with [x1, y1, x2, y2,]
+            p3: feature map from YOLO P3 level (B, C, H, W)
+            p4: feature map from YOLO P4 level (B, C, H, W)
+            original_image: tensor (B, 3, H, W) original input image
+            image_size: tuple of (height, width)
+
+        Returns:
+            confidence_multipliers: tensor (M,) with confidence adjustment factors
+        """
+
+        device = p3.device
+        image_size = img.shape[2:]
+        batch_indices = torch.arange(pred_boxes.shape[0], device=device).view(-1, 1)
+
+        # Prepare for RoI extraction
+        all_roi_features = []
+
+        for scale_factor in self.scale_factor:  # Local, Context, Environment
+            # Expand boxes by scale factor around center
+            scaled_pred_boxes = self._expand_boxes(pred_boxes, scale_factor, image_size)
+            scaled_gt_boxes = self._expand_boxes(target, scale_factor, image_size)
+
+            # Extract features from P3 and P4 at this scale
+            # Add batch indices for RoI align
+            pred_roi_boxes = torch.cat([batch_indices, scaled_pred_boxes], dim=1)
+            gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
+
+            roi_feat_p3_pooled = torch.zeros(1, device=device)
+            roi_feat_p4_pooled = torch.zeros(1, device=device)
+            img_features = torch.zeros(1, device=device)
+            for m, roi_boxes in zip([1, -1], [gt_roi_boxes, pred_roi_boxes]):
+                # RoI align on P3 (higher resolution)
+                roi_features_p3 = roi_align(
+                    p3,
+                    roi_boxes,
+                    output_size=roi_align_shape,
+                    spatial_scale=1.0 / 8,  # P3 stride
+                    aligned=True,
+                )  # (M, C, *roi_align_shape)
+
+                # RoI align on P4 (lower resolution, larger receptive field)
+                roi_features_p4 = roi_align(
+                    p4,
+                    roi_boxes,
+                    output_size=roi_align_shape,
+                    spatial_scale=1.0 / 16,  # P4 stride
+                    aligned=True,
+                )  # (M, C, *roi_align_shape)
+
+                # RoI original images
+                original_crops = roi_align(
+                    img,
+                    roi_boxes,
+                    output_size=(196, 196),  # Standard input size for image encoder
+                    spatial_scale=1.0,  # Original image scale
+                    aligned=True,
+                )  # (M, 3, 196, 196)
+                # Encode original image crops
+                with torch.no_grad():
+                    img_features = m * self.image_encoder(original_crops) + img_features
+
+                # Global average pooling to get feature vectors
+                roi_feat_p3_pooled = (
+                    m * F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
+                    + roi_feat_p3_pooled
+                )
+                roi_feat_p4_pooled = (
+                    m * F.adaptive_avg_pool2d(roi_features_p4, (1, 1)).flatten(1)
+                    + roi_feat_p4_pooled
+                )
+
+            # Concatenate P3 and P4 features for this scale
+            scale_features = torch.cat(
+                [roi_feat_p3_pooled, roi_feat_p4_pooled, img_features], dim=1
+            )
+            all_roi_features.append(scale_features)
+
+        # Concatenate all scales
+        multiscale_features = torch.cat(all_roi_features, dim=1)
+
+        return multiscale_features
+
+    def _expand_boxes(self, boxes, scale_factor, image_size):
+        """
+        Expand bounding boxes by scale_factor around their centers
+
+        Args:
+            boxes: tensor (N, 4) in xyxy format
+            scale_factor: float, expansion factor
+            image_size: tuple (height, width)
+
+        Returns:
+            expanded_boxes: tensor (N, 4) in xyxy format, clamped to image bounds
+        """
+        x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+
+        # Calculate centers and dimensions
+        cx = (x1 + x2) / 2
+        cy = (y1 + y2) / 2
+        w = x2 - x1
+        h = y2 - y1
+
+        # Expand dimensions
+        new_w = w * scale_factor
+        new_h = h * scale_factor
+
+        # Calculate new coordinates
+        new_x1 = cx - new_w / 2
+        new_y1 = cy - new_h / 2
+        new_x2 = cx + new_w / 2
+        new_y2 = cy + new_h / 2
+
+        # Clamp to image boundaries
+        new_x1 = torch.clamp(new_x1, 0, image_size[1])
+        new_y1 = torch.clamp(new_y1, 0, image_size[0])
+        new_x2 = torch.clamp(new_x2, 0, image_size[1])
+        new_y2 = torch.clamp(new_y2, 0, image_size[0])
+
+        return torch.stack([new_x1, new_y1, new_x2, new_y2], dim=1)
 
 
 class DetectionSystem(DetectionModel):
     def __init__(
         self,
         *args,
-        roi_classifier_layers: set = set(),
+        roi_classifier_layers: dict = {},
         count_regressor_layers: int = None,
         area_regressor_layers: int = None,
-        cls_num_classes=2,
+        roi_scale_factor: list = [1.0, 2.0, 4.0],
         **kwargs,
     ):
         self._is_operational = False
         super().__init__(*args, **kwargs)
 
-        assert isinstance(roi_classifier_layers, set)
+        assert isinstance(roi_classifier_layers, dict)
         assert (
             isinstance(count_regressor_layers, int) or count_regressor_layers is None
         ), f"Found type:'{type(count_regressor_layers)}'"
@@ -551,7 +706,9 @@ class DetectionSystem(DetectionModel):
 
         self.roi_classifier_layers = roi_classifier_layers
         if self.roi_classifier_layers:
-            self.roi_classifier = RoiClassifierHead()
+            self.roi_classifier = RoiClassifierHead(
+                nc=self.yaml["nc"], scale_factor=roi_scale_factor
+            )
 
         self.count_regressor_layers = count_regressor_layers
         if count_regressor_layers:
@@ -563,7 +720,7 @@ class DetectionSystem(DetectionModel):
 
         # registering hooks to intermediate layers
         layers = [count_regressor_layers, area_regressor_layers] + list(
-            roi_classifier_layers
+            roi_classifier_layers.values()
         )
         layers_to_register = [a for a in layers if a is not None]
         for l in layers_to_register:
@@ -571,13 +728,14 @@ class DetectionSystem(DetectionModel):
 
         self._is_operational = True
 
+        # initialize Lazy modules
         with torch.no_grad():
             self._predict_once(torch.rand(1, 3, 256, 256))
             self.activations = dict()
 
     def hook_get_activation(self, name):
         def hook(module, args, output):
-            self.activations[name] = output  # .detach()
+            self.activations[name] = output
             return None
 
         return hook
@@ -600,13 +758,6 @@ class DetectionSystem(DetectionModel):
                 self.activations[self.area_regressor_layers]
             )
             self.pred_aux["pred_area"] = pred_area
-
-        # roi classifier
-        if self.roi_classifier_layers:
-            logits_fptp = self.roi_classifier(
-                [self.activations[a] for a in self.roi_classifier_layers]
-            )
-            self.pred_aux["logits_fptp"] = logits_fptp
 
         return None
 
@@ -662,17 +813,19 @@ class DetectionSystemTrainer(DetectionTrainer):
         """Returns a customized detection model instance configured with specified config and weights."""
 
         count_regressor_layers = json.loads(
-            os.environ.get("count_regressor_layers", "19")
+            os.environ.get("count_regressor_layers", None)
         )
         area_regressor_layers = json.loads(
-            os.environ.get("area_regressor_layers", "16")
+            os.environ.get("area_regressor_layers", None)
+        )
+        roi_classifier_layers = json.loads(
+            os.environ.get("roi_classifier_layers", json.dumps(dict()))
         )
 
         model = DetectionSystem(
-            roi_classifier_layers=set(),
+            roi_classifier_layers=roi_classifier_layers,
             count_regressor_layers=count_regressor_layers,
             area_regressor_layers=area_regressor_layers,
-            cls_num_classes=2,  # FP/TP for now. To be extended later
             cfg=cfg,
             ch=3,
             nc=self.data["nc"],
@@ -685,6 +838,35 @@ class DetectionSystemTrainer(DetectionTrainer):
 
 
 class CustomYOLO(YOLO):
+    def __init__(
+        self,
+        count_regressor_layers: int,
+        area_regressor_layers: int,
+        roi_classifier_layers: dict,
+        model="yolo11n.pt",
+        task=None,
+        verbose=False,
+    ):
+        super().__init__(model=model, task=task, verbose=verbose)
+
+        if count_regressor_layers is not None:
+            assert isinstance(count_regressor_layers, int), (
+                f"Expected type 'int' but received {type(count_regressor_layers)}"
+            )
+            os.environ["count_regressor_layers"] = str(count_regressor_layers)
+
+        if area_regressor_layers is not None:
+            assert isinstance(area_regressor_layers, int), (
+                f"Expected type 'int' but received {type(area_regressor_layers)}"
+            )
+            os.environ["area_regressor_layers"] = str(area_regressor_layers)
+
+        if roi_classifier_layers is not None:
+            assert isinstance(roi_classifier_layers, dict), (
+                f"Expected type 'dict' but received {type(roi_classifier_layers)}"
+            )
+            os.environ["roi_classifier_layers"] = json.dumps(roi_classifier_layers)
+
     @property
     def task_map(self) -> Dict[str, Dict[str, Any]]:
         """Map head to model, trainer, validator, and predictor classes."""
