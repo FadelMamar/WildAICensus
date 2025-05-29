@@ -518,34 +518,58 @@ class Detector(object):
 
         return detections
 
-    def _format_detections(
-        self,
-        detections: list[dict],
-        image_path: str,
-        image_gps_loc: str,
-        image: Image.Image,
+    def postprocess(
+        self, results: list[UltralyticsResults], tile: Tile, offset_info: dict
     ):
+        # ultralytics results to coco
+        detections = self._result_to_coco(
+            results,
+            offset_info=offset_info,
+            tile_width=tile.width,
+            tile_height=tile.height,
+        )
+
+        # TODO: debug batch predictions
+        if tile is None:
+            raise NotImplementedError()
+
+        # Get gps coordinates
+        gps_coords = tile.tile_gps_loc
+        if gps_coords is None:
+            # image gps coordinate
+            gps_info = GPSUtils.get_gps_coord(
+                file_name=tile.image_path, image=None, return_as_decimal=False
+            )
+            if isinstance(gps_info, tuple):
+                gps_coords = gps_info[0]
+            else:
+                gps_coords = gps_info
+
         # format detections
         detections = [
             Detection.from_coco(
-                pred, parent_image=image_path, image_gps_loc=image_gps_loc, gps_loc=None
+                pred,
+                parent_image=tile.image_path,
+                image_gps_loc=tile.tile_gps_loc,
+                gps_loc=None,
             )
             for pred in detections
         ]
 
         # add detections gps
         for det in detections:
-            if det.image_gps_loc is not None:
+            if det.image_gps_loc is None:
                 continue
-            det.gps_loc = compute_detection_gps(
-                x_center=det.x,
-                y_center=det.y,
-                image=image,
-                image_gps_loc=det.image_gps_loc,
-                flight_height=self.config.flight_height,
-                sensor_height=self.config.sensor_height,
-                gsd=self.config.gsd,
-            )
+            with Image.open(tile.image_path) as image:
+                det.gps_loc = compute_detection_gps(
+                    x_center=det.x,
+                    y_center=det.y,
+                    image=image,
+                    image_gps_loc=det.image_gps_loc,
+                    flight_height=self.config.flight_height,
+                    sensor_height=self.config.sensor_height,
+                    gsd=self.config.gsd,
+                )
         return detections
 
     def _result_to_coco(
@@ -554,7 +578,7 @@ class Detector(object):
         tile_width: int,
         tile_height: int,
         offset_info: dict,
-    ) -> list:
+    ) -> list[dict]:
         bboxs = []
         conf = []
         label = []
@@ -694,49 +718,22 @@ class Detector(object):
         if verbose:
             loader = tqdm(loader, desc="sliced_inference")
 
-        results = []
-
         self.yolo_model.eval()
 
+        results = []
         with torch.no_grad():
             for (batch,) in loader:
                 res = self.yolo_model(batch, verbose=False)
                 results = results + trim_result(res)
 
-        detections = self._result_to_coco(
-            results,
-            offset_info=offset_info,
-            tile_width=tile.width,
-            tile_height=tile.height,
+        detections = self.postprocess(
+            results=results, tile=tile, offset_info=offset_info
         )
 
-        # TODO: debug batch predictions
-        if tile is None:
-            return detections
+        # set predictions
+        tile.set_predictions(detections)
 
-        else:
-            gps_coords = tile.tile_gps_loc
-            if gps_coords is None:
-                # image gps coordinate
-                gps_info = GPSUtils.get_gps_coord(
-                    file_name=tile.image_path, image=None, return_as_decimal=False
-                )
-                if isinstance(gps_info, tuple):
-                    gps_coords = gps_info[0]
-                else:
-                    gps_coords = gps_info
-
-            detections = self._format_detections(
-                detections=detections,
-                image_path=tile.image_path,
-                image_gps_loc=gps_coords,
-                image=None,
-            )
-
-            # set predictions
-            tile.set_predictions(detections)
-
-            return detections
+        return detections
 
     def predict_directory(
         self,

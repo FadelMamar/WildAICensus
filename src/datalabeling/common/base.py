@@ -11,7 +11,7 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from .annotation_utils import compute_detection_gps
+from .annotation_utils import compute_detection_gps, GPSUtils
 
 
 @dataclass
@@ -227,6 +227,30 @@ class Tile:
 
         else:
             self.width, self.height = self.image_data.size
+
+        self._extract_gps_coords()
+
+        return None
+
+    def _extract_gps_coords(
+        self,
+    ) -> None:
+        # assert self.image_path is not None, "Provide image_path field when defining a tile"
+        image = None
+        if self.image_path is None:
+            image = self.image_data
+
+        coords = GPSUtils.get_gps_coord(
+            file_name=self.image_path,
+            image=image,
+            altitude=None,
+            return_as_decimal=False,
+        )
+        if coords is not None:
+            gps, _ = coords
+            self.tile_gps_loc = gps
+
+        logger.debug("gps extraction of tile failed")
 
         return None
 

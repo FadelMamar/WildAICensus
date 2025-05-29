@@ -19,7 +19,7 @@ import yaml
 from dotenv import load_dotenv
 from label_studio_sdk import Client
 from PIL import Image
-from PIL.ExifTags import GPSTAGS, TAGS
+
 from sahi.slicing import slice_coco
 from sahi.utils.file import load_json
 from skimage.io import imread, imsave
@@ -1062,6 +1062,8 @@ class ImageProcessor:
 class GPSUtils:
     @staticmethod
     def get_exif(file_name: str, image: Image = None) -> dict | None:
+        from PIL.ExifTags import TAGS
+
         if image is None:
             with Image.open(file_name) as img:
                 exif_data = img._getexif()
@@ -1081,6 +1083,7 @@ class GPSUtils:
     @staticmethod
     def get_gps_info(labeled_exif: dict) -> dict | None:
         # https://exiftool.org/TagNames/GPS.html
+        from PIL.ExifTags import GPSTAGS
 
         gps_info = labeled_exif.get("GPSInfo", None)
 
