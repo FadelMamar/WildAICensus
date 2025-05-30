@@ -36,17 +36,17 @@ config = PredictionConfig(
     # device="cuda:0",
 )
 
-ALIAS = "yolo11s-obb-v1"  # -rt-batch8'
+ALIAS = "demo"  # -rt-batch8'
 NAME = "labeler"
 
 
 def load_engine():
     # get image classifier
-    path = r"./runs-classifier/best-v2.ckpt"
+    path = r"..\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
     model = ImageClassifier.load_from_checkpoint(
         path, cls_is_features=True, map_location=config.device
     )
-    handler = get_processor("classifier")(
+    roi_classifier = get_processor("classifier")(
         model,
         label_map={0: "gt", 1: "tn"},
         device=config.device,
@@ -58,22 +58,30 @@ def load_engine():
     processor = DetectionsPostprocessor(
         keep_classes=["gt"],
     )
-    processor.set_handler(handler)
+    processor.set_classifier(roi_classifier)
 
     # set detector
-    detection_model, version = load_registered_model(
+    detection_model, metadata = load_registered_model(
         alias=ALIAS, name=NAME, load_unwrapped=True
     )
-    if isinstance(detection_model, YOLO):
-        detection_model = UltralyticsDetectionModel(
-            model=detection_model,
-            confidence_threshold=config.confidence_threshold,
-            category_mapping={"0": "wildlife"},
-            # image_size=config.imgsz,
-            device=config.device,
-        )
+    # version = metadata['version']
+    # if isinstance(detection_model, YOLO):
+    #     detection_model = UltralyticsDetectionModel(
+    #         model=detection_model,
+    #         confidence_threshold=config.confidence_threshold,
+    #         category_mapping={"0": "wildlife"},
+    #         # image_size=config.imgsz,
+    #         device=config.device,
+    #     )
 
-    detector = Detector(config=config, detection_model=detection_model)
+    # detector = Detector(config=config, detection_model=detection_model)
+
+    detector = Detector(config=config, detection_model=None)
+    detector.set_detection_model(
+        detection_model=None,
+        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
+        yolo_model=None,
+    )
 
     # get inference engine
     engine = InferenceEngine(config=config)
@@ -83,22 +91,19 @@ def load_engine():
     return engine
 
 
-def run_inference_engine(img_path: str, num_classes: int = 2):
+def run_inference_engine(img_path: str):
     engine = load_engine()
 
     detections = engine.inference(
-        image_path=img_path,
-        image=None,
+        tile=Tile(image_path=img_path, image_data=Image.open(img_path))
     )
 
     return detections
 
 
-def run_sliced_inference(
+def run_detector(
     tile: Tile,
 ):
-    # engine = load_engine()
-
     detector = Detector(config=config, detection_model=None)
     detector.set_detection_model(
         detection_model=None,
@@ -106,15 +111,21 @@ def run_sliced_inference(
         yolo_model=None,
     )
 
-    # tile.as_batch(tile_size, stride)
-
     t1_start = perf_counter()
+
     results = detector.predict(tile=tile, verbose=True)
 
-    # print(tile.predictions)
+    results_url = None
+    results_url = Detector.predict_url(
+        image_path=tile.image_path,
+        inference_service_url="http://localhost:4141/predict",
+    )
 
-    perf1 = perf_counter() - t1_start
-    print("Inference time improved: ", perf1)
+    # print(tile.predictions)
+    print(results[0])
+    print(results_url[0][0])
+
+    print("Inference time improved: ", perf_counter() - t1_start)
 
     # t1_start = perf_counter()
     # results = detector.legacy_predict(tile=None,image_path=tile.image_path)
@@ -123,7 +134,7 @@ def run_sliced_inference(
 
     # print("speed up:", perf2/perf1)
 
-    return results
+    return results, results_url
 
 
 def run_annotator(
@@ -159,20 +170,21 @@ if __name__ == "__main__":
 
     tile = Tile(image_path=image_path, parent_image=image_path)
 
-    results = run_sliced_inference(tile)
+    results, results_url = run_detector(tile)
 
-    data = tile.detections_to_df()
-
-    # t1_start = perf_counter()
+    # data = tile.detections_to_df()
 
     # detections = detection_model.model(
     #     Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"), iou=0.5, batch=8
     # )
 
+    # t1_start = perf_counter()
+
     # detections  = run_inference_engine(image_path)
 
     # t1_stop = perf_counter()
     # print("Inference time: ", t1_stop - t1_start)
+
     # print("detections:", detections)
 
     # image = imread(img_path)

@@ -2,8 +2,9 @@ import litserve as ls
 import os
 import torch
 import logging
-
+import traceback
 from .utils import Detector
+import json
 
 logger = logging.getLogger(__file__)
 
@@ -19,20 +20,10 @@ class MyModelAPI(ls.LitAPI):
         """
         logger.info(f"Device: {device}")
         self.model = Detector(
-            mlflow_model_name=os.environ.get("MODEL_NAME", "labeler"),
-            mlflow_model_alias=os.environ.get("MODEL_ALIAS", "demo"),
-            use_sliding_window=True,
-            confidence_threshold=0.15,
-            overlap_ratio=0.2,
-            tilesize=960,
-            imgsz=960,
             device=device,
-            tracking_url=os.environ.get(
-                "MLFLOW_TRACKING_URI", "http://mlflow_service:5000"
-            ),
         )
 
-        logger.info("creating model...")
+        print("Loading model...")
 
     def decode_request(self, request: dict) -> dict:
         """
@@ -44,31 +35,38 @@ class MyModelAPI(ls.LitAPI):
         from PIL import Image
 
         try:
-            img_data = request["image"]
+            img_data = request.get("images")
 
-            if not isinstance(img_data, str):
-                raise ValueError("Invalid base64 format")
+            if img_data is None:
+                raise ValueError("No image data found in request")
 
-            image_bytes = base64.b64decode(img_data)
-            img = Image.open(BytesIO(image_bytes))
+            decoded_images = []
+            for data in img_data:
+                img = base64.b64decode(data)
+                img = Image.open(BytesIO(img))
+                decoded_images.append(img)
 
         except Exception as e:
+            traceback.print_exc()
             raise ValueError(f"Image decoding failed: {str(e)}")
 
-        return {"image": img}
+        return {"images": decoded_images}
 
-    def predict(self, x: dict):
+    def predict(self, x: dict) -> dict:
         """
         Run the model forward pass.
         Input `x` is the output of decode_request.
         """
 
-        logger.info("computing predictions...")
+        logger.info("Running inference...")
 
-        results = self.model.predict(**x)
-        out = dict(detections=results)
-
-        return out
+        try:
+            results = self.model.predict(**x)
+            out = dict(detections=results)
+            return out
+        except Exception as e:
+            print(f"Error during prediction: {str(e)}")
+            raise ValueError(f"Prediction failed: {str(e)}")
 
     def encode_response(self, output: dict):
         """

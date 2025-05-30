@@ -232,6 +232,12 @@ class Tile:
 
         return None
 
+    def load_image_data(self) -> Image.Image:
+        if self.image_data is not None:
+            return self.image_data
+        else:
+            return Image.open(self.image_path)
+
     def _extract_gps_coords(
         self,
     ) -> None:
@@ -371,9 +377,14 @@ class Tile:
 
         return None
 
-    # TODO: debug
     def as_batch(self, tile_size: int, stride: int) -> tuple[torch.Tensor, dict]:
-        assert self.image_path is not None
+        if self.image_data is not None:
+            image = self.image_data
+        else:
+            assert self.image_path is not None, (
+                "'image_path' should be set if 'image_data' is None!"
+            )
+            image = Image.open(self.image_path).convert("RGB")
 
         def get_tiles(image: torch.Tensor):
             if image.dim() == 2:
@@ -412,7 +423,6 @@ class Tile:
 
             return tiles, num_tiles_h, num_tiles_w
 
-        image = Image.open(self.image_path).convert("RGB")
         image = PILToTensor()(image)
 
         tiles, num_tiles_h, num_tiles_w = get_tiles(image)

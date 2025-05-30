@@ -4,11 +4,6 @@ call cd D:\datalabeling\ml_microservices\inference_service
 
 call .venv-inference\Scripts\activate
 
-@REM call set RAY_ADDRESS="auto"
-@REM call set RAY_ENABLE_WINDOWS_OR_OSX_CLUSTER=1
-@REM call ray start --head --include-dashboard=false --port 4141
-
-@REM call serve run main:entrypoint
 
 call set MODEL_NAME=labeler
 call set MODEL_ALIAS=demo
@@ -17,6 +12,11 @@ call set AWS_ACCESS_KEY_ID=minioadmin
 call set AWS_SECRET_ACCESS_KEY=minioadmin
 call set MLFLOW_S3_ENDPOINT_URL=http://127.0.0.1:9000
 call set WEIGHTS_PATH=./model
+call set NUM_WORKERS=1
+call set OVERLAP_RATIO=0.2
+call set NMS_IOU=0.5
+call set BATCH_SIZE=8
+call set TILE_SIZE=800
 
 call python main.py
 

@@ -18,7 +18,11 @@ def load_registered_model(
     version = client.get_model_version_by_alias(name=name, alias=alias).version
     modelversion = f"{name}:{version}" + tag_to_append
     modelURI = f"models:/{name}/{version}"
+
     model = mlflow.pyfunc.load_model(modelURI)
+
+    metadata = dict(version=modelversion)
+    metadata.update(model.metadata.metadata)
 
     if load_unwrapped:
         try:
@@ -29,7 +33,7 @@ def load_registered_model(
             except:
                 model = model.unwrap_python_model().classifier
 
-    return model, modelversion
+    return model, metadata
 
 
 def get_experiment_id(name: str):

@@ -29,6 +29,12 @@ class Processor(ABC):
         pass
 
 
+def check_images_sequences(images: Sequence[Image.Image]):
+    assert isinstance(images, Sequence)
+    for a in images:
+        assert isinstance(a, Image.Image)
+
+
 # =============================================================================
 # # Image processors
 # =============================================================================
@@ -43,10 +49,6 @@ class FeatureExtractor(Processor):
         self.device = self.extractor.device
 
     def run(self, images: Sequence[np.ndarray]) -> np.ndarray:
-        assert isinstance(images, Sequence)
-        for a in images:
-            assert isinstance(a, np.ndarray)
-
         images = [Image.fromarray(image) for image in images]
 
         inputs = self.processor(images=images, return_tensors="pt").to(self.device)
@@ -64,7 +66,8 @@ class SuperResolution(Processor):
     ):
         pass
 
-    def run(self, image: np.ndarray) -> np.ndarray:
+    def run(self, images: Sequence[Image.Image]) -> np.ndarray:
+        check_images_sequences(images)
         pass
 
 
@@ -73,7 +76,7 @@ class Classifier(Processor):
         self,
         model: torch.nn.Module,
         label_map: dict,
-        feature_extractor=None,
+        feature_extractor: FeatureExtractor = None,
         imgsz: int = 96,
         transform=None,
         device: str = "cpu",
@@ -85,7 +88,7 @@ class Classifier(Processor):
         self.model = self.model.to(self.device)
         self.model.eval()
 
-        self.feature_extractor = feature_extractor
+        self.feature_extractor: FeatureExtractor = feature_extractor
 
         self.transform = transform
         if transform is None:
@@ -96,8 +99,17 @@ class Classifier(Processor):
                 ]
             )
 
-    def run(self, images: list[np.ndarray]) -> list[str]:
-        preprocessed = [self.transform(image=image)["image"] for image in images]
+    def _pil_to_numpy(self, image: Image.Image):
+        image = image.convert("RGB")
+        image = np.asarray(image)
+        return image
+
+    def run(self, images: Sequence[Image.Image]) -> list[str]:
+        check_images_sequences(images)
+
+        preprocessed = [
+            self.transform(image=self._pil_to_numpy(image))["image"] for image in images
+        ]
 
         if self.feature_extractor:
             preprocessed = self.feature_extractor.run(preprocessed)
@@ -117,11 +129,11 @@ class Classifier(Processor):
 # =============================================================================
 class DetectionsPostprocessor(Processor):
     def __init__(self, keep_classes: list[str] = ["groundtruth"]):
-        self.handler: Processor = None
+        self.classifier: Classifier = None
         self.keep = keep_classes
 
-    def set_handler(self, handler: Processor):
-        self.handler = handler
+    def set_classifier(self, classifier: Classifier):
+        self.classifier = classifier
 
     def run(
         self,
@@ -130,15 +142,16 @@ class DetectionsPostprocessor(Processor):
         box_size: int = 96,
     ) -> list[Detection]:
         assert isinstance(image, Image.Image)
-        assert self.handler, "Provide a handler using self.set_handler"
+        assert self.classifier, "Provide a handler using self.set_classifier"
+
+        image = image.convert("RGB")
 
         if len(detections) < 1:
             return []
 
         dets = []
 
-        image = image.convert("RGB")
-        image = np.asarray(image)
+        img_width, img_height = image.size
 
         for det in detections:
             x_center = det.x
@@ -147,12 +160,12 @@ class DetectionsPostprocessor(Processor):
             x1 = int(max(x_center - box_size, 0))
             y1 = int(max(y_center - box_size, 0))
 
-            x2 = int(min(x_center + box_size, image.shape[1]))
-            y2 = int(min(y_center + box_size, image.shape[0]))
+            x2 = int(min(x_center + box_size, img_width))
+            y2 = int(min(y_center + box_size, img_height))
+            box = (x1, y1, x2, y2)
+            dets.append(image.crop(box))
 
-            dets.append(image[y1:y2, x1:x2])
-
-        preds = self.handler.run(dets)
+        preds = self.classifier.run(dets)
 
         out = [det for i, det in enumerate(detections) if preds[i] in self.keep]
 

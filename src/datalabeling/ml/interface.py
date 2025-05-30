@@ -17,7 +17,7 @@ from label_studio_sdk.client import LabelStudio
 from PIL import Image
 from tqdm import tqdm
 
-from ..common.processor import Processor
+from ..common.processor import DetectionsPostprocessor, Processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
 from .models import Detector
@@ -33,7 +33,7 @@ class InferenceEngine(object):
 
         self.detector = None
         self.image_processor = None
-        self.detection_processor = None
+        self.detection_processor: DetectionsPostprocessor = None
         self.model_tag = "None"
 
     def set_detector(self, detector: Detector, model_tag: str):
@@ -41,7 +41,9 @@ class InferenceEngine(object):
         self.model_tag = model_tag
 
     def set_processor(
-        self, image_processor: Processor = None, detection_processor: Processor = None
+        self,
+        image_processor: Processor = None,
+        detection_processor: DetectionsPostprocessor = None,
     ):
         self.image_processor = image_processor
         self.detection_processor = detection_processor
@@ -52,44 +54,24 @@ class InferenceEngine(object):
 
     def inference(
         self,
-        image_path: str = None,
         tile: Tile = None,
-        image: Image.Image = None,
     ) -> list[Detection]:
-        if tile:
-            if tile.image_path:
-                image_path = None
-                image = Image.open(tile.image_path)
-            else:
-                image_path = None
-                image = tile.image_data
-
-        if image_path:
-            assert image is None
-            image = Image.open(image_path)
-            image_path = None
+        assert tile.image_data is not None, "define 'image_data' field"
 
         if self.image_processor:
-            image = self.image_processor.run(np.asarray(image))
-            image = Image.fromarray(image)
-            if tile:
-                tile.image_data = image.copy()
-                image = None
+            tile.image_data = self.image_processor.run(tile.image_data)
 
         detections = self.detector.predict(
-            image=image,
-            image_path=image_path,
             tile=tile,
-            inference_service_url=self.config.inference_service_url,
-            override_tilesize=self.config.tilesize,
         )
 
         if len(detections) < 1:
             return []
 
         if self.detection_processor:
-            cfg = dict(image=image, box_size=self.config.cls_imgsz)
-            detections = self.detection_processor.run(detections, **cfg)
+            detections = self.detection_processor.run(
+                detections, image=tile.image_data, box_size=self.config.cls_imgsz
+            )
 
         return detections
 

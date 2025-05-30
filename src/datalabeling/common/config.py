@@ -83,6 +83,8 @@ class PredictionConfig:
     # Image classifier imgsz
     cls_imgsz: int = 96
 
+    verbose: bool = False
+
     # inference service
     inference_service_url: str = None
 

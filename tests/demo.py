@@ -1,71 +1,21 @@
 if __name__ == "__main__":
     pass
 
-    # from datalabeling.ml.models import Detector
-
-    # path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_512_512_1152_1152.jpg"
-
-    # result = Detector.predict_url(image_path=path,
-    #                               inference_service_url="http://localhost:4141/predict",
-    #                               return_gps=True,
-
-    #                               )
-    # print(result)
-    # =============================================================================
-    # %%     Annotator
-    # =============================================================================
-    # from dotenv import load_dotenv
-
-    # load_dotenv(r"D:\datalabeling\.env")
-
-    # from datalabeling.ml import Annotator
     # import os
-    # from pathlib import Path
-    # import torch
-    # from PIL import Image
-    # from tqdm import tqdm
+    # os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
 
-    # use_sliding_window = True
+    from ultralytics import settings
 
-    # handler = Annotator(
-    #     mlflow_model_alias="demo",
-    #     mlflow_model_name="labeler",
-    #     tilesize=800,
-    #     overlapratio=0.1,
-    #     use_sliding_window=use_sliding_window,
-    #     confidence_threshold=0.5,
-    #     # device="NPU", # "cpu", "cuda"
-    #     # tag_to_append=f"-sahi:{use_sliding_window}",
-    #     dotenv_path=r"D:\datalabeling\.env",
-    # )
-    # img = Image.open(
-    #     r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_512_512_1152_1152.jpg"
-    # )
-    # pred = handler.predict(img)
-
-    # project_id = 3  # insert correct project_id by loooking at the url
-    # top_n=10
-    # handler.upload_predictions(project_id=project_id,top_n=top_n)
-
-    # instances_count, images_count = handler.get_project_stats(
-    #     project_id=project_id, annotator_id=0
-    # )
-
-    # from label_studio_sdk.client import LabelStudio
-    # LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
-    # API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
-
-    # ls = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
-
-    # project = ls.projects.get(3)
-
-    # tasks = ls.tasks.list(project=project.id,)
+    # Update a setting
+    settings.update({"mlflow": False})
 
     # =============================================================================
     # %%     Yolo architecture
     # =============================================================================
-    # from ultralytics import YOLO
-    # import torch
+    from ultralytics import YOLO
+    import torch
+    from datalabeling.ml.utils import DetectionSystem, CustomYOLO
+    import os
     # import numpy as np
     # from torchvision.datasets import ImageFolder
 
@@ -101,120 +51,70 @@ if __name__ == "__main__":
     #     return {"boxes": stacked, "uncertainty": uncertainty}
 
     # detector = YOLO(r"D:\datalabeling\base_models_weights\best.pt", task="detect")
-    # classifier = YOLO(
-    #     r"D:\datalabeling\base_models_weights\yolo11s-cls\weights\best.pt",
-    #     task="classify",
-    # )
 
-    # model = classifier.model.train()
-    # out = model(torch.rand(4,3,96,96))
+    # detector = DetectionSystem(roi_classifier_layers=set(),
+    #                            count_regressor_layers=19,
+    #                            area_regressor_layers=16,
+    #                            cls_num_classes=2,
+    #                            cfg=r"..\configs\yolo_configs\models\yolo11-obb.yaml",
+    #                            ch=3,
+    #                            nc=1,
+    #                            verbose=True
+    #                            )
 
-    # x = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_512_512_1152_1152.jpg"
+    # # base_model = detector.model.model
 
-    # (out1,) = detector(x)
+    # detector.eval()
 
-    # xyxy = out1.obb.xyxy.cpu().long().tolist()[0]
-    # x_min,y_min,x_max,y_max = xyxy
-    # det_crop_img = out1.orig_img[y_min:y_max+1, x_min:x_max+1, :] # https://docs.ultralytics.com/modes/predict/#key-features-of-predict-mode BGR
+    # (a,(b,c)) = detector(torch.rand(5,3,256,256))
 
-    # # out = predict_with_uncertainty(model,x,n_iter=3)
+    model = CustomYOLO(
+        count_regressor_layers=15,
+        area_regressor_layers=18,
+        roi_classifier_layers={"p3": 15, "p4": 24},
+        model=r"..\configs\yolo_configs\models\yolov8-p2.yaml",
+    )  # load(r"..\base_models_weights\best.pt")
 
-    # image = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\train\false_positives"
-
-    # out = classifier(image,batch=16,verbose=False)
-    # pred = np.array([o.probs.top1 for o in out])
-    # accuracy = (pred == np.zeros_like(pred)).sum()/len(pred)
-    # # print(out.probs)
-
-    # out1_1, = classifier(det_crop_img)
-    # # print(out1_1.probs)
-
-    # data = ImageFolder(root=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\train")
-
-    # out.probs
-
-    # =============================================================================
-    # %%     Training image classifier
-    # =============================================================================
-    # from datalabeling.ml.train import ImageClassifier
-    # from datalabeling.common.io import ClassifierDataModule
-    # from lightning import Trainer
-    # from torchvision import models
-
-    # dm = ClassifierDataModule(
-    #     train_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\train",
-    #     val_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\cls\val",
-    #     batch_size=8,
-    #     num_workers=1,
-    #     img_size=96,
-    # )
-    # dm.setup("fit")
-
-    # # loader = dm.train_dataloader()
-
-    # # batch = next(iter(loader))
-
-    # # model = classifier.model.train()
-    # # for p in model.parameters():
-    # #     p.require_grad = True
-
-    # model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-    # model.classifier = torch.nn.Linear(576, dm.num_classes)
-
-    # routine = ImageClassifier(
-    #     model=model, num_classes=2, threshold=0.5, label_smoothing=0.0, lr=1e-3
-    # )
-
-    # trainer = Trainer(
-    #     max_epochs=5,
-    # )
-    # trainer.fit(routine, dm)
-    # %% Detector
-
-    from ultralytics import YOLO
-    from PIL import Image
-    import time
-    import numpy as np
-    from datalabeling.ml import Detector, Annotator
-    from datalabeling.common.config import Detection
-    from dotenv import load_dotenv
-    from pathlib import Path
-    import matplotlib.pyplot as plt
-
-    # %matplotlib inline
-    import folium
-    from folium.plugins import MarkerCluster, FastMarkerCluster
-    import pandas as pd
-    from itertools import chain
-
-    # det = Detection()
-
-    handler = Detector(
-        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
-        imgsz=960,
-        tilesize=960,
-        confidence_threshold=0.25,
-        use_sliding_window=True,
+    model.model(
+        torch.rand(1, 3, 512, 512),
     )
 
-    image_dir = r"D:\savmap_dataset_v2\raw\tmp"
-    save_path = Path(image_dir).parent / "detection_gps.csv"
-
-    exts = [
-        "*.jpg",
-        "*.jpeg",
-        "*.png",
-    ]
-    exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
-
-    image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
-
-    image_paths = list(Path(image_dir).glob("*.jpg"))[:1]
-    len(image_paths)
-
-    results = handler.predict_directory(
-        path_to_dir=None,
-        images_paths=image_paths,
-        as_dataframe=True,
-        save_path=None,
+    model.train(
+        data=r"..\configs\yolo_configs\data\data_config.yaml",
+        epochs=5,
+        batch=4,
+        freeze=9,
+        imgsz=640,
+        workers=0,
     )
+
+    # # hook
+    # activation = {}
+    # def get_activation(name):
+    #     def hook(module, args, output):
+    #         activation[name] = output #.detach()
+    #         return None
+    #     return hook
+
+    # # register forward hook
+    # layer_number = 5
+    # base_model[layer_number].register_forward_hook(get_activation(layer_number))
+
+    # out = detector(torch.rand(1,3,512,512),verbose=False)
+
+    # activation[layer_number]
+
+    # ]
+    # exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
+
+    # image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
+
+    # image_paths = list(Path(image_dir).glob("*.jpg"))[:1]
+    # len(image_paths)
+
+    # results = handler.predict_directory(
+    #     path_to_dir=None,
+    #     images_paths=image_paths,
+    #     as_dataframe=True,
+    #     save_path=None,
+    # )

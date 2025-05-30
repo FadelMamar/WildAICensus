@@ -395,10 +395,14 @@ class Detector(object):
 
             # warmup
             try:
+                logger.info("warming up...")
                 self.yolo_model(
-                    torch.rand(1, 3, self.config.tilesize, self.config.tilesize).to(
-                        yolo_model.device
-                    ),
+                    torch.rand(
+                        self.config.batch_size,
+                        3,
+                        self.config.tilesize,
+                        self.config.tilesize,
+                    ).to(yolo_model.device),
                     verbose=False,
                 )
             except Exception as e:
@@ -421,102 +425,18 @@ class Detector(object):
 
         # warmup
         try:
+            logger.info("warming up...")
             self.yolo_model(
-                torch.rand(1, 3, self.config.tilesize, self.config.tilesize).to(
-                    yolo_model.device
-                ),
+                torch.rand(
+                    self.config.batch_size,
+                    3,
+                    self.config.tilesize,
+                    self.config.tilesize,
+                ).to(yolo_model.device),
                 verbose=False,
             )
         except Exception as e:
             logger.info("Warm up failed")
-
-    def legacy_predict(
-        self,
-        tile: Tile,
-        image: Image.Image = None,
-        inference_service_url: str = None,
-        image_path: str = None,
-        sahi_prostprocess: float = "NMS",
-        override_tilesize: int = None,
-        postprocess_match_threshold: float = 0.5,
-        timeout: int = 3 * 60,
-        nms_iou: float = None,
-        verbose: int = 0,
-    ) -> list[Detection]:
-        if tile:
-            image = None
-            image_path = None
-            if tile.image_data:
-                image = tile.image_data
-            else:
-                image = Image.open(tile.image_path)
-
-        if image is None:
-            assert image_path is not None, "Provide the image path."
-            image = Image.open(image_path)
-        else:
-            assert isinstance(image, Image.Image)
-
-        # predict using inference service
-        if isinstance(inference_service_url, str):
-            detections = Detector.predict_url(
-                image_path=image_path,
-                inference_service_url=inference_service_url,
-                timeout=timeout,
-            )
-
-        elif self.config.use_sliding_window:
-            tilesize = override_tilesize or self.config.tilesize
-            result = get_sliced_prediction(
-                image,
-                self.detection_model,
-                slice_height=tilesize,
-                slice_width=tilesize,
-                overlap_height_ratio=self.config.overlap_ratio,
-                overlap_width_ratio=self.config.overlap_ratio,
-                postprocess_type=sahi_prostprocess,
-                postprocess_match_metric="IOU",
-                verbose=verbose,
-                postprocess_match_threshold=postprocess_match_threshold or nms_iou,
-            )
-            detections = result.to_coco_annotations()
-
-        else:
-            result = get_prediction(
-                image=image,
-                detection_model=self.detection_model,
-                shift_amount=[0, 0],
-                full_shape=None,
-                postprocess=None,
-                verbose=verbose,
-            )
-            detections = result.to_coco_annotations()
-
-        gps_coords = None
-        if tile:
-            gps_coords = tile.tile_gps_loc
-
-        if gps_coords is not None:
-            # image gps coordinate
-            gps_info = GPSUtils.get_gps_coord(
-                file_name=image_path, image=image, return_as_decimal=False
-            )
-            if isinstance(gps_info, tuple):
-                gps_coords = gps_info[0]
-            else:
-                gps_coords = gps_info
-
-        detections = self._format_detections(
-            detections=detections,
-            image_path=image_path,
-            image_gps_loc=gps_coords,
-            image=image,
-        )
-
-        if tile:
-            tile.predictions = detections
-
-        return detections
 
     def postprocess(
         self, results: list[UltralyticsResults], tile: Tile, offset_info: dict
@@ -588,9 +508,9 @@ class Detector(object):
                 continue
 
             # mapping to untiled coordinates
-            bbox = boxes.xyxy.cpu()
-            bbox[:, [0, 2]] += offset_info["x_offset"][i]
-            bbox[:, [1, 3]] += offset_info["y_offset"][i]
+            bbox = boxes.xyxy.cpu().clone()
+            bbox[:, [0, 2]] = bbox[:, [0, 2]] + offset_info["x_offset"][i]
+            bbox[:, [1, 3]] = bbox[:, [1, 3]] + offset_info["y_offset"][i]
 
             bboxs.append(bbox)
             conf.append(boxes.conf.cpu())
@@ -642,13 +562,13 @@ class Detector(object):
             img_b64 = base64.b64encode(f.read()).decode("utf-8")
 
             payload = {
-                "image": img_b64,
+                "images": [img_b64],
             }
 
             resp = requests.post(
                 inference_service_url,
                 json=payload,
-                timeout=timeout,
+                # timeout=timeout,
             ).json()
 
         detections = resp["detections"]
@@ -718,12 +638,24 @@ class Detector(object):
         if verbose:
             loader = tqdm(loader, desc="sliced_inference")
 
-        self.yolo_model.eval()
-
         results = []
         with torch.no_grad():
             for (batch,) in loader:
-                res = self.yolo_model(batch, verbose=False)
+                num_images = batch.shape[0]
+                if num_images != self.config.batch_size:
+                    # if batch size is less than expected, pad with zeros
+                    padding = torch.zeros(
+                        (self.config.batch_size - batch.shape[0], *batch.shape[1:])
+                    )
+                    batch = torch.cat([batch, padding], dim=0)
+                res = self.yolo_model(
+                    batch,
+                    verbose=False,
+                    imgsz=self.config.tilesize,
+                    conf=self.config.confidence_threshold,
+                    iou=self.config.nms_iou,
+                )
+                res = res[:num_images]
                 results = results + trim_result(res)
 
         detections = self.postprocess(

@@ -2,22 +2,17 @@
 
 # import argparse
 import fire
-from dataclasses import dataclass
 from sys import version_info
 
-# from sahi.models.ultralytics import UltralyticsDetectionModel
 from ultralytics import YOLO
 
-# from sahi.predict import get_prediction, get_sliced_prediction
 from pathlib import Path
 import torch
 import mlflow
-
-# from datargs import parse
 import platform
 import os
 
-os.environ['TORCH_XNNPACK_DISABLE'] = "1"
+os.environ["TORCH_XNNPACK_DISABLE"] = "1"
 
 
 def get_experiment_id(name: str):
@@ -42,16 +37,17 @@ class DetectorWrapper(mlflow.pyfunc.PythonModel):
     ):
         super(DetectorWrapper, self).__init__()
         self.model = None
+        self.artifacts = None
 
     def load_context(self, context):
-        # device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
         path = Path(context.artifacts["path"]).resolve()
 
         if platform.system().lower() != "windows":
             path = path.as_posix().replace("\\", "/")
 
         self.model = YOLO(path, task="detect")
+
+        self.artifacts = context.artifacts
 
 
 class RoiClassifierWrapper(mlflow.pyfunc.PythonModel):
@@ -61,6 +57,7 @@ class RoiClassifierWrapper(mlflow.pyfunc.PythonModel):
         super(RoiClassifierWrapper, self).__init__()
 
         self.model = None
+        self.artifacts = None
 
     def load_context(self, context):
         path = Path(context.artifacts["path"]).resolve()
@@ -71,23 +68,7 @@ class RoiClassifierWrapper(mlflow.pyfunc.PythonModel):
         self.model = torch.jit.load(path, map_location="cpu")
         self.model.eval()
 
-
-@dataclass
-class Args:
-    exp_name: str  # MLflow experiment name
-    model: str  # Path to saved PyTorch model
-    model_name: str  # Registered model name
-
-    mlflow_tracking_uri: str = "http://localhost:5000"
-
-    confidence_threshold: float = 0.1
-    overlap_ratio: float = 0.1
-    tilesize: int = 2000
-    imgsz: int = 1280
-    nms_iou: float = 0.5  # used when use_sliding_window=False
-
-    use_sliding_window: bool = False
-    export_format:str="torchscript"
+        self.artifacts = context.artifacts
 
 
 PYTHON_VERSION = "{major}.{minor}.1".format(
@@ -118,27 +99,38 @@ class RegisterDetector(object):
         self,
         weights: str,
         name: str = "labeler",
-        export_format:str="torchscript",
+        export_format: str = "torchscript",
         imgsz: int = 800,
         batch=8,
         device="cpu",
         mlflow_tracking_uri: str = "http://localhost:5000",
+        dynamic=False,
+        task="detect",
     ):
         model_path = Path(weights).resolve()
-        YOLO(model_path, task="detect").export(
-            format=export_format, 
-            imgsz=imgsz, 
-            optimize=device == 'cpu', 
-            nms=True,
-            dynamic=True,
-            batch=batch,
-            device=device
-        )
-        export_path = model_path.with_suffix(f".{export_format}")
+        export_path = model_path
+        if export_format != "pt":
+            YOLO(model_path, task=task).export(
+                format=export_format,
+                imgsz=imgsz,
+                optimize=device == "cpu",
+                nms=True,
+                dynamic=dynamic,
+                batch=batch,
+                device=device,
+            )
+
+            if export_format == "openvino":
+                export_path = model_path.with_name(f"{model_path.stem}_openvino_model")
+            else:
+                export_path = model_path.with_suffix(f".{export_format}")
 
         mlflow.set_tracking_uri(mlflow_tracking_uri)
 
-        artifacts = {"path": str(export_path)}
+        artifacts = {
+            "path": str(export_path),
+        }
+        metadata = {"batch": batch, "tilesize": imgsz, "task": task}
 
         exp_id = get_experiment_id(name)
 
@@ -149,6 +141,7 @@ class RegisterDetector(object):
                 conda_env=conda_env,
                 artifacts=artifacts,
                 registered_model_name=name,
+                metadata=metadata,
             )
 
 
@@ -159,6 +152,7 @@ class RegisterRoiClassifier(object):
         num_classes: int = 2,
         cls_is_features: bool = True,
         cls_imgsz: int = 128,
+        batch: int = 8,
         cls_embed_dim: int = 384,
         name: str = "classifier",
         mlflow_tracking_uri: str = "http://localhost:5000",
@@ -174,15 +168,25 @@ class RegisterRoiClassifier(object):
 
         # initialize weights
         if cls_is_features:
-            model(torch.zeros(1, cls_embed_dim))
+            model(torch.zeros(batch, cls_embed_dim))
         else:
-            model(torch.zeros(1, 3, cls_imgsz, cls_imgsz))
+            model(torch.zeros(batch, 3, cls_imgsz, cls_imgsz))
 
         model_scripted = torch.jit.script(model)  # Export to TorchScript
-        save_path = model_path.with_suffix(".torchscript")
+        save_path = str(model_path.with_suffix(".torchscript"))
         model_scripted.save(save_path)  # Save
 
-        artifacts = {"path": save_path}
+        artifacts = {
+            "path": save_path,
+        }
+
+        metadata = {
+            "num_classes": num_classes,
+            "cls_is_features": cls_is_features,
+            "cls_imgsz": cls_imgsz,
+            "batch": batch,
+            "cls_embed_dim": cls_embed_dim,
+        }
 
         exp_id = get_experiment_id(name)
 
@@ -193,6 +197,7 @@ class RegisterRoiClassifier(object):
                 conda_env=conda_env,
                 artifacts=artifacts,
                 registered_model_name=name,
+                metadata=metadata,
             )
 
 
@@ -201,11 +206,13 @@ class Register(object):
         self,
         weights_path: str,
         name: str = "labeler",
-        export_format:str="torchscript",
+        export_format: str = "torchscript",
         imgsz: int = 800,
         batch=8,
         device="cpu",
         mlflow_tracking_uri: str = "http://localhost:5000",
+        dynamic=False,
+        task: str = "detect",
     ):
         RegisterDetector(
             weights=weights_path,
@@ -215,6 +222,8 @@ class Register(object):
             device=device,
             export_format=export_format,
             mlflow_tracking_uri=mlflow_tracking_uri,
+            dynamic=dynamic,
+            task=task,
         )
 
     def register_classifier(
@@ -222,21 +231,21 @@ class Register(object):
         weights_path,
         num_classes: int = 2,
         cls_is_features: bool = True,
+        batch: int = 8,
         cls_imgsz: int = 128,
         cls_embed_dim: int = 384,
         name: str = "classifier",
         mlflow_tracking_uri: str = "http://localhost:5000",
-        save_path: str = "roi_classifier_torchscript.pt",
     ):
         RegisterRoiClassifier(
             weights=weights_path,
             num_classes=num_classes,
             cls_is_features=cls_is_features,
             cls_imgsz=cls_imgsz,
+            batch=batch,
             cls_embed_dim=cls_embed_dim,
             name=name,
             mlflow_tracking_uri=mlflow_tracking_uri,
-            save_path=save_path,
         )
 
 
