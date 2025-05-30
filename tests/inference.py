@@ -4,6 +4,7 @@ from datalabeling.common.annotation_utils import resize_bbox
 
 from datalabeling.common.config import PredictionConfig
 from datalabeling.ml.interface import InferenceEngine, Annotator
+from datalabeling.ml.workers import ObjectDetectionSystem
 
 from datalabeling.common.mlflow_utils import load_registered_model
 
@@ -76,17 +77,25 @@ def load_engine():
 
     # detector = Detector(config=config, detection_model=detection_model)
 
-    detector = Detector(config=config, detection_model=None)
-    detector.set_detection_model(
-        detection_model=None,
-        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
-        yolo_model=None,
+    # detector = Detector(config=config, detection_model=None)
+    # detector.set_detection_model(
+    #     detection_model=None,
+    #     path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
+    #     yolo_model=None,
+    # )
+
+    detector = ObjectDetectionSystem(
+        config=config, buffer_size=32, timeout=15, detection_label_map={0: "wildlife"}
+    )
+    detector.set_processor(roi_processor=processor)
+    detector.set_model(
+        model=None, path_weights=r"D:\datalabeling\base_models_weights\best.pt"
     )
 
     # get inference engine
     engine = InferenceEngine(config=config)
     engine.set_detector(detector, model_tag=ALIAS)
-    engine.set_processor(image_processor=None, detection_processor=processor)
+    # engine.set_processor(image_processor=None, detection_processor=processor)
 
     return engine
 
@@ -94,9 +103,7 @@ def load_engine():
 def run_inference_engine(img_path: str):
     engine = load_engine()
 
-    detections = engine.inference(
-        tile=Tile(image_path=img_path, image_data=Image.open(img_path))
-    )
+    detections = engine.inference(images_paths=[img_path])
 
     return detections
 

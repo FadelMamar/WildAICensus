@@ -20,7 +20,9 @@ from tqdm import tqdm
 from ..common.processor import DetectionsPostprocessor, Processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
-from .models import Detector
+
+# from .models import Detector
+from .workers import ObjectDetectionSystem
 from ..common.mlflow_utils import load_registered_model
 import torch
 
@@ -33,89 +35,32 @@ class InferenceEngine(object):
 
         self.detector = None
         self.image_processor = None
-        self.detection_processor: DetectionsPostprocessor = None
+        self.detection_processor = None
         self.model_tag = "None"
 
-    def set_detector(self, detector: Detector, model_tag: str):
+    def set_detector(self, detector: ObjectDetectionSystem, model_tag: str):
+        assert isinstance(detector, ObjectDetectionSystem)
         self.detector = detector
         self.model_tag = model_tag
 
     def set_processor(
         self,
-        image_processor: Processor = None,
         detection_processor: DetectionsPostprocessor = None,
     ):
-        self.image_processor = image_processor
-        self.detection_processor = detection_processor
-
-        for p in [self.detection_processor, self.image_processor]:
-            if isinstance(p, torch.nn.Module):
-                p.eval()
+        self.detector.set_processor(roi_processor=detection_processor)
 
     def inference(
         self,
-        tile: Tile = None,
+        images_paths: list[str],
     ) -> list[Detection]:
-        assert tile.image_data is not None, "define 'image_data' field"
+        assert isinstance(images_paths, list)
 
-        if self.image_processor:
-            tile.image_data = self.image_processor.run(tile.image_data)
+        # run multithreaded detector
+        self.detector.run(images_paths=images_paths)
 
-        detections = self.detector.predict(
-            tile=tile,
-        )
-
-        if len(detections) < 1:
-            return []
-
-        if self.detection_processor:
-            detections = self.detection_processor.run(
-                detections, image=tile.image_data, box_size=self.config.cls_imgsz
-            )
+        detections = self.detector.outputs
 
         return detections
-
-    def batch_inference(
-        self,
-        images_paths: list[str],
-        tiles: list[Tile] = None,
-        save_path: str = None,
-        as_dataframe: bool = False,
-        return_tiles: bool = False,
-    ) -> pd.DataFrame | list[Tile]:
-        results = {}
-
-        logger.info("Batch inference...")
-
-        if tiles:
-            assert images_paths is None
-            for tile in tqdm(tiles, desc="Batch inference..."):
-                detections = self.inference(
-                    image_path=None,
-                    tile=tile,
-                    image=None,
-                )
-                tile.predictions = detections
-                assert tile.image_path, "tile.image_path is not defined!"
-                # results[str(tile.image_path)] = detections
-            if return_tiles:
-                return tiles
-
-        else:
-            for path in tqdm(images_paths, desc="Batch inference..."):
-                detections = self.inference(
-                    image_path=path,
-                    tile=None,
-                    image=None,
-                )
-                results[str(path)] = detections
-
-        if as_dataframe or save_path:
-            results = self.detector._format_results_as_dataframe(results=results)
-            if save_path:
-                results.to_csv(save_path, index=False)
-
-        return results
 
 
 class Annotator(InferenceEngine):

@@ -21,11 +21,10 @@ from ultralytics.engine.results import Results as UltralyticsResults
 from tqdm import tqdm
 from torchvision.ops import nms
 
-from datalabeling.common.config import PredictionConfig
-from datalabeling.common.base import Tile, Detection
-from datalabeling.common.annotation_utils import GPSUtils, compute_detection_gps
-from datalabeling.ml.models import ImageClassifier
-from datalabeling.common.processor import get_processor, DetectionsPostprocessor
+from ..common.config import PredictionConfig
+from ..common.base import Tile, Detection
+from ..common.annotation_utils import GPSUtils, compute_detection_gps
+from ..common.processor import DetectionsPostprocessor
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
@@ -162,8 +161,6 @@ class DataLoadingThread(threading.Thread):
         self.overlap_ratio = 0.2
         self.stride = int((1 - self.overlap_ratio) * self.tile_size)
         self.count = 0
-
-        # self.start()
 
     def _get_patches(self, image: torch.Tensor):
         if image.dim() == 2:
@@ -339,13 +336,11 @@ class DetectionThread(threading.Thread):
         self.count = 0
         self.config = config
 
-    def _load_model(self):
-        """
-        Load and initialize detection model.
-        """
-        # PLACEHOLDER - REPLACE WITH YOUR MODEL LOADING
-        self.logger.info("Loading detection model...")
-        self.model = YOLO(r"D:\datalabeling\base_models_weights\best.pt", task="detect")
+    def set_model(self, model: YOLO, path_weights: str, task="detect"):
+        if model:
+            self.model = model
+        else:
+            self.model = YOLO(path_weights, task=task)
         self.logger.info("Model loaded successfully")
 
     def _trim_result(self, results: list[UltralyticsResults]) -> list:
@@ -414,7 +409,7 @@ class DetectionThread(threading.Thread):
         self.logger.info("Starting detection thread")
 
         # Load model
-        self._load_model()
+        assert self.model is not None, "Provide base detection model i.e. YOLO"
 
         # try:
         while True:
@@ -453,7 +448,6 @@ class PostProcessingThread(threading.Thread):
         shared_buffers: SharedBuffers,
         config: PredictionConfig,
         label_map: dict = None,
-        roi_processor: DetectionsPostprocessor = None,
     ):
         super().__init__(name="PostProcessingThread")
         self.shared_buffers = shared_buffers
@@ -462,6 +456,9 @@ class PostProcessingThread(threading.Thread):
         self.config = config
         self.label_map = label_map or dict()
         self.count = 0
+        self.roi_processor = None
+
+    def set_processor(self, roi_processor: DetectionsPostprocessor):
         self.roi_processor = roi_processor
 
     def postprocess(
@@ -628,29 +625,32 @@ class ObjectDetectionSystem:
 
     def __init__(
         self,
-        data_source: Sequence[str],
         config: PredictionConfig,
         buffer_size=32,
         timeout=15,
         detection_label_map: dict = None,
-        roi_processor: DetectionsPostprocessor = None,
     ):
         # Initialize shared buffers
         self.shared_buffers = SharedBuffers(max_size=buffer_size, timeout=timeout)
 
         # Initialize threads
-        self.data_thread = DataLoadingThread(
-            self.shared_buffers, data_source=data_source
-        )
+        self.data_thread = None
         self.detection_thread = DetectionThread(self.shared_buffers, config=config)
         self.postprocess_thread = PostProcessingThread(
             self.shared_buffers,
             config=config,
             label_map=detection_label_map,
-            roi_processor=roi_processor,
         )
 
         self.logger = logging.getLogger("ObjectDetectionSystem")
+
+    def set_processor(self, roi_processor: DetectionsPostprocessor):
+        self.postprocess_thread.set_processor(roi_processor=roi_processor)
+
+    def set_model(self, model: YOLO, path_weights: str, task: str = "detect"):
+        self.detection_thread.set_model(
+            model=model, path_weights=path_weights, task=task
+        )
 
     @property
     def outputs(
@@ -692,12 +692,16 @@ class ObjectDetectionSystem:
         self.logger.info("All threads stopped")
         return None
 
-    def run(
-        self,
-    ):
+    def run(self, images_paths: Sequence[str]):
         """
         Run the system for a specified duration or until stopped
         """
+
+        # Initialize dataloader
+        self.data_thread = DataLoadingThread(
+            self.shared_buffers, data_source=images_paths
+        )
+
         self._process_pipeline()
 
 
