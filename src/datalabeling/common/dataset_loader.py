@@ -313,8 +313,8 @@ class LabelingDataset:
         self,
         engine: InferenceEngine,
     ) -> None:
-        self.tiles = engine.batch_inference(
-            tiles=self.tiles, save_path=None, images_paths=None, return_tiles=True
+        self.tiles = engine.inference(
+            tiles=self.tiles, images_paths=None, return_tiles=True
         )
         return None
 
@@ -419,7 +419,7 @@ class LabelingDataset:
         images_dirs: Sequence[str] = None,
         paths: Sequence[str] = None,
         load_empty: bool = True,
-        max_workers=1,
+        max_workers: int = 1,
     ):
         assert (images_dirs is None) + (paths is None) == 1, (
             "Exactly one of 'paths' or 'images_dirs' should be given."

@@ -187,21 +187,15 @@ class DataLoadingThread(threading.Thread):
 
         return tiles
 
-    def load_data(
+    def _load_data(
         self,
     ) -> Tile | str:
         """
         Load and preprocess data from your source
 
         Returns:
-            Tuple of (processed_data, metadata) or None if no more data
-
-        TODO: Implement your data loading logic here
-        Examples:
-        - For video: return (frame, {"frame_id": count, "timestamp": time.time()})
-        - For images: return (image, {"filename": path, "shape": image.shape})
+            Tile or str: Tile object containing image data or "DONE" if no more data
         """
-        # PLACEHOLDER - REPLACE WITH YOUR IMPLEMENTATION
 
         try:
             image_path = next(self._source_iterator)
@@ -213,20 +207,30 @@ class DataLoadingThread(threading.Thread):
             return tile
 
         except StopIteration:
-            return "empty"
+            return "DONE"
 
         except Exception:
             traceback.print_exc()
             raise ValueError()
 
-    def get_patches_from_tile(
-        self, tile: Tile, tile_size: int, stride: int
+    def _get_patches_from_tile(
+        self, tile: Tile, patch_size: int
     ) -> tuple[torch.Tensor, dict]:
+        """Extract patches from the tile
+
+        Args:
+            tile (Tile): tile object containing image data
+            patch_size (int): patch size
+
+        Returns:
+            tuple[torch.Tensor, dict]: batch of RGB patches, offset information
+        """
+
         image = tile.load_image_data()
         image = image.convert("RGB")
         image = PILToTensor()(image)
 
-        if tile.width < tile_size or tile.height < tile_size:
+        if tile.width < patch_size or tile.height < patch_size:
             self.logger.debug("image is too small for patch extraction")
             offset_info = {
                 "y_offset": [0],
@@ -250,8 +254,8 @@ class DataLoadingThread(threading.Thread):
         offset_info = {
             "y_offset": y_min.tolist(),
             "x_offset": x_min.tolist(),
-            "y_end": (y_min + tile_size).tolist(),
-            "x_end": (x_min + tile_size).tolist(),
+            "y_end": (y_min + patch_size).tolist(),
+            "x_end": (x_min + patch_size).tolist(),
             "file_name": str(tile.image_path),
         }
 
@@ -260,21 +264,16 @@ class DataLoadingThread(threading.Thread):
     def preprocess_data(self, tile: Tile) -> Tuple[TensorDataset, Dict]:
         """
         Preprocess raw data before detection
-
-        TODO: Implement preprocessing steps
-        Examples:
-        - Resize: cv2.resize(image, (model_width, model_height))
-        - Normalize: image.astype(np.float32) / 255.0
-        - Color conversion: cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        - Extract patches from the tile
+        - Normalize: image = image / 255.0
+        - Color conversion: BGR -> RGB
         """
         # PLACEHOLDER - REPLACE WITH YOUR PREPROCESSING
         self.logger.debug(f"Preprocessing: sample {self.count} has been loaded.")
 
-        stride = int((1 - self.overlap_ratio) * self.tile_size)
-
         # load as RGB and extract patches
-        batch_of_patches, offset_info = self.get_patches_from_tile(
-            tile=tile, tile_size=self.tile_size, stride=stride
+        batch_of_patches, offset_info = self._get_patches_from_tile(
+            tile=tile, patch_size=self.tile_size
         )
 
         if batch_of_patches.max() > 1.0:
@@ -291,17 +290,15 @@ class DataLoadingThread(threading.Thread):
         """Main thread execution loop"""
         self.logger.info("Starting data loading thread")
 
-        # try:
         while not self.shared_buffers.is_closed:
             # Load data
-            tile = self.load_data()
-            if tile == "empty":
+            tile = self._load_data()
+            if tile == "DONE":
                 self.logger.info("No more data to load")
                 break
 
             # Preprocess data
             data, offset_info = self.preprocess_data(tile=tile)
-            # print(data)
 
             # Package data with metadata
             data_package = {}
@@ -317,9 +314,8 @@ class DataLoadingThread(threading.Thread):
             # while self.shared_buffers.is_full_data_queue:
             self.shared_buffers.put(data=data_package)
 
-        # except Exception as e:
-        #     self.logger.error(f"Error in data loading thread: {e}")
-        #     traceback.print_exc()
+        # Signal end of data loading
+        self.shared_buffers.put(data="DONE")
 
 
 class DetectionThread(threading.Thread):
@@ -341,9 +337,26 @@ class DetectionThread(threading.Thread):
             self.model = model
         else:
             self.model = YOLO(path_weights, task=task)
+
         self.logger.info("Model loaded successfully")
 
-    def _trim_result(self, results: list[UltralyticsResults]) -> list:
+        #  warmup
+        try:
+            self.logger.info("warming up...")
+            self.model(
+                torch.rand(
+                    self.config.batch_size,
+                    3,
+                    self.config.tilesize,
+                    self.config.tilesize,
+                ).to(self.model.device),
+                verbose=False,
+            )
+        except:
+            self.logger.info("Warm up failed")
+            traceback.print_exc()
+
+    def _trim_result(self, results: List[UltralyticsResults]) -> List:
         trimmed = []
         for res in results:
             if res.obb is not None:
@@ -353,7 +366,7 @@ class DetectionThread(threading.Thread):
             trimmed.append(boxes)
         return trimmed
 
-    def _pad_if_needed(self, batch: torch.Tensor, out_shape: tuple):
+    def _pad_if_needed(self, batch: torch.Tensor, out_shape: tuple) -> torch.Tensor:
         # if batch size is less than expected, pad with zeros
 
         assert len(out_shape) == len(batch.shape)
@@ -372,11 +385,10 @@ class DetectionThread(threading.Thread):
     def run_detection(
         self,
         data: Any,
-    ) -> Dict:
+    ) -> List:
         """
         Run object detection on input data
         """
-        # PLACEHOLDER - REPLACE WITH YOUR DETECTION CODE
 
         loader = DataLoader(data, batch_size=self.config.batch_size, shuffle=False)
 
@@ -411,12 +423,17 @@ class DetectionThread(threading.Thread):
         # Load model
         assert self.model is not None, "Provide base detection model i.e. YOLO"
 
-        # try:
         while True:
             # Get data from buffer
             data_package = self.shared_buffers.get(data=True)
-            if data_package == "empty":
+
+            if data_package == "DONE":
+                self.logger.info("No more data to process")
                 break
+
+            if data_package == "empty":
+                raise ValueError("Error: Data buffer is empty")
+
             # Run detection
             data = data_package.pop("data")
             t1 = time.perf_counter()
@@ -432,6 +449,9 @@ class DetectionThread(threading.Thread):
 
             # Put results in buffer
             self.shared_buffers.put(detections=results_package)
+
+        # Signal end of detections
+        self.shared_buffers.put(detections="DONE")
 
         # except Exception as e:
         #     self.logger.error(f"Error in detection thread: {e}")
@@ -585,12 +605,16 @@ class PostProcessingThread(threading.Thread):
         """Main thread execution loop"""
         self.logger.info("Starting post-processing thread")
 
-        # try:
         while True:
             # Get detection results from buffer
             results_package = self.shared_buffers.get(detections=True)
-            if results_package == "empty":
+
+            if results_package == "DONE":
+                self.logger.info("No more data to process")
                 break
+
+            if results_package == "empty":
+                raise ValueError("Error: Detections buffer is empty")
 
             # Apply post-processing
             detections = results_package["detections"]
@@ -612,6 +636,9 @@ class PostProcessingThread(threading.Thread):
 
             # self.shared_buffers.put(filtered_detections=results_package)
             self.outputs.append(results_package)
+
+        # Signal end of post-processing
+        self.shared_buffers.put(filtered_detections="DONE")
 
         # except Exception as e:
         #     self.logger.error(f"Error in post-processing thread: {e}")
@@ -660,7 +687,7 @@ class ObjectDetectionSystem:
             return self.postprocess_thread.outputs
         else:
             self.logger.info(
-                "Postprocessing thread is still alive. Make sure it has ended first "
+                "Postprocessing thread is still alive. Make sure it has ended first."
             )
             return None
 

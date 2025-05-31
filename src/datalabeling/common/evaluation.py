@@ -20,15 +20,15 @@ logger = logging.getLogger(__name__)
 
 
 class Metrics:
-    def __init__(
-        self,
-    ):
+    def __init__(self, config: EvaluationConfig):
         self.mean_ap = MeanAveragePrecision(
             box_format="xyxy",
             iou_type="bbox",
             max_detection_thresholds=[1, 10, 100],
             iou_thresholds=[0.15, 0.25, 0.35, 0.5, 0.75, 0.85, 0.95],
         )
+
+        self.config = config
 
         self.bbox_cols = ["x_min", "y_min", "x_max", "y_max"]
 
@@ -234,7 +234,7 @@ class PerformanceEvaluator:
     def __init__(self, config: EvaluationConfig):
         self.config = config
         self.label_format = None
-        self.metrics: Metrics = Metrics()
+        self.metrics: Metrics = Metrics(config=config)
 
     def run(
         self,

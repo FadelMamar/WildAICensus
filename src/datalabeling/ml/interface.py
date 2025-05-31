@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import traceback
@@ -6,8 +5,6 @@ from pathlib import Path
 from time import time
 from urllib.parse import quote, unquote
 import pandas as pd
-import numpy as np
-import mlflow
 from dotenv import load_dotenv
 
 # from label_studio_ml.utils import get_local_path
@@ -15,16 +12,12 @@ from label_studio_tools.core.utils.io import get_local_path
 
 from label_studio_sdk.client import LabelStudio
 from PIL import Image
-from tqdm import tqdm
 
-from ..common.processor import DetectionsPostprocessor, Processor
+from .workers import ObjectDetectionSystem, GPSUtils
+from ..common.processor import DetectionsPostprocessor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
 
-# from .models import Detector
-from .workers import ObjectDetectionSystem
-from ..common.mlflow_utils import load_registered_model
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -52,15 +45,64 @@ class InferenceEngine(object):
     def inference(
         self,
         images_paths: list[str],
+        tiles: list[Tile] = None,
+        return_tiles: bool = False,
+        return_as_df: bool = False,
     ) -> list[Detection]:
         assert isinstance(images_paths, list)
+        """Multithreaded detector"""
 
-        # run multithreaded detector
-        self.detector.run(images_paths=images_paths)
+        paths = images_paths
+        if paths is None:
+            paths = [t.image_path for t in tiles]
 
-        detections = self.detector.outputs
+        self.detector.run(images_paths=paths)
+        detections = [out["final_detections"] for out in self.detector.outputs]
+
+        if tiles is not None:
+            # if tiles are provided,
+            for i, tile in enumerate(tiles):
+                tile.predictions = detections[i]
+
+        if return_tiles:
+            return tiles
+
+        if return_as_df:
+            results = {}
+            for i, image_path in enumerate(paths):
+                results.update({str(image_path): detections[i]})
+            return self._format_results_as_dataframe(results)
 
         return detections
+
+    def _format_results_as_dataframe(
+        self, results: dict[str, list[Detection]]
+    ) -> pd.DataFrame:
+        if len(results) < 1:
+            return pd.DataFrame()
+
+        unravel_dict = []
+        for img_path, detections in results.items():
+            if len(detections) < 1:
+                continue
+
+            for det in detections:
+                unravel_dict.append(dict(file_name=img_path, **det.to_dict()))
+
+        dfs = pd.DataFrame.from_dict(unravel_dict)
+
+        dfs["bbox_w"] = dfs["x_max"] - dfs["x_min"]
+        dfs["bbox_h"] = dfs["y_max"] - dfs["y_min"]
+
+        # converting gps coords to decimal
+        dfs[["img_Latitude", "img_Longitude", "img_Elevation"]] = (
+            dfs["image_gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+        )
+        dfs[["Latitude", "Longitude", "Elevation"]] = (
+            dfs["gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+        )
+
+        return dfs
 
 
 class Annotator(InferenceEngine):
@@ -141,10 +183,14 @@ class Annotator(InferenceEngine):
 
             logger.info(f"Uploading predictions for: {img_path}")
 
-            img = Image.open(img_path)
-            predictions = self.inference(image=img)
+            predictions = self.inference(
+                images_paths=[img_path],
+                tiles=None,
+                return_tiles=False,
+                return_as_df=False,
+            )
 
-            img_width, img_height = img.size
+            img_width, img_height = Image.open(img_path).size
 
             formatted_pred = [
                 pred.to_ls(
@@ -167,5 +213,3 @@ class Annotator(InferenceEngine):
                 result=formatted_pred,
                 model_version=self.model_tag + tag,
             )
-
-            img.close()
