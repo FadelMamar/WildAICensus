@@ -109,6 +109,7 @@ class TrainingConfig:
 
     # detector
     object_detector_arch: str = "yolo"  # "yolo", "rtdetr", "custom_yolo"
+    custom_yolo_kwargs: dict = None  # used only for custom yolo arch
 
     # training flags
     imgsz: int = 800
