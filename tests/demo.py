@@ -69,11 +69,16 @@ if __name__ == "__main__":
     # (a,(b,c)) = detector(torch.rand(5,3,256,256))
 
     model = CustomYOLO(
-        count_regressor_layers=15,
+        count_regressor_layers=21,
         area_regressor_layers=18,
-        roi_classifier_layers={"p3": 15, "p4": 24},
+        roi_classifier_layers={"p3": 21, "p4": 24},
+        fp_tp_loss_weight=0.0,
+        is_fp_tp_multiplier=True,
+        count_loss_weight=0.1,
+        area_loss_weight=0.0,
+        roi_scale_factor=[2.0, 3.0],
         model=r"..\configs\yolo_configs\models\yolov8-p2.yaml",
-    )  # load(r"..\base_models_weights\best.pt")
+    )  # .load(r"..\base_models_weights\best.pt")
 
     model.model(
         torch.rand(1, 3, 512, 512),

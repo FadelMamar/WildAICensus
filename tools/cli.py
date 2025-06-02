@@ -18,16 +18,14 @@ from datalabeling.common.io import load_yaml
 logger = logging.getLogger(__name__)
 
 if __name__ == "__main__":
-
     args = parse(TrainingConfig)
 
-    
     handler = TrainingManager(
         args=args,
         herdnet_loss=None,
-        herdnet_training_backend="pl",  # original or pl
-        classifier_training_backend="pl",  # sk, pl, ultralytics
-        model_type="ultralytics",
+        herdnet_training_backend=args.herdnet_training_backend,
+        classifier_training_backend=args.cls_training_backend,
+        model_type=args.model_type,
     )
-    
+
     handler.run()

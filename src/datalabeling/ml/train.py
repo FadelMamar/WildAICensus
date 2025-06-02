@@ -1,5 +1,5 @@
 import logging
-import os,json
+import os, json
 from pathlib import Path
 import lightning as L
 import torch
@@ -32,10 +32,24 @@ from .utils import (
     get_data_cfg_paths_for_HN,
     remove_label_cache,
     CustomTrainer,
+    CustomYOLO,
 )
 from .models import ImageClassifier, HerdnetTrainer
 
 logger = logging.getLogger(__name__)
+
+
+def load_ultralytics_model_class(object_detector_arch: str):
+    if object_detector_arch == "rtdetr":
+        return RTDETR
+    if object_detector_arch == "yolo":
+        return YOLO
+    if object_detector_arch == "custom_yolo":
+        return CustomYOLO
+    else:
+        raise NotImplementedError(
+            f"object_detector_arch `{object_detector_arch}` is not supported."
+        )
 
 
 class TrainingManager:
@@ -69,7 +83,7 @@ class TrainingManager:
         if self.args.mlflow_model_alias is not None:
             name = self.args.run_name
             alias = self.args.mlflow_model_alias
-            model, version = load_registered_model(
+            model, metadata = load_registered_model(
                 alias=alias,
                 name=name,
                 mlflow_tracking_url=self.args.mlflow_tracking_uri,
@@ -97,10 +111,14 @@ class TrainingManager:
         if self.args.yolo_arch_yaml:
             path = self.args.yolo_arch_yaml
 
-        if self.args.is_rtdetr:
-            model = RTDETR(path)
-        else:
-            model = YOLO(path, task=self.args.task, verbose=False)
+        builder = load_ultralytics_model_class(
+            object_detector_arch=self.args.object_detector_arch
+        )
+
+        try:
+            model = builder(path, task=self.args.task, verbose=False)
+        except:
+            model = builder(path)
 
         if self.args.path_weights and self.args.yolo_arch_yaml:
             model = model.load(self.args.path_weights)
@@ -585,10 +603,10 @@ class TrainingManager:
         assert args.val in ["True", "False"]
 
         cfg = dict()
-        # TODO: debug
-        if not self.args.is_rtdetr:
+        if self.args.object_detector_arch != "rtdetr":
             os.environ["pos_weight"] = json.dumps(self.args.ultralytics_pos_weight)
-            cfg = dict(trainer=CustomTrainer)
+            if self.args.object_detector_arch == "yolo":
+                cfg = dict(trainer=CustomTrainer)
 
         self.model.train(
             data=data_cfg or args.yolo_yaml,
