@@ -116,9 +116,9 @@ class TrainingManager:
         )
 
         try:
-            model = builder(path, task=self.args.task, verbose=False)
+            model = builder(model=path, task=self.args.task, verbose=False)
         except:
-            model = builder(path)
+            model = builder(model=path, **self.args.custom_yolo_kwargs)
 
         if self.args.path_weights and self.args.yolo_arch_yaml:
             model = model.load(self.args.path_weights)
