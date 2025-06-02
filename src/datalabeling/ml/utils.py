@@ -4,7 +4,9 @@ import traceback
 from pathlib import Path
 from typing import Any, Dict, Tuple
 import pandas as pd
+import numpy as np
 import yaml, json
+from itertools import product
 
 from ultralytics.utils.loss import v8DetectionLoss, E2EDetectLoss
 from ultralytics.models.yolo.detect import DetectionTrainer
@@ -12,6 +14,7 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tal import make_anchors
 from ultralytics.utils.ops import xywh2xyxy
 from ultralytics import YOLO
+
 
 import torch
 import torch.nn as nn
@@ -270,8 +273,8 @@ class CustomLoss(v8DetectionLoss):
         self.is_fp_tp_multiplier = is_fp_tp_multiplier
 
         self.model = model
-        self.count_loss = nn.SmoothL1Loss()
-        self.area_loss = nn.SmoothL1Loss()
+        self.count_loss = nn.SmoothL1Loss(reduction="sum")
+        self.area_loss = nn.SmoothL1Loss(reduction="sum")
 
         assert isinstance(pos_weight, float)
         pos_weight = (
@@ -314,10 +317,38 @@ class CustomLoss(v8DetectionLoss):
 
         return loss.sum()
 
+    def sample_tn(
+        self, img_height: int, img_width: int, w: int = 50, h: int = 50, num: int = 10
+    ) -> torch.Tensor:
+        xs = torch.randint(
+            low=0,
+            high=img_width - w,
+            size=(num,),
+        )
+
+        ys = torch.randint(
+            low=0,
+            high=img_height - h,
+            size=(num,),
+        )
+
+        count = 0
+        boxes = []
+        for x, y in product(xs, ys):
+            if count == num:
+                break
+            box = torch.Tensor([x, y, x + w, y + h])
+            boxes.append(box)
+            count += 1
+
+        return torch.vstack(boxes)
+
     def sample_pred_by_area_score(
         self,
         pred_bboxes: torch.Tensor,
         pred_scores: torch.Tensor,
+        img_height: int,
+        img_width: int,
         max_num=10,
         area_thresh=50**2,  #
         scores_range: tuple = (0.3, 0.65),
@@ -339,34 +370,52 @@ class CustomLoss(v8DetectionLoss):
         selected_bboxes = []
         image_idx = []
         for i in range(batch_size):
-            bboxes = pred_bboxes[i]  # [34000, 4]
-            scores, _ = pred_scores[i].max(dim=1)  # [34000,]
+            box_size = int(np.sqrt(area_thresh))
+            boxes = self.sample_tn(
+                img_height=img_height,
+                img_width=img_width,
+                w=box_size,
+                h=box_size,
+                num=max_num,
+            )
 
-            # Compute bbox areas
-            widths = bboxes[:, 2] - bboxes[:, 0]  # x2 - x1
-            heights = bboxes[:, 3] - bboxes[:, 1]  # y2 - y1
-            areas = widths * heights  # Area = (x2 - x1) * (y2 - y1)
-
-            # select based on area
-            selector_areas = areas >= area_thresh
-
-            # select based on scores
-            selector_scores = scores > min(scores_range) & scores < max(scores_range)
-
-            # selected
-            valid_mask = selector_areas & selector_scores
-            valid_indices = torch.arange(0, n_preds, device=pred_scores.device)
-            valid_indices = valid_indices[valid_mask]
-            # size = min(max_num, valid_indices.shape[0])
-            random_idx = torch.randint(low=0, high=valid_indices.shape[0], size=max_num)
-            valid_indices = valid_indices[random_idx]
-            # if size < max_num:
-            #     pass
-            selected_bboxes.append(bboxes[valid_indices])
+            selected_bboxes.append(boxes)
             image_idx.append([i] * max_num)
 
-        selected_bboxes = torch.vstack(selected_bboxes, dim=0)
-        image_idx = torch.Tensor(image_idx, device=selected_bboxes.device)
+        #     bboxes = pred_bboxes[i]  # [34000, 4]
+        #     scores, _ = pred_scores[i].max(dim=1)  # [34000,]
+
+        #     # Compute bbox areas
+        #     widths = bboxes[:, 2] - bboxes[:, 0]  # x2 - x1
+        #     heights = bboxes[:, 3] - bboxes[:, 1]  # y2 - y1
+        #     areas = widths * heights  # Area = (x2 - x1) * (y2 - y1)
+
+        #     # select based on area
+        #     selector_areas = areas >= area_thresh
+
+        #     # select based on scores
+        #     selector_scores = (scores > min(scores_range)) & (scores < max(scores_range))
+
+        #     # selected
+        #     valid_mask = selector_areas & selector_scores
+        #     valid_indices = torch.arange(0, n_preds, device=pred_scores.device)
+        #     valid_indices = valid_indices[valid_mask]
+        #     if valid_indices.shape[0] == 0:
+        #         random_idx = torch.randint(low=0, high=valid_indices.shape[0], size=max_num)
+        #         pass
+        #     else:
+        #         # size = min(max_num, valid_indices.shape[0])
+        #         random_idx = torch.randint(low=0, high=valid_indices.shape[0], size=max_num)
+        #         valid_indices = valid_indices[random_idx]
+        #         # if size < max_num:
+        #         #     pass
+        # selected_bboxes.append(bboxes[valid_indices])
+        # image_idx.append([i] * max_num)
+
+        selected_bboxes = torch.vstack(selected_bboxes)
+        image_idx = (
+            torch.Tensor(image_idx, device=selected_bboxes.device).flatten().long()
+        )
 
         return selected_bboxes, image_idx
 
@@ -382,14 +431,18 @@ class CustomLoss(v8DetectionLoss):
         image_idx: torch.Tensor,
     ) -> Tuple[torch.Tensor]:
         # batch has only negative samples
+
         if fg_mask.sum() < 1.0:
-            batch_size = batch_images.shape[0]
+            _, _, img_height, img_width = batch_images.shape
             pred_bboxes, image_idx = self.sample_pred_by_area_score(
                 pred_bboxes=pred_bboxes,
                 pred_scores=pred_scores,
-                max_num=10,
+                img_height=img_height,
+                img_width=img_width,
+                max_num=5,
                 area_thresh=50**2,
             )
+
             gt_bboxes = target_bboxes[fg_mask > 0.0]
             target_labels = target_labels[fg_mask > 0.0]
 
@@ -471,21 +524,14 @@ class CustomLoss(v8DetectionLoss):
             )
         )
 
-        if fg_mask.sum() < 1.0:
-            sampled_pred_bboxes, image_idx = self.sample_pred_by_area_score(
-                pred_bboxes=pred_bboxes,
-                pred_scores=pred_scores,
-                max_num=10,
-                area_thresh=50**2,
-            )
-            pass
+        target_scores_sum = max(target_scores.sum(), 1)
 
         ## compute auxilary losses
         if self.count_loss_weight > 0.0 or self.area_loss_weight > 0.0:
             loss[3] += self.compute_count_area_loss(
                 targets, scale_tensor=imgsz[[1, 0, 1, 0]]
             )
-            loss[3] *= batch_size
+            loss[3] /= target_scores_sum
 
         # TODO:  debug fp_tp
         if self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier:
@@ -510,9 +556,7 @@ class CustomLoss(v8DetectionLoss):
             if self.is_fp_tp_multiplier:
                 pred_scores[fg_mask] *= scores_multiplier
             else:
-                loss[3] += fp_tp_loss * self.fp_tp_loss_weight * batch_size
-
-        target_scores_sum = max(target_scores.sum(), 1)
+                loss[3] += fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
 
         # Cls loss
         loss[1] = (
@@ -601,11 +645,15 @@ class RegressorHead(torch.nn.Module):
 
 class RoiClassifierHead(torch.nn.Module):
     def __init__(
-        self, nc: int, scale_factor: list = [2.0, 3.0], label_smoothing: float = 0.0
+        self,
+        # nc: int,
+        scale_factor: list = [2.0, 3.0],
+        # label_smoothing: float = 0.0,
+        # tp_iou_threshold:float=0.3
     ):
         super().__init__()
 
-        assert isinstance(nc, int), f"Expected 'int' but received {type(nc)}"
+        # assert isinstance(nc, int), f"Expected 'int' but received {type(nc)}"
         assert isinstance(scale_factor, list), (
             f"Expected 'list' but received {type(scale_factor)}"
         )
@@ -621,10 +669,14 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Linear(128, 128),
             nn.SiLU(),
             nn.Dropout(p=0.2),
-            nn.Linear(128, nc),
+            nn.Linear(128, 1),
         )
 
-        self.loss = nn.CrossEntropyLoss(label_smoothing=0.0)
+        # self.tp_iou_threshold = tp_iou_threshold
+
+        self.loss = nn.SmoothL1Loss(
+            reduction="sum"
+        )  # nn.BCEWithLogitsLoss(reduction="sum")
 
         self.image_encoder = torch.hub.load(
             "facebookresearch/dinov2", "dinov2_vits14_reg"
@@ -642,12 +694,27 @@ class RoiClassifierHead(torch.nn.Module):
         target_labels = x.get("target_labels")
         img = x.get("img")
 
+        # if gt_boxes.numel()
+
+        if gt_boxes.numel() > 0:
+            box_ious = complete_intersection_over_union(
+                preds=pred_boxes, target=gt_boxes, aggregate=False
+            )
+            best_iou, best_gt_idx = box_ious.max(dim=1)
+
+            fp_tp_target_label = best_iou.unsqueeze(1).clamp(
+                0.0
+            )  # (best_iou > self.tp_iou_threshold)*1
+
+        else:  # only negative samples
+            fp_tp_target_label = torch.zeros_like(pred_boxes)
+
         if p3 is None or p4 is None:
             raise ValueError("p3 or p4 are not available")
 
         # Predict confidence multipliers
         multiscale_features = self._extract_multiscale_roi_features(
-            target=gt_boxes,
+            gt_boxes=gt_boxes,
             pred_boxes=pred_boxes,
             p3=p3,
             p4=p4,
@@ -655,15 +722,15 @@ class RoiClassifierHead(torch.nn.Module):
             img=img,
         )
 
-        confidence_multipliers = self.mlp(multiscale_features)  # (M, nc)
-        loss = self.loss(confidence_multipliers, target_labels)
+        logits = self.mlp(multiscale_features)  # (M, nc)
+        loss = self.loss(logits, fp_tp_target_label)
 
-        confidence_multipliers = confidence_multipliers.sigmoid().squeeze()  # (M,)
+        # confidence_multipliers = confidence_multipliers.sigmoid().squeeze()  # (M,)
 
-        return confidence_multipliers, loss
+        return logits.sigmoid(), loss
 
     def _extract_multiscale_roi_features(
-        self, target, pred_boxes, p3, p4, img, roi_align_shape=(7, 7)
+        self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape=(7, 7)
     ):
         """
         Extract multi-scale RoI features and compute confidence multipliers
@@ -690,18 +757,24 @@ class RoiClassifierHead(torch.nn.Module):
         for scale_factor in self.scale_factor:  # Local, Context, Environment
             # Expand boxes by scale factor around center
             scaled_pred_boxes = self._expand_boxes(pred_boxes, scale_factor, image_size)
-            scaled_gt_boxes = self._expand_boxes(target, scale_factor, image_size)
-
-            # Extract features from P3 and P4 at this scale
-            # Add batch indices for RoI align
             pred_roi_boxes = torch.cat([batch_indices, scaled_pred_boxes], dim=1)
-            gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
+            multipliers = [-1]
+            roi_boxes = [
+                pred_roi_boxes,
+            ]
+
+            if gt_boxes.numel() > 0:
+                scaled_gt_boxes = self._expand_boxes(gt_boxes, scale_factor, image_size)
+                gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
+                multipliers.append(1)
+                roi_boxes.append(gt_roi_boxes)
 
             # compute the difference between gt_roi_boxes and pred_roi_boxes
             roi_feat_p3_pooled = torch.zeros(1, device=device)
             roi_feat_p4_pooled = torch.zeros(1, device=device)
             img_features = torch.zeros(1, device=device)
-            for m, roi_boxes in zip([1, -1], [gt_roi_boxes, pred_roi_boxes]):
+
+            for m, roi_boxes in zip(multipliers, roi_boxes):
                 # RoI align on P3 (higher resolution)
                 roi_features_p3 = roi_align(
                     p3,
@@ -728,6 +801,7 @@ class RoiClassifierHead(torch.nn.Module):
                     spatial_scale=1.0,  # Original image scale
                     aligned=True,
                 )  # (M, 3, 196, 196)
+
                 # Encode original image crops
                 with torch.no_grad():
                     img_features = m * self.image_encoder(original_crops) + img_features
@@ -841,7 +915,8 @@ class DetectionSystem(DetectionModel):
         self.roi_classifier_layers = roi_classifier_layers
         if self.roi_classifier_layers:
             self.roi_classifier = RoiClassifierHead(
-                nc=self.yaml["nc"], scale_factor=roi_scale_factor
+                # nc=self.yaml["nc"],
+                scale_factor=roi_scale_factor
             )
 
         self.count_regressor_layers = count_regressor_layers

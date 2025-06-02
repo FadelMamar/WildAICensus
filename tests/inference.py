@@ -62,9 +62,9 @@ def load_engine():
     processor.set_classifier(roi_classifier)
 
     # set detector
-    detection_model, metadata = load_registered_model(
-        alias=ALIAS, name=NAME, load_unwrapped=True
-    )
+    # detection_model, metadata = load_registered_model(
+    #     alias=ALIAS, name=NAME, load_unwrapped=True
+    # )
     # version = metadata['version']
     # if isinstance(detection_model, YOLO):
     #     detection_model = UltralyticsDetectionModel(
@@ -171,13 +171,13 @@ def run_annotator(
 
 
 if __name__ == "__main__":
-    # image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
-    image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
+    image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
+    # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
     # image_path = r"..\.tmp\images\DJI_20240204125354_0144.JPG"
 
-    tile = Tile(image_path=image_path, parent_image=image_path)
+    # tile = Tile(image_path=image_path, parent_image=image_path)
 
-    results, results_url = run_detector(tile)
+    # results, results_url = run_detector(tile)
 
     # data = tile.detections_to_df()
 
@@ -185,12 +185,12 @@ if __name__ == "__main__":
     #     Path(r"D:\PhD\Data per camp\DetectionDataset\savmap\images"), iou=0.5, batch=8
     # )
 
-    # t1_start = perf_counter()
+    t1_start = perf_counter()
 
-    # detections  = run_inference_engine(image_path)
+    detections = run_inference_engine(image_path)
 
-    # t1_stop = perf_counter()
-    # print("Inference time: ", t1_stop - t1_start)
+    t1_stop = perf_counter()
+    print("Inference time: ", t1_stop - t1_start)
 
     # print("detections:", detections)
 
