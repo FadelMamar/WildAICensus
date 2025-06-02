@@ -95,7 +95,7 @@ class TrainingConfig:
     is_single_cls: bool = False
     is_rtdetr: bool = False
     task: str = "detect"  # "detect" "obb" "segment"
-    model_type: str = "ultralytics"
+    model_type: str = "ultralytics"  # "ultralytics", "herdnet", "classifier"
 
     # active learning flags
     mlflow_tracking_uri: str = "http://localhost:5000"
@@ -106,6 +106,9 @@ class TrainingConfig:
     yolo_arch_yaml: str = None
 
     ultralytics_pos_weight: float = 1.0
+
+    # detector
+    object_detector_arch: str = "yolo"  # "yolo", "rtdetr", "custom_yolo"
 
     # training flags
     imgsz: int = 800
@@ -137,6 +140,7 @@ class TrainingConfig:
     cls_auto_augment: str = "augmix"
     cls_is_features: bool = False
     cls_tn_ratio: float = 1.0
+    cls_training_backend: str = "pl"  # pl, sk, ultralytics
 
     # herdnet
     herdnet_training_backend: str = "original"  # pl or original
