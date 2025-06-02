@@ -61,19 +61,22 @@ call wandb offline
 
 @REM --yolo-arch-yaml "configs\yolo_configs\models\yolo11-obb.yaml" --run-name "yolov8s-obb-custom-CL" ^
 
-call uv run tools\cli.py --batchsize 16  --weight-decay 0.005 --optimizer "AdamW" --optimizer-momentum 0.99 --lrf 0.1 --patience 20 --is-single-cls ^
-    --scale 0.5 --mosaic 0.2 --copy-paste 0.2 --mixup 0.0 --rotation-degree 45. --erasing 0.0 --warmup-epochs 2 ^
+call set MLFLOW_TRACKING_URI=http://localhost:5000
+
+call python tools\cli.py --batchsize 16  --weight-decay 0.005 --optimizer "AdamW" --optimizer-momentum 0.99 --lrf 0.01 --patience 20 --is-single-cls ^
+    --scale 0.5 --mosaic 0.2 --copy-paste 0.0 --mixup 0.0 --rotation-degree 45. --erasing 0.0 --warmup-epochs 2 ^
     --ultralytics-pos-weight 10.0 ^
     --box 7.5 --cls 0.5 --dfl 1.5 ^
     --imgsz 800 ^
-    --path-weights "runs/mlflow/140168774036374062/2ff9bb7a991c4cd1a6eabfff0f73386d/artifacts/weights/last.pt" ^
+    --path-weights "runs/mlflow/140168774036374062/a59eda79d9444ff4befc561ac21da6b4/artifacts/weights/best.pt" ^
+    --yolo-arch-yaml "configs\yolo_configs\models\yolov8s-p2.yaml" --run-name "yolo8s-custom-CL" ^
     --project-name "wildAI-detection"^
     --tag "CL" ^
     --cl-save-dir "D:\PhD\Data per camp\IdentificationDataset\continuous_learning" --use-continual-learning ^
     --cl-data-config-yaml "configs\yolo_configs\data\dataset_identification-detection.yaml" --cl-batch-size 16 ^
     --cl-ratios 0 1 2.5 7.5 ^
     --cl-epochs 20 20 10 7 ^
-    --cl-freeze 0 0 10 18  ^
+    --cl-freeze 0 0 10 23  ^
     --cl-lr0s 0.0001 0.0001 0.00005 0.00005
 
 @REM call uv run tools\cli.py train-herdnet.py
@@ -104,4 +107,4 @@ call uv run tools\cli.py --batchsize 16  --weight-decay 0.005 --optimizer "AdamW
 @REM call deactivate
 
 :: uncomment to disable immediate shutdown
-@REM shutdown -s
+shutdown -s

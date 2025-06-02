@@ -291,8 +291,12 @@ class CustomLoss(v8DetectionLoss):
         logger.debug(
             f"Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}"
         )
-
+    
+       
     def compute_count_area_loss(self, target_bboxes: torch.Tensor, scale_tensor):
+        
+        self.model._forward_aux() # collect area and count logits
+        
         loss = torch.zeros(2, device=self.device)
         pred_count = self.model.pred_aux.get("pred_count", None)
         pred_area = self.model.pred_aux.get("pred_area", None)
@@ -412,9 +416,9 @@ class CustomLoss(v8DetectionLoss):
         # selected_bboxes.append(bboxes[valid_indices])
         # image_idx.append([i] * max_num)
 
-        selected_bboxes = torch.vstack(selected_bboxes)
+        selected_bboxes = torch.vstack(selected_bboxes).to(self.device)
         image_idx = (
-            torch.Tensor(image_idx, device=selected_bboxes.device).flatten().long()
+            torch.Tensor(image_idx).flatten().long().to(self.device)
         )
 
         return selected_bboxes, image_idx
@@ -480,7 +484,7 @@ class CustomLoss(v8DetectionLoss):
             or self.fp_tp_loss_weight > 0.0
         ):
             loss = torch.zeros(4, device=self.device)  # box, cls, dfl, auxilary
-        else:
+        else: 
             loss = torch.zeros(3, device=self.device)  # box, cls, dfl
 
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -527,20 +531,20 @@ class CustomLoss(v8DetectionLoss):
         target_scores_sum = max(target_scores.sum(), 1)
 
         ## compute auxilary losses
-        if self.count_loss_weight > 0.0 or self.area_loss_weight > 0.0:
+        if (self.count_loss_weight > 0.0 or self.area_loss_weight > 0.0) and self.model.training:
             loss[3] += self.compute_count_area_loss(
                 targets, scale_tensor=imgsz[[1, 0, 1, 0]]
             )
             loss[3] /= target_scores_sum
 
         # TODO:  debug fp_tp
-        if self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier:
+        if (self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier) and self.model.training:
             if fg_mask.sum() < 1.0:  # batch has only negative samples
-                bbox_idx = target_gt_idx[fg_mask]  # tensor([])
+                bbox_idx = target_gt_idx[fg_mask>0.]  # tensor([])
                 image_idx = bbox_idx.clone()  # tensor([])
             else:
-                bbox_idx = target_gt_idx[fg_mask]  # valid bbox indices
-                image_idx = batch["batch_idx"][bbox_idx].long()  # mapping img -> bbox
+                bbox_idx = target_gt_idx[fg_mask].cpu()  # valid bbox indices
+                image_idx = batch["batch_idx"][bbox_idx].long().cpu()  # mapping img -> bbox
 
             scores_multiplier, fp_tp_loss = self.get_cnf_scores_multiplier_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
@@ -553,10 +557,10 @@ class CustomLoss(v8DetectionLoss):
                 fg_mask=fg_mask,
             )
 
-            if self.is_fp_tp_multiplier:
-                pred_scores[fg_mask] *= scores_multiplier
-            else:
-                loss[3] += fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
+            # if self.is_fp_tp_multiplier:
+            #     pred_scores[fg_mask] *= scores_multiplier
+            # else:
+            loss[3] += (fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum)
 
         # Cls loss
         loss[1] = (
@@ -628,13 +632,14 @@ class RegressorHead(torch.nn.Module):
         )
 
         self.mlp = nn.Sequential(
-            nn.LazyLinear(128),
+            nn.AdaptiveAvgPool1d(64),
+            nn.Linear(64, 128),
             nn.SiLU(),
             nn.Dropout(p=0.2),
-            nn.LazyLinear(128),
+            nn.Linear(128, 128),
             nn.SiLU(),
             nn.Dropout(p=0.2),
-            nn.LazyLinear(1),
+            nn.Linear(128, 1),
         )
 
     def forward(self, x):
@@ -680,7 +685,7 @@ class RoiClassifierHead(torch.nn.Module):
 
         self.image_encoder = torch.hub.load(
             "facebookresearch/dinov2", "dinov2_vits14_reg"
-        )
+        ).half()
 
         self.register_buffer(
             "scale_factor", torch.Tensor(scale_factor), persistent=True
@@ -694,11 +699,18 @@ class RoiClassifierHead(torch.nn.Module):
         target_labels = x.get("target_labels")
         img = x.get("img")
 
-        # if gt_boxes.numel()
+        
+        device = p3.device        
+        
+        self.image_encoder = self.image_encoder.to(device)
+        self.mlp = self.mlp.to(device)
+        self.scale_factor = self.scale_factor.to(device)
+        gt_boxes = gt_boxes.to(device)
+        pred_boxes = pred_boxes.to(device)
 
         if gt_boxes.numel() > 0:
             box_ious = complete_intersection_over_union(
-                preds=pred_boxes, target=gt_boxes, aggregate=False
+                preds=pred_boxes.detach(), target=gt_boxes, aggregate=False
             )
             best_iou, best_gt_idx = box_ious.max(dim=1)
 
@@ -707,10 +719,12 @@ class RoiClassifierHead(torch.nn.Module):
             )  # (best_iou > self.tp_iou_threshold)*1
 
         else:  # only negative samples
-            fp_tp_target_label = torch.zeros_like(pred_boxes)
+            num_boxes = pred_boxes.shape[0]
+            fp_tp_target_label = torch.zeros((num_boxes,1)).to(device)
 
         if p3 is None or p4 is None:
-            raise ValueError("p3 or p4 are not available")
+            raise ValueError("p3 or p4 are not available")            
+        
 
         # Predict confidence multipliers
         multiscale_features = self._extract_multiscale_roi_features(
@@ -718,7 +732,7 @@ class RoiClassifierHead(torch.nn.Module):
             pred_boxes=pred_boxes,
             p3=p3,
             p4=p4,
-            roi_align_shape=(7, 7),
+            roi_align_shape=(70, 70),
             img=img,
         )
 
@@ -730,7 +744,7 @@ class RoiClassifierHead(torch.nn.Module):
         return logits.sigmoid(), loss
 
     def _extract_multiscale_roi_features(
-        self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape=(7, 7)
+        self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape
     ):
         """
         Extract multi-scale RoI features and compute confidence multipliers
@@ -762,7 +776,7 @@ class RoiClassifierHead(torch.nn.Module):
             roi_boxes = [
                 pred_roi_boxes,
             ]
-
+            
             if gt_boxes.numel() > 0:
                 scaled_gt_boxes = self._expand_boxes(gt_boxes, scale_factor, image_size)
                 gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
@@ -846,6 +860,8 @@ class RoiClassifierHead(torch.nn.Module):
         cy = (y1 + y2) / 2
         w = x2 - x1
         h = y2 - y1
+        
+        
 
         # Expand dimensions
         new_w = w * scale_factor
@@ -898,7 +914,7 @@ class DetectionSystem(DetectionModel):
         assert fp_tp_loss_weight >= 0.0
 
         if is_fp_tp_multiplier:
-            assert fp_tp_loss_weight == 0
+            assert fp_tp_loss_weight == 0, "should be 0 when is_fp_tp_multiplier=True"
 
         assert isinstance(roi_classifier_layers, dict)
         assert (
@@ -911,6 +927,7 @@ class DetectionSystem(DetectionModel):
         # auxilary tasks
         self.activations = dict()
         self.pred_aux = dict()
+        self.hooks_handles = []
 
         self.roi_classifier_layers = roi_classifier_layers
         if self.roi_classifier_layers:
@@ -926,34 +943,56 @@ class DetectionSystem(DetectionModel):
         self.area_regressor_layers = area_regressor_layers
         if self.area_regressor_layers and area_loss_weight > 0.0:
             self.area_regressor = RegressorHead(out_channels=64)
-
-        # registering hooks to intermediate layers
-        layers = [count_regressor_layers, area_regressor_layers] + list(
-            roi_classifier_layers.values()
-        )
-        layers_to_register = [a for a in layers if a is not None]
-        for l in layers_to_register:
-            self.model[l].register_forward_hook(self.hook_get_activation(l))
-
+        
+        self.add_hooks() # adding hooks
         self._is_operational = True
 
         # initialize Lazy modules
         with torch.no_grad():
             self._predict_once(torch.rand(1, 3, 256, 256))
+            self._forward_aux()
             self.activations = dict()
-
-    def hook_get_activation(self, name):
-        def hook(module, args, output):
-            self.activations[name] = output
-            return None
-
-        return hook
+    
+    # get intermediate features p3, p4 etc.
+    def add_hooks(self,):
+        
+        logger.info("adding hooks")
+        
+        def hook_get_activation(name):
+            def hook(module, args, output):
+                self.activations[name] = output
+                return None
+            return hook
+        
+        # registering hooks to intermediate layers
+        layers = [self.count_regressor_layers, self.area_regressor_layers] + list(
+            self.roi_classifier_layers.values()
+        )
+        layers_to_register = [a for a in layers if a is not None]
+        
+        for l in layers_to_register:
+            handle = self.model[l].register_forward_hook(hook_get_activation(l))
+            self.hooks_handles.append(handle)
+        
+    def remove_hooks(self,):
+        for a in self.hooks_handles:
+            a.remove()
+            logger.info("removing hook")
+            
+        self.hooks_handles = []
+    
 
     def _forward_aux(
         self,
     ) -> None:
+        
         if not self._is_operational:
-            return
+            return None
+        
+        # adding hooks
+        if len(self.hooks_handles) == 0:
+            self.add_hooks()
+            
         # count regressor
         if self.count_regressor_layers and self.count_loss_weight > 0.0:
             pred_count = self.count_regressor(
@@ -970,48 +1009,20 @@ class DetectionSystem(DetectionModel):
 
         return None
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """
-        Perform a forward pass through the network.
-
-        Args:
-            x (torch.Tensor): The input tensor to the model.
-            profile (bool): Print the computation time of each layer if True.
-            visualize (bool): Save the feature maps of the model if True.
-            embed (list, optional): A list of feature vectors/embeddings to return.
-
-        Returns:
-            (torch.Tensor): The last output of the model.
-        """
-        y, dt, embeddings = [], [], []  # outputs
-        embed = frozenset(embed) if embed is not None else {-1}
-        max_idx = max(embed)
-        for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = (
-                    y[m.f]
-                    if isinstance(m.f, int)
-                    else [x if j == -1 else y[j] for j in m.f]
-                )  # from earlier layers
-
-            x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
-
-            if m.i in embed:
-                embeddings.append(
-                    torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
-                    .squeeze(-1)
-                    .squeeze(-1)
-                )  # flatten
-                if m.i == max_idx:
-                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        # return x
-
-        # run auxlary tasks
-        self._forward_aux()
-
-        return x
-
+        
+    def forward(self, x, *args, **kwargs):
+    
+        if isinstance(x, dict):  # for cases of training and validating while training.
+            
+            if self.training and len(self.hooks_handles)<1:
+                self.add_hooks()
+            else:
+                self.remove_hooks()
+            
+            return self.loss(x, *args, **kwargs)
+        
+        return self.predict(x, *args, **kwargs)
+    
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         return CustomLoss(
@@ -1041,6 +1052,42 @@ class DetectionSystemTrainer(DetectionTrainer):
             model.load(weights)
 
         return model
+    
+    def save_model(self):
+        """Save model training checkpoints with additional metadata."""
+        import io
+        from copy import deepcopy
+
+        # Serialize ckpt to a byte buffer once (faster than repeated torch.save() calls)
+        buffer = io.BytesIO()
+        torch.save(
+            {
+                "epoch": self.epoch,
+                "best_fitness": self.best_fitness,
+                "model": self.model,  # resume and final checkpoints derive from EMA
+                # "ema": deepcopy(self.ema.ema).half(),
+                # "updates": self.ema.updates,
+                # "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
+                "train_args": vars(self.args),  # save as dict
+                "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
+                "train_results": self.read_results_csv(),
+                # "date": datetime.now().isoformat(),
+                # "version": __version__,
+                # "license": "AGPL-3.0 (https://ultralytics.com/license)",
+                # "docs": "https://docs.ultralytics.com",
+            },
+            buffer,
+        )
+        serialized_ckpt = buffer.getvalue()  # get the serialized content to save
+
+        # Save checkpoints
+        self.last.write_bytes(serialized_ckpt)  # save last.pt
+        if self.best_fitness == self.fitness:
+            self.best.write_bytes(serialized_ckpt)  # save best.pt
+        if (self.save_period > 0) and (self.epoch % self.save_period == 0):
+            (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)  # save epoch, i.e. 'epoch3.pt'
+        # if self.args.close_mosaic and self.epoch == (self.epochs - self.args.close_mosaic - 1):
+        #    (self.wdir / "last_mosaic.pt").write_bytes(serialized_ckpt)  # save mosaic checkpoint
 
 
 class CustomYOLO(YOLO):
@@ -1056,7 +1103,7 @@ class CustomYOLO(YOLO):
         count_loss_weight: float = 0.0,
         area_loss_weight: float = 0.0,
         model="yolo11n.pt",
-        task=None,
+        task="detect",
         verbose=False,
     ):
         super().__init__(model=model, task=task, verbose=verbose)
