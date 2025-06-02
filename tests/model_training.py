@@ -61,7 +61,7 @@ if __name__ == "__main__":
         count_regressor_layers=22, # p5
         area_regressor_layers=16,
         roi_classifier_layers={"p3": 16, "p4": 19},
-        fp_tp_loss_weight=3.,
+        fp_tp_loss_weight=0.,
         is_fp_tp_multiplier=False,
         count_loss_weight=3.0,
         area_loss_weight=0.0,

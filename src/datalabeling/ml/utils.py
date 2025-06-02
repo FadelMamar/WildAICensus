@@ -291,8 +291,12 @@ class CustomLoss(v8DetectionLoss):
         logger.debug(
             f"Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}"
         )
-
+    
+       
     def compute_count_area_loss(self, target_bboxes: torch.Tensor, scale_tensor):
+        
+        self.model._forward_aux() # collect area and count logits
+        
         loss = torch.zeros(2, device=self.device)
         pred_count = self.model.pred_aux.get("pred_count", None)
         pred_area = self.model.pred_aux.get("pred_area", None)
@@ -628,13 +632,14 @@ class RegressorHead(torch.nn.Module):
         )
 
         self.mlp = nn.Sequential(
-            nn.LazyLinear(128),
+            nn.AdaptiveAvgPool1d(64),
+            nn.Linear(64, 128),
             nn.SiLU(),
             nn.Dropout(p=0.2),
-            nn.LazyLinear(128),
+            nn.Linear(128, 128),
             nn.SiLU(),
             nn.Dropout(p=0.2),
-            nn.LazyLinear(1),
+            nn.Linear(128, 1),
         )
 
     def forward(self, x):
@@ -922,6 +927,7 @@ class DetectionSystem(DetectionModel):
         # auxilary tasks
         self.activations = dict()
         self.pred_aux = dict()
+        self.hooks_handles = []
 
         self.roi_classifier_layers = roi_classifier_layers
         if self.roi_classifier_layers:
@@ -937,12 +943,20 @@ class DetectionSystem(DetectionModel):
         self.area_regressor_layers = area_regressor_layers
         if self.area_regressor_layers and area_loss_weight > 0.0:
             self.area_regressor = RegressorHead(out_channels=64)
+        
+        self.add_hooks() # adding hooks
+        self._is_operational = True
 
-        # registering hooks to intermediate layers
-        layers = [count_regressor_layers, area_regressor_layers] + list(
-            roi_classifier_layers.values()
-        )
-        layers_to_register = [a for a in layers if a is not None]
+        # initialize Lazy modules
+        with torch.no_grad():
+            self._predict_once(torch.rand(1, 3, 256, 256))
+            self._forward_aux()
+            self.activations = dict()
+    
+    # get intermediate features p3, p4 etc.
+    def add_hooks(self,):
+        
+        logger.info("adding hooks")
         
         def hook_get_activation(name):
             def hook(module, args, output):
@@ -950,23 +964,35 @@ class DetectionSystem(DetectionModel):
                 return None
             return hook
         
+        # registering hooks to intermediate layers
+        layers = [self.count_regressor_layers, self.area_regressor_layers] + list(
+            self.roi_classifier_layers.values()
+        )
+        layers_to_register = [a for a in layers if a is not None]
+        
         for l in layers_to_register:
-            self.model[l].register_forward_hook(hook_get_activation(l))
-
-        self._is_operational = True
-
-        # initialize Lazy modules
-        with torch.no_grad():
-            self._predict_once(torch.rand(1, 3, 256, 256))
-            self.activations = dict()
-
+            handle = self.model[l].register_forward_hook(hook_get_activation(l))
+            self.hooks_handles.append(handle)
+        
+    def remove_hooks(self,):
+        for a in self.hooks_handles:
+            a.remove()
+            logger.info("removing hook")
+            
+        self.hooks_handles = []
     
 
     def _forward_aux(
         self,
     ) -> None:
+        
         if not self._is_operational:
-            return
+            return None
+        
+        # adding hooks
+        if len(self.hooks_handles) == 0:
+            self.add_hooks()
+            
         # count regressor
         if self.count_regressor_layers and self.count_loss_weight > 0.0:
             pred_count = self.count_regressor(
@@ -983,48 +1009,20 @@ class DetectionSystem(DetectionModel):
 
         return None
 
-    def _predict_once(self, x, profile=False, visualize=False, embed=None):
-        """
-        Perform a forward pass through the network.
-
-        Args:
-            x (torch.Tensor): The input tensor to the model.
-            profile (bool): Print the computation time of each layer if True.
-            visualize (bool): Save the feature maps of the model if True.
-            embed (list, optional): A list of feature vectors/embeddings to return.
-
-        Returns:
-            (torch.Tensor): The last output of the model.
-        """
-        y, dt, embeddings = [], [], []  # outputs
-        embed = frozenset(embed) if embed is not None else {-1}
-        max_idx = max(embed)
-        for m in self.model:
-            if m.f != -1:  # if not from previous layer
-                x = (
-                    y[m.f]
-                    if isinstance(m.f, int)
-                    else [x if j == -1 else y[j] for j in m.f]
-                )  # from earlier layers
-
-            x = m(x)  # run
-            y.append(x if m.i in self.save else None)  # save output
-
-            if m.i in embed:
-                embeddings.append(
-                    torch.nn.functional.adaptive_avg_pool2d(x, (1, 1))
-                    .squeeze(-1)
-                    .squeeze(-1)
-                )  # flatten
-                if m.i == max_idx:
-                    return torch.unbind(torch.cat(embeddings, 1), dim=0)
         
-        # run auxlary tasks
-        if self.training:
-            self._forward_aux()
-
-        return x
-
+    def forward(self, x, *args, **kwargs):
+    
+        if isinstance(x, dict):  # for cases of training and validating while training.
+            
+            if self.training and len(self.hooks_handles)<1:
+                self.add_hooks()
+            else:
+                self.remove_hooks()
+            
+            return self.loss(x, *args, **kwargs)
+        
+        return self.predict(x, *args, **kwargs)
+    
     def init_criterion(self):
         """Initialize the loss criterion for the DetectionModel."""
         return CustomLoss(
@@ -1054,6 +1052,42 @@ class DetectionSystemTrainer(DetectionTrainer):
             model.load(weights)
 
         return model
+    
+    def save_model(self):
+        """Save model training checkpoints with additional metadata."""
+        import io
+        from copy import deepcopy
+
+        # Serialize ckpt to a byte buffer once (faster than repeated torch.save() calls)
+        buffer = io.BytesIO()
+        torch.save(
+            {
+                "epoch": self.epoch,
+                "best_fitness": self.best_fitness,
+                "model": self.model,  # resume and final checkpoints derive from EMA
+                # "ema": deepcopy(self.ema.ema).half(),
+                # "updates": self.ema.updates,
+                # "optimizer": convert_optimizer_state_dict_to_fp16(deepcopy(self.optimizer.state_dict())),
+                "train_args": vars(self.args),  # save as dict
+                "train_metrics": {**self.metrics, **{"fitness": self.fitness}},
+                "train_results": self.read_results_csv(),
+                # "date": datetime.now().isoformat(),
+                # "version": __version__,
+                # "license": "AGPL-3.0 (https://ultralytics.com/license)",
+                # "docs": "https://docs.ultralytics.com",
+            },
+            buffer,
+        )
+        serialized_ckpt = buffer.getvalue()  # get the serialized content to save
+
+        # Save checkpoints
+        self.last.write_bytes(serialized_ckpt)  # save last.pt
+        if self.best_fitness == self.fitness:
+            self.best.write_bytes(serialized_ckpt)  # save best.pt
+        if (self.save_period > 0) and (self.epoch % self.save_period == 0):
+            (self.wdir / f"epoch{self.epoch}.pt").write_bytes(serialized_ckpt)  # save epoch, i.e. 'epoch3.pt'
+        # if self.args.close_mosaic and self.epoch == (self.epochs - self.args.close_mosaic - 1):
+        #    (self.wdir / "last_mosaic.pt").write_bytes(serialized_ckpt)  # save mosaic checkpoint
 
 
 class CustomYOLO(YOLO):
