@@ -73,7 +73,7 @@ if __name__ == "__main__":
         area_regressor_layers=18,
         roi_classifier_layers={"p3": 21, "p4": 24},
         fp_tp_loss_weight=0.0,
-        is_fp_tp_multiplier=True,
+        is_fp_tp_multiplier=False,
         count_loss_weight=0.1,
         area_loss_weight=0.0,
         roi_scale_factor=[2.0, 3.0],

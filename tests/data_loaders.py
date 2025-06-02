@@ -11,6 +11,9 @@ from tqdm import tqdm
 import os
 from datalabeling.common.config import TilingConfig
 from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
+from datalabeling.ml.workers import ObjectDetectionSystem
+from datalabeling.ml.models import Detector, ImageClassifier
+from datalabeling.common.processor import get_processor, DetectionsPostprocessor
 from dotenv import load_dotenv
 import os
 
@@ -89,15 +92,37 @@ def create_classification_data(strategies: list[str] = ["gt", "hn"], alias="demo
         load_unwrapped=True,
     )
 
-    detector = Detector(detection_model=detection_model, config=pred_config)
-
     handler = ClassificationDatasetBuilder(
         eval_config,
     )
 
+    # build roi postprocessor
     feature_extractor = get_processor("feature_extractor")(
         hf_model_path="facebook/dinov2-with-registers-small"
     )
+    path = r"..\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
+    model = ImageClassifier.load_from_checkpoint(
+        path, cls_is_features=True, map_location=pred_config.device
+    )
+    roi_classifier = get_processor("classifier")(
+        model,
+        label_map={0: "gt", 1: "tn"},
+        device=pred_config.device,
+        feature_extractor=feature_extractor,
+        imgsz=pred_config.cls_imgsz,
+    )
+    roi_processor = DetectionsPostprocessor(
+        keep_classes=["gt"],
+    )
+    roi_processor.set_classifier(roi_classifier)
+
+    # build object detection system
+    detection_label_map = getattr(detection_model, "names", None) or {0: "wildlife"}
+    detector = ObjectDetectionSystem(
+        config=pred_config, detection_label_map=detection_label_map
+    )
+    detector.set_model(model=detection_model, task="detect", path_weights=None)
+    detector.set_processor(roi_processor=roi_processor)
 
     yaml_path = r"..\configs\yolo_configs\data\dataset_0-1.yaml"
     cfg = load_yaml(yaml_path)
