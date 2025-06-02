@@ -56,8 +56,8 @@ class InferenceEngine(object):
         if paths is None:
             paths = [t.image_path for t in tiles]
 
-        self.detector.run(images_paths=paths)
-        detections = [out["final_detections"] for out in self.detector.outputs]
+        out = self.detector.run(images_paths=paths)
+        detections = [out["final_detections"] for out in out]
 
         if tiles is not None:
             # if tiles are provided,

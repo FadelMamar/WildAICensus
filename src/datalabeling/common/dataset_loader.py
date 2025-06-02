@@ -32,6 +32,7 @@ from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
 from .io import load_yaml, DataHandler, get_images_from_dirs
 from .processor import FeatureExtractor
 from ..ml.models import Detector
+from ..ml.workers import ObjectDetectionSystem
 from ..ml.interface import InferenceEngine
 
 
@@ -801,7 +802,7 @@ class ClassificationDatasetBuilder:
     def run(
         self,
         strategies: list[str] = ["gt", "hn"],
-        detector: Detector = None,
+        detector: ObjectDetectionSystem = None,
         feature_extractor: FeatureExtractor = None,
         bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
@@ -833,11 +834,11 @@ class ClassificationDatasetBuilder:
                 )
 
             elif strategy == "fp":
-                assert self.detector is not None, "Provide a detector engine"
+                assert self.detector is not None, "Provide a detector"
                 self._save_fp(bbox_resize_factor=bbox_resize_factor, **fp_kwargs)
 
             elif strategy == "hn":
-                assert self.detector is not None, "Provide a detector engine"
+                assert self.detector is not None, "Provide a detector"
                 self._save_hn(bbox_resize_factor=bbox_resize_factor, **hn_kwargs)
 
             else:
@@ -1010,8 +1011,8 @@ class ClassificationDatasetBuilder:
 
         logger.info(f"Running detector on {len(images_paths)} negative samples...")
 
-        predictions = self.detector.predict_directory(
-            path_to_dir=None, images_paths=images_paths, as_dataframe=False
+        predictions = self.detector.run(
+            images_paths=images_paths,
         )
 
         count = 0

@@ -719,10 +719,11 @@ class ObjectDetectionSystem:
         self.logger.info("All threads stopped")
         return None
 
-    def run(self, images_paths: Sequence[str]):
+    def run(self, images_paths: Sequence[str]) -> dict[str, List[Detection]]:
         """
         Run the system for a specified duration or until stopped
         """
+        images_paths = list(images_paths)
 
         # Initialize dataloader
         self.data_thread = DataLoadingThread(
@@ -730,6 +731,13 @@ class ObjectDetectionSystem:
         )
 
         self._process_pipeline()
+
+        detections = [
+            {str(images_paths[i]): out["final_detections"]}
+            for i, out in enumerate(self.outputs)
+        ]
+
+        return detections
 
 
 if __name__ == "__main__":
