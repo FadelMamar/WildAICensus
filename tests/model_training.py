@@ -1,3 +1,11 @@
+import os
+os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
+
+from ultralytics import settings
+
+# Update a setting
+settings.update({"mlflow": False})
+
 from datalabeling.common.config import TrainingConfig
 from datalabeling.common.pipeline import ModelTrainingStep, Pipeline
 from datalabeling.ml.train import TrainingManager
@@ -18,8 +26,8 @@ if __name__ == "__main__":
     training_cfg.yolo_yaml = (
         r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
     )
-    training_cfg.yolo_arch_yaml = r"..\configs\yolo_configs\models\yolov8s-p2.yaml"
-    training_cfg.path_weights = "../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"
+    training_cfg.yolo_arch_yaml =  r"yolo11n.pt"
+    training_cfg.path_weights = r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"
 
     training_cfg.ultralytics_pos_weight = 10.0
 
@@ -50,21 +58,21 @@ if __name__ == "__main__":
 
     training_cfg.object_detector_arch = "custom_yolo"  # "yolo", "rtdetr", "custom_yolo"
     training_cfg.custom_yolo_kwargs = dict(
-        count_regressor_layers=21,
-        area_regressor_layers=18,
-        roi_classifier_layers={"p3": 21, "p4": 24},
-        fp_tp_loss_weight=0.0,
-        is_fp_tp_multiplier=True,
-        count_loss_weight=0.1,
+        count_regressor_layers=22, # p5
+        area_regressor_layers=16,
+        roi_classifier_layers={"p3": 16, "p4": 19},
+        fp_tp_loss_weight=3.,
+        is_fp_tp_multiplier=False,
+        count_loss_weight=3.0,
         area_loss_weight=0.0,
-        roi_scale_factor=[2.0, 3.0],
+        roi_scale_factor=[2.0,],
     )
 
-    training_cfg.cl_batch_size = (32,)
+    training_cfg.cl_batch_size = (64,)
     training_cfg.use_continual_learning = True
-    training_cfg.cl_ratios = (1.0,)  # ratio = num_empty/num_non_empty
+    training_cfg.cl_ratios = (0.5,)  # ratio = num_empty/num_non_empty
     training_cfg.cl_epochs = (20,)
-    training_cfg.cl_freeze = (0,)
+    training_cfg.cl_freeze = (11,)
     training_cfg.cl_lr0s = (1e-4,)
     training_cfg.cl_save_dir = (
         r"D:\PhD\Data per camp\DetectionDataset\continuous_learning"

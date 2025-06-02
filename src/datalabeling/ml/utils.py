@@ -412,9 +412,9 @@ class CustomLoss(v8DetectionLoss):
         # selected_bboxes.append(bboxes[valid_indices])
         # image_idx.append([i] * max_num)
 
-        selected_bboxes = torch.vstack(selected_bboxes)
+        selected_bboxes = torch.vstack(selected_bboxes).to(self.device)
         image_idx = (
-            torch.Tensor(image_idx, device=selected_bboxes.device).flatten().long()
+            torch.Tensor(image_idx).flatten().long().to(self.device)
         )
 
         return selected_bboxes, image_idx
@@ -480,7 +480,7 @@ class CustomLoss(v8DetectionLoss):
             or self.fp_tp_loss_weight > 0.0
         ):
             loss = torch.zeros(4, device=self.device)  # box, cls, dfl, auxilary
-        else:
+        else: 
             loss = torch.zeros(3, device=self.device)  # box, cls, dfl
 
         feats = preds[1] if isinstance(preds, tuple) else preds
@@ -527,20 +527,20 @@ class CustomLoss(v8DetectionLoss):
         target_scores_sum = max(target_scores.sum(), 1)
 
         ## compute auxilary losses
-        if self.count_loss_weight > 0.0 or self.area_loss_weight > 0.0:
+        if (self.count_loss_weight > 0.0 or self.area_loss_weight > 0.0) and self.model.training:
             loss[3] += self.compute_count_area_loss(
                 targets, scale_tensor=imgsz[[1, 0, 1, 0]]
             )
             loss[3] /= target_scores_sum
 
         # TODO:  debug fp_tp
-        if self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier:
+        if (self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier) and self.model.training:
             if fg_mask.sum() < 1.0:  # batch has only negative samples
-                bbox_idx = target_gt_idx[fg_mask]  # tensor([])
+                bbox_idx = target_gt_idx[fg_mask>0.]  # tensor([])
                 image_idx = bbox_idx.clone()  # tensor([])
             else:
-                bbox_idx = target_gt_idx[fg_mask]  # valid bbox indices
-                image_idx = batch["batch_idx"][bbox_idx].long()  # mapping img -> bbox
+                bbox_idx = target_gt_idx[fg_mask].cpu()  # valid bbox indices
+                image_idx = batch["batch_idx"][bbox_idx].long().cpu()  # mapping img -> bbox
 
             scores_multiplier, fp_tp_loss = self.get_cnf_scores_multiplier_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
@@ -553,10 +553,10 @@ class CustomLoss(v8DetectionLoss):
                 fg_mask=fg_mask,
             )
 
-            if self.is_fp_tp_multiplier:
-                pred_scores[fg_mask] *= scores_multiplier
-            else:
-                loss[3] += fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
+            # if self.is_fp_tp_multiplier:
+            #     pred_scores[fg_mask] *= scores_multiplier
+            # else:
+            loss[3] += (fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum)
 
         # Cls loss
         loss[1] = (
@@ -680,7 +680,7 @@ class RoiClassifierHead(torch.nn.Module):
 
         self.image_encoder = torch.hub.load(
             "facebookresearch/dinov2", "dinov2_vits14_reg"
-        )
+        ).half()
 
         self.register_buffer(
             "scale_factor", torch.Tensor(scale_factor), persistent=True
@@ -694,11 +694,18 @@ class RoiClassifierHead(torch.nn.Module):
         target_labels = x.get("target_labels")
         img = x.get("img")
 
-        # if gt_boxes.numel()
+        
+        device = p3.device        
+        
+        self.image_encoder = self.image_encoder.to(device)
+        self.mlp = self.mlp.to(device)
+        self.scale_factor = self.scale_factor.to(device)
+        gt_boxes = gt_boxes.to(device)
+        pred_boxes = pred_boxes.to(device)
 
         if gt_boxes.numel() > 0:
             box_ious = complete_intersection_over_union(
-                preds=pred_boxes, target=gt_boxes, aggregate=False
+                preds=pred_boxes.detach(), target=gt_boxes, aggregate=False
             )
             best_iou, best_gt_idx = box_ious.max(dim=1)
 
@@ -707,10 +714,12 @@ class RoiClassifierHead(torch.nn.Module):
             )  # (best_iou > self.tp_iou_threshold)*1
 
         else:  # only negative samples
-            fp_tp_target_label = torch.zeros_like(pred_boxes)
+            num_boxes = pred_boxes.shape[0]
+            fp_tp_target_label = torch.zeros((num_boxes,1)).to(device)
 
         if p3 is None or p4 is None:
-            raise ValueError("p3 or p4 are not available")
+            raise ValueError("p3 or p4 are not available")            
+        
 
         # Predict confidence multipliers
         multiscale_features = self._extract_multiscale_roi_features(
@@ -718,7 +727,7 @@ class RoiClassifierHead(torch.nn.Module):
             pred_boxes=pred_boxes,
             p3=p3,
             p4=p4,
-            roi_align_shape=(7, 7),
+            roi_align_shape=(70, 70),
             img=img,
         )
 
@@ -730,7 +739,7 @@ class RoiClassifierHead(torch.nn.Module):
         return logits.sigmoid(), loss
 
     def _extract_multiscale_roi_features(
-        self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape=(7, 7)
+        self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape
     ):
         """
         Extract multi-scale RoI features and compute confidence multipliers
@@ -762,7 +771,7 @@ class RoiClassifierHead(torch.nn.Module):
             roi_boxes = [
                 pred_roi_boxes,
             ]
-
+            
             if gt_boxes.numel() > 0:
                 scaled_gt_boxes = self._expand_boxes(gt_boxes, scale_factor, image_size)
                 gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
@@ -846,6 +855,8 @@ class RoiClassifierHead(torch.nn.Module):
         cy = (y1 + y2) / 2
         w = x2 - x1
         h = y2 - y1
+        
+        
 
         # Expand dimensions
         new_w = w * scale_factor
@@ -898,7 +909,7 @@ class DetectionSystem(DetectionModel):
         assert fp_tp_loss_weight >= 0.0
 
         if is_fp_tp_multiplier:
-            assert fp_tp_loss_weight == 0
+            assert fp_tp_loss_weight == 0, "should be 0 when is_fp_tp_multiplier=True"
 
         assert isinstance(roi_classifier_layers, dict)
         assert (
@@ -932,8 +943,15 @@ class DetectionSystem(DetectionModel):
             roi_classifier_layers.values()
         )
         layers_to_register = [a for a in layers if a is not None]
+        
+        def hook_get_activation(name):
+            def hook(module, args, output):
+                self.activations[name] = output
+                return None
+            return hook
+        
         for l in layers_to_register:
-            self.model[l].register_forward_hook(self.hook_get_activation(l))
+            self.model[l].register_forward_hook(hook_get_activation(l))
 
         self._is_operational = True
 
@@ -942,12 +960,7 @@ class DetectionSystem(DetectionModel):
             self._predict_once(torch.rand(1, 3, 256, 256))
             self.activations = dict()
 
-    def hook_get_activation(self, name):
-        def hook(module, args, output):
-            self.activations[name] = output
-            return None
-
-        return hook
+    
 
     def _forward_aux(
         self,
@@ -1005,10 +1018,10 @@ class DetectionSystem(DetectionModel):
                 )  # flatten
                 if m.i == max_idx:
                     return torch.unbind(torch.cat(embeddings, 1), dim=0)
-        # return x
-
+        
         # run auxlary tasks
-        self._forward_aux()
+        if self.training:
+            self._forward_aux()
 
         return x
 
@@ -1056,7 +1069,7 @@ class CustomYOLO(YOLO):
         count_loss_weight: float = 0.0,
         area_loss_weight: float = 0.0,
         model="yolo11n.pt",
-        task=None,
+        task="detect",
         verbose=False,
     ):
         super().__init__(model=model, task=task, verbose=verbose)
