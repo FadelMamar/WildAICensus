@@ -14,6 +14,7 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tal import make_anchors
 from ultralytics.utils.ops import xywh2xyxy
 from ultralytics import YOLO
+import albumentations as A
 
 
 import torch
@@ -550,7 +551,7 @@ class CustomLoss(v8DetectionLoss):
 
             scores_multiplier, fp_tp_loss = self.get_cnf_scores_multiplier_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
-                pred_bboxes=pred_bboxes,  # .detach(),  # disable detach to allow gradient flowing through detection head as well
+                pred_bboxes=pred_bboxes.detach(),  # disable detach to allow gradient flowing through detection head as well
                 pred_scores=pred_scores.detach(),
                 batch_images=batch["img"],
                 target_labels=target_labels,
@@ -653,20 +654,17 @@ class RegressorHead(torch.nn.Module):
 class RoiClassifierHead(torch.nn.Module):
     def __init__(
         self,
-        # nc: int,
         scale_factor: list = [2.0, 3.0],
-        # label_smoothing: float = 0.0,
-        # tp_iou_threshold:float=0.3
+        box_size: int = 98,
     ):
         super().__init__()
 
-        # assert isinstance(nc, int), f"Expected 'int' but received {type(nc)}"
-        assert isinstance(scale_factor, list), (
-            f"Expected 'list' but received {type(scale_factor)}"
-        )
-        assert all([a > 0.99 for a in scale_factor]), (
-            "All scaling factors must be greater than 1.0"
-        )
+        # assert isinstance(scale_factor, list), (
+        #     f"Expected 'list' but received {type(scale_factor)}"
+        # )
+        # assert all([a > 0.99 for a in scale_factor]), (
+        #     "All scaling factors must be greater than 1.0"
+        # )
 
         self.mlp = nn.Sequential(
             nn.AdaptiveAvgPool1d(384),
@@ -678,8 +676,6 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Dropout(p=0.2),
             nn.Linear(128, 1),
         )
-
-        # self.tp_iou_threshold = tp_iou_threshold
 
         self.loss = nn.SmoothL1Loss(
             reduction="sum"
@@ -703,9 +699,13 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Flatten(),
         )
 
-        self.register_buffer(
-            "scale_factor", torch.Tensor(scale_factor), persistent=True
-        )
+        self.device = "cpu"
+
+        # self.register_buffer(
+        #     "scale_factor", torch.Tensor(scale_factor), persistent=True
+        # )
+
+        self.box_size = box_size
 
     def forward(self, x: dict):
         p3 = x.get("p3", None)
@@ -716,10 +716,11 @@ class RoiClassifierHead(torch.nn.Module):
         img = x.get("img")
 
         device = p3.device
+        self.device = device
 
+        img = img / 255 if torch.max(img) > 1 else img
         self.image_encoder = self.image_encoder.to(device)
         self.mlp = self.mlp.to(device)
-        self.scale_factor = self.scale_factor.to(device)
         gt_boxes = gt_boxes.to(device)
         pred_boxes = pred_boxes.to(device)
 
@@ -741,23 +742,70 @@ class RoiClassifierHead(torch.nn.Module):
             raise ValueError("p3 or p4 are not available")
 
         # Predict confidence multipliers
-        multiscale_features = self._extract_multiscale_roi_features(
+        features = self._extract_roi_features(
             gt_boxes=gt_boxes,
             pred_boxes=pred_boxes,
             p3=p3,
             p4=p4,
-            roi_align_shape=(70, 70),
+            roi_align_shape=(self.box_size, self.box_size),
             img=img,
         )
 
-        logits = self.mlp(multiscale_features)  # (M, nc)
+        logits = self.mlp(features)  # (M, nc)
         loss = self.loss(logits, fp_tp_target_label)
 
         return logits.sigmoid(), loss
 
-    def _extract_multiscale_roi_features(
-        self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape
-    ):
+    def extract_patches(self, images: torch.Tensor, boxes: torch.Tensor):
+        """
+        Extract patches from batched images given bounding boxes.
+
+        Args:
+            images (Tensor): (B, C, H, W) input images.
+            boxes (Tensor): List of length B, each Tensor is (B, 4) containing [x1, y1, x2, y2]
+
+        Returns:
+            Tensor: cropped patches for each box.
+        """
+        B, C, H, W = images.shape
+        image_patches = []
+        images = images.cpu()
+        boxes = boxes.detach().cpu().int()
+
+        assert boxes.shape[0] == B, "Every bbox should correspond to an image"
+
+        to_numpy = lambda x: x.permute(1, 2, 0).detach().cpu().numpy()
+        pad_and_crop = A.Compose(
+            [
+                A.PadIfNeeded(min_height=self.box_size, min_width=self.box_size),
+                A.CenterCrop(
+                    height=self.box_size, width=self.box_size, pad_if_needed=True
+                ),
+                A.ToTensorV2(),
+            ]
+        )
+        pad_and_crop = lambda patch: pad_and_crop(image=to_numpy(patch))["image"]
+
+        for i in range(B):
+            image = images[i]
+            box = boxes[i]
+            x1, y1, x2, y2 = box
+            # Clamp coordinates to avoid indexing errors
+            x1 = max(x1, 0)
+            y1 = max(y1, 0)
+            x2 = min(x2, W)
+            y2 = min(y2, H)
+            patch = image[:, y1:y2, x1:x2]
+            if any([p != self.box_size for p in patch.shape[1:]]):
+                patch = pad_and_crop(patch)
+            image_patches.append(patch.unsqueeze(0))
+
+        image_patches = torch.cat(image_patches, dim=0).to(self.device)
+        images = images.to(self.device)
+        boxes = boxes.to(self.device)
+        return image_patches
+
+    def _extract_roi_features(self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape):
         """
         Extract multi-scale RoI features and compute confidence multipliers
 
@@ -780,80 +828,86 @@ class RoiClassifierHead(torch.nn.Module):
         # Prepare for RoI extraction
         all_roi_features = []
 
-        for scale_factor in self.scale_factor:  # Local, Context, Environment
-            # Expand boxes by scale factor around center
-            scaled_pred_boxes = self._expand_boxes(pred_boxes, scale_factor, image_size)
-            pred_roi_boxes = torch.cat([batch_indices, scaled_pred_boxes], dim=1)
-            multipliers = [-1]
-            roi_boxes = [
-                pred_roi_boxes,
-            ]
+        # Expand boxes by scale factor around center
+        scaled_pred_boxes = self._expand_boxes(pred_boxes, image_size)
+        pred_roi_boxes = torch.cat([batch_indices, scaled_pred_boxes], dim=1)
+        multipliers = [-1]
+        roi_boxes = [
+            pred_roi_boxes,
+        ]
 
-            if gt_boxes.numel() > 0:
-                scaled_gt_boxes = self._expand_boxes(gt_boxes, scale_factor, image_size)
-                gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
-                multipliers.append(1)
-                roi_boxes.append(gt_roi_boxes)
+        if gt_boxes.numel() > 0:
+            scaled_gt_boxes = self._expand_boxes(gt_boxes, image_size)
+            gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
+            multipliers.append(1)
+            roi_boxes.append(gt_roi_boxes)
 
-            # compute the difference between gt_roi_boxes and pred_roi_boxes
-            roi_feat_p3_pooled = torch.zeros(1, device=device)
-            roi_feat_p4_pooled = torch.zeros(1, device=device)
-            img_features = torch.zeros(1, device=device)
+        # compute the difference between gt_roi_boxes and pred_roi_boxes
+        roi_feat_p3_pooled = torch.zeros(1, device=device)
+        roi_feat_p4_pooled = torch.zeros(1, device=device)
+        img_features = torch.zeros(1, device=device)
 
-            for m, roi_boxes in zip(multipliers, roi_boxes):
-                # RoI align on P3 (higher resolution)
-                roi_features_p3 = roi_align(
-                    p3,
-                    roi_boxes,
-                    output_size=roi_align_shape,
-                    spatial_scale=1.0 / 8,  # P3 stride
-                    aligned=True,
-                )  # (M, C, *roi_align_shape)
+        for m, roi_box in zip(multipliers, roi_boxes):
+            # RoI align on P3 (higher resolution)
+            roi_features_p3 = roi_align(
+                p3,
+                roi_box,
+                output_size=roi_align_shape,
+                spatial_scale=1.0 / 8,  # P3 stride
+                aligned=True,
+            )  # (M, C, *roi_align_shape)
 
-                # RoI align on P4 (lower resolution, larger receptive field)
-                roi_features_p4 = roi_align(
-                    p4,
-                    roi_boxes,
-                    output_size=roi_align_shape,
-                    spatial_scale=1.0 / 16,  # P4 stride
-                    aligned=True,
-                )  # (M, C, *roi_align_shape)
+            # RoI align on P4 (lower resolution, larger receptive field)
+            roi_features_p4 = roi_align(
+                p4,
+                roi_box,
+                output_size=roi_align_shape,
+                spatial_scale=1.0 / 16,  # P4 stride
+                aligned=True,
+            )  # (M, C, *roi_align_shape)
 
-                # RoI original images
-                original_crops = roi_align(
-                    img,
-                    roi_boxes,
-                    output_size=roi_align_shape,  # Standard input size for image encoder
-                    spatial_scale=1.0,  # Original image scale
-                    aligned=True,
-                )  # (M, 3, 196, 196)
+            # RoI original images
+            # original_crops = roi_align(
+            #     img,
+            #     roi_box,
+            #     output_size=roi_align_shape,  # Standard input size for image encoder
+            #     spatial_scale=1.0,  # Original image scale
+            #     aligned=True,
+            # )  # (M, 3, *roi_align_shape)
+            original_crops = self.extract_patches(images=img, boxes=roi_box[:, 1:])
 
-                # Encode original image crops
-                # with torch.no_grad():
-                img_features = m * self.image_encoder(original_crops) + img_features
+            # grid_crops = torchvision.utils.make_grid(img).permute(1,2,0)
+            # import matplotlib.pyplot as plt
+            # plt.imsave('test.jpg',grid_crops)
+            # img_bbox = torchvision.utils.draw_bounding_boxes(img[0],roi_box[:,1:].int()).permute(1,2,0)
+            # plt.imsave('test_img.jpg',img_bbox)
 
-                # Global average pooling to get feature vectors
-                roi_feat_p3_pooled = (
-                    m * F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
-                    + roi_feat_p3_pooled
-                )
-                roi_feat_p4_pooled = (
-                    m * F.adaptive_avg_pool2d(roi_features_p4, (1, 1)).flatten(1)
-                    + roi_feat_p4_pooled
-                )
+            # Encode original image crops
+            # with torch.no_grad():
+            img_features = m * self.image_encoder(original_crops) + img_features
 
-            # Concatenate P3 and P4 features for this scale
-            scale_features = torch.cat(
-                [roi_feat_p3_pooled, roi_feat_p4_pooled, img_features], dim=1
+            # Global average pooling to get feature vectors
+            roi_feat_p3_pooled = (
+                m * F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
+                + roi_feat_p3_pooled
             )
-            all_roi_features.append(scale_features)
+            roi_feat_p4_pooled = (
+                m * F.adaptive_avg_pool2d(roi_features_p4, (1, 1)).flatten(1)
+                + roi_feat_p4_pooled
+            )
+
+        # Concatenate P3 and P4 features for this scale
+        scale_features = torch.cat(
+            [roi_feat_p3_pooled, roi_feat_p4_pooled, img_features], dim=1
+        )
+        all_roi_features.append(scale_features)
 
         # Concatenate all scales
         multiscale_features = torch.cat(all_roi_features, dim=1)
 
         return multiscale_features
 
-    def _expand_boxes(self, boxes, scale_factor, image_size):
+    def _expand_boxes(self, boxes: torch.Tensor, image_size: tuple):
         """
         Expand bounding boxes by scale_factor around their centers
 
@@ -870,12 +924,12 @@ class RoiClassifierHead(torch.nn.Module):
         # Calculate centers and dimensions
         cx = (x1 + x2) / 2
         cy = (y1 + y2) / 2
-        w = x2 - x1
-        h = y2 - y1
+        # w = x2 - x1
+        # h = y2 - y1
 
         # Expand dimensions
-        new_w = w * scale_factor
-        new_h = h * scale_factor
+        new_w = self.box_size  # w * scale_factor
+        new_h = self.box_size  #  h * scale_factor
 
         # Calculate new coordinates
         new_x1 = cx - new_w / 2
