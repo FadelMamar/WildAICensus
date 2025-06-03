@@ -636,10 +636,10 @@ class RegressorHead(torch.nn.Module):
         self.mlp = nn.Sequential(
             nn.AdaptiveAvgPool1d(64),
             nn.Linear(64, 128),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Dropout(p=0.2),
             nn.Linear(128, 128),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Dropout(p=0.2),
             nn.Linear(128, 1),
         )
@@ -671,10 +671,10 @@ class RoiClassifierHead(torch.nn.Module):
         self.mlp = nn.Sequential(
             nn.AdaptiveAvgPool1d(384),
             nn.Linear(384, 128),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Dropout(p=0.2),
             nn.Linear(128, 128),
-            nn.SiLU(),
+            nn.ReLU(),
             nn.Dropout(p=0.2),
             nn.Linear(128, 1),
         )
@@ -685,8 +685,22 @@ class RoiClassifierHead(torch.nn.Module):
             reduction="sum"
         )  # nn.BCEWithLogitsLoss(reduction="sum")
 
-        self.image_encoder = torch.hub.load(
-            "facebookresearch/dinov2", "dinov2_vits14_reg"
+        # self.image_encoder = torch.hub.load(
+        #     "facebookresearch/dinov2", "dinov2_vits14_reg"
+        # )
+        # self.image_encoder = torchvision.models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+        # self.image_encoder.classifier = nn.Sequential(torch.nn.Flatten(),
+        #                                               nn.AdaptiveAvgPool1d(384)
+        #                                             )
+        self.image_encoder = nn.Sequential(
+            nn.Conv2d(3, 64, kernel_size=3, stride=2),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.Conv2d(64, 128, kernel_size=3, stride=2),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
         )
 
         self.register_buffer(
@@ -809,14 +823,14 @@ class RoiClassifierHead(torch.nn.Module):
                 original_crops = roi_align(
                     img,
                     roi_boxes,
-                    output_size=(196, 196),  # Standard input size for image encoder
+                    output_size=roi_align_shape,  # Standard input size for image encoder
                     spatial_scale=1.0,  # Original image scale
                     aligned=True,
                 )  # (M, 3, 196, 196)
 
                 # Encode original image crops
-                with torch.no_grad():
-                    img_features = m * self.image_encoder(original_crops) + img_features
+                # with torch.no_grad():
+                img_features = m * self.image_encoder(original_crops) + img_features
 
                 # Global average pooling to get feature vectors
                 roi_feat_p3_pooled = (
@@ -885,7 +899,9 @@ class DetectionSystem(DetectionModel):
         roi_classifier_layers: dict = {},
         count_regressor_layers: int = None,
         area_regressor_layers: int = None,
-        roi_scale_factor: list = [1.0, 2.0, 4.0],
+        roi_scale_factor: list = [
+            2.0,
+        ],
         pos_weight: float = 1.0,
         fp_tp_loss_weight: float = 0.0,
         is_fp_tp_multiplier: bool = False,
@@ -959,12 +975,12 @@ class DetectionSystem(DetectionModel):
     def add_hooks(
         self,
     ):
-        logger.info("adding hooks")
+        logger.debug("adding hooks")
 
         def hook_get_activation(name):
             def hook(module, args, output):
                 self.activations[name] = output
-                # logger.info(f"saving activation {name}")
+                # logger.debug(f"saving activation {name}")
                 return None
 
             return hook
@@ -985,7 +1001,7 @@ class DetectionSystem(DetectionModel):
         try:
             for a in self.hooks_handles:
                 a.remove()
-                logger.info("removing hook")
+                logger.debug("removing hook")
             self.hooks_handles = []
         except Exception as e:
             print(e)
