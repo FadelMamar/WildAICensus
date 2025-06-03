@@ -246,6 +246,25 @@ class HerdnetTrainer(L.LightningModule):
         return [optimizer], [{"scheduler": lr_scheduler, "interval": "epoch"}]
 
 
+def get_image_classifier_module(
+    num_classes: int, cls_is_features: bool = False
+) -> torch.nn.Module:
+    if cls_is_features:
+        model = torch.nn.Sequential(
+            torch.nn.LazyLinear(128),
+            torch.nn.ReLU(),
+            torch.nn.Dropout(p=0.2),
+            torch.nn.LazyLinear(128),
+            torch.nn.ReLU(),
+            torch.nn.LazyLinear(num_classes),
+        )
+    else:
+        model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
+        model.classifier = torch.nn.LazyLinear(num_classes)
+
+    return model
+
+
 class ImageClassifier(L.LightningModule):
     def __init__(
         self,
@@ -352,25 +371,6 @@ class ImageClassifier(L.LightningModule):
             eta_min=self.hparams.lr * self.hparams.lrf,
         )
         return [optimizer], [lr_scheduler]
-
-
-def get_image_classifier_module(
-    num_classes: int, cls_is_features: bool = False
-) -> torch.nn.Module:
-    if cls_is_features:
-        model = torch.nn.Sequential(
-            torch.nn.LazyLinear(128),
-            torch.nn.ReLU(),
-            torch.nn.Dropout(p=0.2),
-            torch.nn.LazyLinear(128),
-            torch.nn.ReLU(),
-            torch.nn.LazyLinear(num_classes),
-        )
-    else:
-        model = models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-        model.classifier = torch.nn.LazyLinear(num_classes)
-
-    return model
 
 
 class Detector(object):

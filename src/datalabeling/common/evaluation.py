@@ -10,6 +10,7 @@ from torchmetrics.detection import MeanAveragePrecision
 from torchmetrics.functional.detection import complete_intersection_over_union
 from tqdm import tqdm
 from itertools import chain
+from multiprocessing.pool import ThreadPool
 from ..ml.models import Detector
 from ..ml.interface import InferenceEngine
 from .config import DataConfig, EvaluationConfig
@@ -32,17 +33,24 @@ class Metrics:
 
         self.bbox_cols = ["x_min", "y_min", "x_max", "y_max"]
 
-    def run(self, dataset: LabelingDataset):
+    # TODO: add ThreadPool
+    def run(self, dataset: LabelingDataset) -> pd.DataFrame:
         logger.info("Computing evaluation metrics per image...")
 
         def iterator(df_pred, df_gt):
             image_paths = df_pred["file_name"].unique()
 
             for path in image_paths:
-                pred = df_pred.loc[df_pred["file_name"] == path, :].reset_index(
-                    drop=True
+                pred = (
+                    df_pred.loc[df_pred["file_name"] == path, :]
+                    .reset_index(drop=True)
+                    .copy()
                 )
-                gt = df_gt.loc[df_gt["file_name"] == path, :].reset_index(drop=True)
+                gt = (
+                    df_gt.loc[df_gt["file_name"] == path, :]
+                    .reset_index(drop=True)
+                    .copy()
+                )
                 yield gt, pred
 
         data = dataset.data
@@ -255,9 +263,12 @@ class PerformanceEvaluator:
         if load_results:
             try:
                 dataset.import_data(save_path)
-            except Exception:
+            except FileNotFoundError:
                 traceback.print_exc()
-                return None
+                raise FileNotFoundError()
+            except:
+                traceback.print_exc()
+                raise ValueError()
         else:
             dataset.save_data_csv(save_path=save_path)
 
@@ -341,7 +352,12 @@ class HardSampleSelector:
 
     def run(self, df_metrics_per_image: pd.DataFrame) -> pd.DataFrame:
         """Identify challenging samples based on multiple criteria"""
-        self.df_hard_negatives = self._select(df_metrics_per_image)
+
+        selected_images = self._select(df_metrics_per_image)
+
+        mask = df_metrics_per_image["file_name"].isin(selected_images)
+        self.df_hard_negatives = df_metrics_per_image.loc[mask, :]
+
         return self.df_hard_negatives
 
     def save_selection_references(
@@ -379,6 +395,7 @@ class HardSampleSelector:
 
         return out["file_name"].to_list()
 
+    # TODO: include score range [0.4,0.6] for uncertain samples?
     def _filter_uncertainty(self, df_results_per_img) -> list:
         # select images based on mAP and uncertainty
         df_results_per_img = self.uncertainty.run(df_results_per_img)
@@ -406,7 +423,7 @@ class HardSampleSelector:
 
         return out["file_name"].to_list()
 
-    def _select(self, df_results_per_img: pd.DataFrame) -> pd.DataFrame:
+    def _select(self, df_results_per_img: pd.DataFrame) -> list[str]:
         """Apply filtering"""
 
         # select images based on FPs
@@ -433,19 +450,15 @@ class HardSampleSelector:
             self._filter_uncertainty(df_results_per_img)
         )
 
-        # select
-        mask = df_results_per_img["file_name"].isin(selected_images)
-        df_hard_negatives = df_results_per_img.loc[mask, :]
-
         # select interesting columns and drop duplicates
-        cols = [
-            "file_name",
-            "map50",
-            "map75",
-            "all_scores",
-            "uncertainty",
-            "fp_tp_ratio",
-        ]
+        # cols = [
+        #     "file_name",
+        #     "map50",
+        #     "map75",
+        #     "all_scores",
+        #     "uncertainty",
+        #     "fp_tp_ratio",
+        # ]
 
         # if "gt_FN" in df_results_per_img.columns:
         #     cols.append("fn_tp_ratio")
@@ -454,7 +467,7 @@ class HardSampleSelector:
         #     df_hard_negatives[cols].drop_duplicates("file_name").reset_index(drop=True)
         # )
 
-        return df_hard_negatives
+        return selected_images
 
 
 # =====================

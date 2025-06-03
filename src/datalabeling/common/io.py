@@ -139,6 +139,9 @@ def load_yolo_label(
 
             df["x4"] = df["x1"]
             df["y4"] = df["y3"]
+
+            for col in cols_yolo:
+                df.pop(col)
         else:
             raise ValueError("Supported formats are 'yolo' and 'yolo-obb'.")
 
@@ -147,7 +150,7 @@ def load_yolo_label(
         _format = "empty"
         num_lines = 1
         df = {
-            "category_id": np.nan,
+            "label": np.nan,
             "x1": np.nan,
             "y1": np.nan,
             "x2": np.nan,
@@ -345,14 +348,17 @@ class ClassifierFeaturesData(Dataset):
         transform=None,
         tn_ratio: float = 1.0,
         tn_label: str = "true_negatives",
+        tp_label: str = "true_positives",
     ):
         super().__init__()
 
         self.data_dir = Path(split_data_dir)
 
         self.tn_label = tn_label
+        self.tp_label = tp_label
 
         self.tn_ratio = tn_ratio
+        assert self.tn_ratio > 0.0, f"Found tn_ratio={self.tn_ratio} instead"
 
         self.get_data()
 
@@ -361,35 +367,50 @@ class ClassifierFeaturesData(Dataset):
     def get_data(
         self,
     ):
-        class_names = sorted(os.listdir(self.data_dir))
+        class_names = [p.stem for p in Path(self.data_dir).glob("*") if p.is_dir()]
         self.classes = list(range(len(class_names)))
-        self.class_to_idx = dict(zip(class_names, self.classes))
+        self.class_to_idx = {
+            self.tn_label: 0,
+            self.tp_label: 1,
+        }  # dict(zip(class_names, self.classes))
+
+        assert (self.tp_label in class_names) and (self.tn_label in class_names), (
+            f"Received class_names={class_names}, tn_label={self.tn_label},tp_label={self.tp_label}"
+        )
 
         samples = []
 
-        # get true positive
-        num_positive = 0
-        for c in class_names:
-            if c == self.tn_label:
-                continue
-            tp_data = list((self.data_dir / c).glob("*"))
-            num_positive += len(tp_data)
-            samples.append(list(tp_data))
-        logger.info(f"Sampling {num_positive} True-Positives from {self.data_dir}")
+        # get true positives
+        # num_positive = 0
+        # if self.tp_label in class_names:
+        tp_data = list((self.data_dir / self.tp_label).glob("*"))
+        num_positive = len(tp_data)
+        samples.append(list(tp_data))
+        logger.info(f"Sampling {num_positive} {self.tp_label} from {self.data_dir}")
 
         # sample true negatives
-        if self.tn_label in class_names:
-            assert self.tn_ratio > 0.0
-            tn_data = list((self.data_dir / self.tn_label).glob("*"))
-            num_tn = int(num_positive * self.tn_ratio)
-            num_tn = min(num_tn, len(tn_data))
-            random.seed(41)
-            random.shuffle(tn_data)  # shuffle
-            samples.append(tn_data[:num_tn])
+        # if self.tn_label in class_names:
+        tn_data = list((self.data_dir / self.tn_label).glob("*"))
+        num_tn = int(num_positive * self.tn_ratio)
+        num_tn = min(num_tn, len(tn_data))
+        random.seed(41)
+        random.shuffle(tn_data)  # shuffle
+        samples.append(tn_data[:num_tn])
+        logger.info(f"Sampling {num_tn} {self.tn_label} from {self.data_dir}")
 
-            logger.info(f"Sampling {num_tn} True-Negatives from {self.data_dir}")
+        class_names.remove(self.tn_label)
+        class_names.remove(self.tp_label)
+
+        # other classes
+        for c in class_names:
+            data = list((self.data_dir / c).glob("*"))
+            samples.append(list(data))
+            logger.info(f"Sampling {len(data)} {str(c)} from {self.data_dir}")
+            self.class_to_idx[c] = max(self.class_to_idx.values()) + 1
 
         self.samples = list(chain.from_iterable(samples))
+
+        print(self.class_to_idx)
 
     def __len__(
         self,
@@ -432,7 +453,9 @@ class ClassifierDataModule(L.LightningDataModule):
         self.loader = ImageFolder
         if is_features:
             self.loader = lambda x, transform: ClassifierFeaturesData(
-                x, transform=transform, tn_ratio=self.tn_ratio
+                x,
+                transform=transform,
+                tn_ratio=self.tn_ratio,
             )
 
         self.normalize = transforms.Normalize(

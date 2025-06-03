@@ -440,6 +440,8 @@ class DetectionThread(threading.Thread):
             detection_results = self.run_detection(data)
             t_end = time.perf_counter() - t1
 
+            self.logger.info(f"Detection time: {t_end:.3f}s")
+
             # Package results with original metadata
             results_package = {
                 "detections": detection_results,
@@ -571,9 +573,28 @@ class PostProcessingThread(threading.Thread):
         conf = torch.hstack(conf)
         label = torch.hstack(label).long()
 
-        assert torch.min(bboxs) >= 0
-        assert torch.max(bboxs[:, [0, 2]]) <= tile_width
-        assert torch.max(bboxs[:, [1, 3]]) <= tile_height
+        window = 5.0  # due to obb conversion to xyxy
+        if torch.min(bboxs) < 0:
+            if torch.min(bboxs) > -1 * window:
+                bboxs = torch.clamp(bboxs, min=0)
+            else:
+                assert ValueError(f"{torch.min(bboxs)} < -{window}")
+
+        if torch.max(bboxs[:, [0, 2]]) > tile_width:
+            if torch.max(bboxs[:, [0, 2]]) < (
+                tile_width + window
+            ):  # due to obb conversion
+                bboxs[:, [0, 2]] = torch.clamp(bboxs[:, [0, 2]], min=0, max=tile_width)
+            else:
+                raise ValueError(f"{torch.max(bboxs[:, [0, 2]])} > {tile_width}")
+
+        if torch.max(bboxs[:, [1, 3]]) > tile_height:
+            if torch.max(bboxs[:, [1, 3]]) < (
+                tile_height + window
+            ):  # due to obb conversion
+                bboxs[:, [1, 3]] = torch.clamp(bboxs[:, [1, 3]], min=0, max=tile_height)
+            else:
+                raise ValueError(f"{torch.max(bboxs[:, [1, 3]])} > {tile_height}")
 
         # Non-max suppression
         indx = nms(boxes=bboxs, scores=conf, iou_threshold=self.config.nms_iou)
@@ -626,6 +647,7 @@ class PostProcessingThread(threading.Thread):
                 detections, tile=tile, offset_info=offset_info
             )
             t2 = time.perf_counter() - t1
+            self.logger.info(f"Postprocessing took: {t2:.3f}s")
             # Filter by confidence
             # detections = self.filter_detections(detections,
             #                                   self.output_config.get("conf_threshold", 0.5))
@@ -662,22 +684,35 @@ class ObjectDetectionSystem:
 
         # Initialize threads
         self.data_thread = None
-        self.detection_thread = DetectionThread(self.shared_buffers, config=config)
-        self.postprocess_thread = PostProcessingThread(
-            self.shared_buffers,
-            config=config,
-            label_map=detection_label_map,
-        )
+        self.detection_thread = None
+        self.postprocess_thread = None
+        self.label_map = detection_label_map
+        self.config = config
+        self._detection_model = None
+        self._detection_task = None
+        self._detection_model_path = None
+        self._roi_processor = None
 
         self.logger = logging.getLogger("ObjectDetectionSystem")
 
     def set_processor(self, roi_processor: DetectionsPostprocessor):
-        self.postprocess_thread.set_processor(roi_processor=roi_processor)
+        self._roi_processor = roi_processor
 
-    def set_model(self, model: YOLO, path_weights: str, task: str = "detect"):
+    def set_model(self, model: YOLO, path_weights: str = None, task: str = "detect"):
+        self._detection_model = model
+        self._detection_model_path = path_weights
+        self._detection_task = task
+
+    def _set_handlers(
+        self,
+    ):
         self.detection_thread.set_model(
-            model=model, path_weights=path_weights, task=task
+            model=self._detection_model,
+            path_weights=self._detection_model_path,
+            task=self._detection_task,
         )
+
+        self.postprocess_thread.set_processor(roi_processor=self._roi_processor)
 
     @property
     def outputs(
@@ -685,15 +720,15 @@ class ObjectDetectionSystem:
     ):
         if not self.postprocess_thread.is_alive():
             return self.postprocess_thread.outputs
-        else:
-            self.logger.info(
-                "Postprocessing thread is still alive. Make sure it has ended first."
-            )
-            return None
+
+        return None
 
     def _process_pipeline(self):
         """Start all threads"""
         self.logger.info("Starting Object Detection System")
+
+        # set detection model
+        self._set_handlers()
 
         # Start threads in order
         self.data_thread.start()
@@ -712,30 +747,48 @@ class ObjectDetectionSystem:
         self.shared_buffers.shutdown()
 
         # Wait for threads to finish
-        self.data_thread.join(timeout=5.0)
-        self.detection_thread.join(timeout=35.0)
-        self.postprocess_thread.join(timeout=5.0)
+        self.data_thread.join()
+        self.detection_thread.join()
+        self.postprocess_thread.join()
 
         self.logger.info("All threads stopped")
         return None
 
-    def run(self, images_paths: Sequence[str]) -> dict[str, List[Detection]]:
+    def run(self, images_paths: Sequence[str]) -> List[Detection]:
         """
         Run the system for a specified duration or until stopped
         """
         images_paths = list(images_paths)
 
-        # Initialize dataloader
+        # Initialize threads
         self.data_thread = DataLoadingThread(
             self.shared_buffers, data_source=images_paths
         )
 
+        self.detection_thread = DetectionThread(self.shared_buffers, config=self.config)
+
+        self.postprocess_thread = PostProcessingThread(
+            self.shared_buffers,
+            config=self.config,
+            label_map=self.label_map,
+        )
+
         self._process_pipeline()
 
-        detections = [
-            {str(images_paths[i]): out["final_detections"]}
-            for i, out in enumerate(self.outputs)
-        ]
+        out = self.outputs
+
+        # get outputs, wait for threads to finish
+        # out = None
+        # t1 = time.perf_counter()
+        # while out is None:
+        #     time.sleep(2)
+        #     out = self.outputs
+        #     if (time.perf_counter() - t1) > 15:
+        #         break
+
+        # print(out)
+
+        detections = [o["final_detections"] for i, o in enumerate(out)]
 
         return detections
 
