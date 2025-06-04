@@ -705,7 +705,7 @@ class RoiClassifierHead(torch.nn.Module):
         #     "scale_factor", torch.Tensor(scale_factor), persistent=True
         # )
 
-        self.box_size = box_size
+        self.box_size = torch.Tensor([box_size])
 
     def forward(self, x: dict):
         p3 = x.get("p3", None)
@@ -718,11 +718,12 @@ class RoiClassifierHead(torch.nn.Module):
         device = p3.device
         self.device = device
 
-        img = img / 255 if torch.max(img) > 1 else img
+        img = img / 255.0 if torch.max(img) > 1 else img
         self.image_encoder = self.image_encoder.to(device)
         self.mlp = self.mlp.to(device)
         gt_boxes = gt_boxes.to(device)
         pred_boxes = pred_boxes.to(device)
+        self.box_size = self.box_size.to(device)
 
         if gt_boxes.numel() > 0:
             box_ious = complete_intersection_over_union(
@@ -756,7 +757,7 @@ class RoiClassifierHead(torch.nn.Module):
 
         return logits.sigmoid(), loss
 
-    def extract_patches(self, images: torch.Tensor, boxes: torch.Tensor):
+    def _extract_patches(self, images: torch.Tensor, boxes: torch.Tensor):
         """
         Extract patches from batched images given bounding boxes.
 
@@ -867,15 +868,15 @@ class RoiClassifierHead(torch.nn.Module):
             )  # (M, C, *roi_align_shape)
 
             # RoI original images
-            # original_crops = roi_align(
-            #     img,
-            #     roi_box,
-            #     output_size=roi_align_shape,  # Standard input size for image encoder
-            #     spatial_scale=1.0,  # Original image scale
-            #     aligned=True,
-            # )  # (M, 3, *roi_align_shape)
-            original_crops = self.extract_patches(images=img, boxes=roi_box[:, 1:])
+            original_crops = roi_align(
+                img,
+                roi_box,
+                output_size=roi_align_shape,  # Standard input size for image encoder
+                spatial_scale=1.0,  # Original image scale
+                aligned=True,
+            )  # (M, 3, *roi_align_shape)
 
+            # original_crops = self._extract_patches(images=img, boxes=roi_box[:, 1:])
             # grid_crops = torchvision.utils.make_grid(img).permute(1,2,0)
             # import matplotlib.pyplot as plt
             # plt.imsave('test.jpg',grid_crops)
