@@ -52,15 +52,20 @@ if __name__ == "__main__":
 
     # detector = YOLO(r"D:\datalabeling\base_models_weights\best.pt", task="detect")
 
-    # detector = DetectionSystem(roi_classifier_layers=set(),
-    #                            count_regressor_layers=19,
-    #                            area_regressor_layers=16,
-    #                            cls_num_classes=2,
-    #                            cfg=r"..\configs\yolo_configs\models\yolo11-obb.yaml",
-    #                            ch=3,
-    #                            nc=1,
-    #                            verbose=True
-    #                            )
+    # model = DetectionSystem(
+    #                             count_regressor_layers=22,
+    #                             area_regressor_layers=16,
+    #                             roi_classifier_layers={"p3": 16, "p4": 19},
+    #                             fp_tp_loss_weight=3.0,
+    #                             is_fp_tp_multiplier=False,
+    #                             count_loss_weight=0.0,
+    #                             area_loss_weight=0.0,
+    #                             roi_scale_factor=[2.0, 3.0],
+    #                             # cfg="yolo11s.yml",
+    #                             ch=3,
+    #                             nc=1,
+    #                             verbose=True
+    #                             )
 
     # # base_model = detector.model.model
 
@@ -69,29 +74,46 @@ if __name__ == "__main__":
     # (a,(b,c)) = detector(torch.rand(5,3,256,256))
 
     model = CustomYOLO(
-        count_regressor_layers=21,
-        area_regressor_layers=18,
-        roi_classifier_layers={"p3": 21, "p4": 24},
-        fp_tp_loss_weight=0.0,
-        is_fp_tp_multiplier=True,
-        count_loss_weight=0.1,
+        count_regressor_layers=22,
+        area_regressor_layers=16,
+        roi_classifier_layers={"p3": 16, "p4": 19},
+        fp_tp_loss_weight=3.0,
+        is_fp_tp_multiplier=False,
+        count_loss_weight=0.0,
         area_loss_weight=0.0,
         roi_scale_factor=[2.0, 3.0],
-        model=r"..\configs\yolo_configs\models\yolov8-p2.yaml",
-    )  # .load(r"..\base_models_weights\best.pt")
+        model=r"..\base_models_weights\yolo11s.pt",
+    ).load( r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt")
+    
+    # model.train()
 
     model.model(
-        torch.rand(1, 3, 512, 512),
+        torch.rand
+(1, 3, 800, 800),
     )
-
-    model.train(
-        data=r"..\configs\yolo_configs\data\data_config.yaml",
-        epochs=5,
-        batch=4,
-        freeze=9,
-        imgsz=640,
-        workers=0,
-    )
+    
+    # activations_tr = model.activations
+    
+    # model.eval()
+    
+    # with torch.no_grad():
+    #     model(
+    #         torch.rand
+    # (1, 3, 800, 800),
+    #     )
+    
+    # activations_te = model.activations
+    
+    # model.train(
+    #     data=r"..\configs\yolo_configs\data\dataset_identification-detection.yaml",
+    #     epochs=5,
+    #     batch=16,
+    #     freeze=11,
+    #     imgsz=800,
+    #     workers=0,
+    # )
+    
+    # model.val(data=r"..\configs\yolo_configs\data\dataset_identification-detection.yaml",batch=16)
 
     # # hook
     # activation = {}
