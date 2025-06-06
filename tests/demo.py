@@ -74,22 +74,26 @@ if __name__ == "__main__":
     # (a,(b,c)) = detector(torch.rand(5,3,256,256))
 
     model = CustomYOLO(
-        count_regressor_layers=21,
+        count_regressor_layers=18,
         area_regressor_layers=18,
         roi_classifier_layers={"p3": 21, "p4": 24},
-        fp_tp_loss_weight=0.0,
+        fp_tp_loss_weight=3.0,
         is_fp_tp_multiplier=False,
-        count_loss_weight=0.1,
+        count_loss_weight=0.0,
         area_loss_weight=0.0,
-        roi_scale_factor=[2.0, 3.0],
-        model=r"..\base_models_weights\yolo11s.pt",
-    ).load( r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt")
-    
-    # model.train()
+        roi_scale_factor=[
+            2.0,
+        ],
+        model=r"..\configs\yolo_configs\models\yolov8-p2.yaml",
+    ).load(r"..\base_models_weights\best.pt")
 
-    model.model(
-        torch.rand
-(1, 3, 800, 800),
+    model.train(
+        data=r"..\configs\yolo_configs\data\data_config.yaml",
+        epochs=5,
+        batch=4,
+        freeze=0,
+        imgsz=640,
+        workers=0,
     )
     
     # activations_tr = model.activations
