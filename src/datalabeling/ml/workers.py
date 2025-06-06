@@ -16,6 +16,9 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, ConcatDataset, Dataset
 from torchvision.transforms import PILToTensor
 from PIL import Image
+import json
+import base64
+import requests
 import traceback
 from ultralytics.engine.results import Results as UltralyticsResults
 from tqdm import tqdm
@@ -31,6 +34,34 @@ logging.basicConfig(
 )
 
 
+class LoadingDataset(Dataset):
+    def __init__(
+        self,
+        data: Sequence[torch.Tensor],
+        offset_info: Sequence[dict],
+        metadata: Sequence[dict],
+    ):
+        super().__init__()
+
+        data = list(data)
+        self.data = torch.cat(data, dim=0)
+        self.offset_info = list(offset_info)
+        self.metadata = list(metadata)
+        self.indices_map = dict()  # index in dataset -> offset_info
+
+        index = 0
+        for i, tensor in enumerate(data):
+            for _ in range(tensor.shape[0]):
+                self.indices_map[index] = i
+                index += 1
+
+    def __len__(self):
+        return self.data.shape[0]
+
+    def __getitem__(self, index):
+        return self.data[index], torch.Tensor([self.indices_map[index]]).int()
+
+
 class SharedBuffers:
     """
     Shared memory buffers for inter-thread communication
@@ -41,25 +72,21 @@ class SharedBuffers:
     - Add more buffers if needed for your specific use case
     """
 
-    def __init__(self, max_size: int = 64, timeout: int = 15):
+    def __init__(self, max_size: int = 64, timeout: int = 360):
         super(SharedBuffers, self)  # .__init__(name="SharedBuffers")
-        # Buffer between Data Loading -> Detection
+
         self.raw_data_buffer = Queue(maxsize=max_size)
-
-        # Buffer between Detection -> Post-processing
         self.detection_results_buffer = Queue(maxsize=max_size)
-
-        # Optional: Final results buffer for output
         self.final_results_buffer = Queue(maxsize=max_size)
 
         # Thread synchronization
         self._shutdown_event = threading.Event()
-
+        self.is_closed = self._shutdown_event.is_set()
         self.logger = logging.getLogger("SharedBuffers")
 
         self.queue_kwargs = dict(block=True, timeout=timeout)
 
-        self.is_closed = self._shutdown_event.is_set()
+        self.counts = dict(data=0, detections=0, filtered_detections=0)
 
     def put(
         self, data: Any = None, detections: Any = None, filtered_detections: Any = None
@@ -68,16 +95,19 @@ class SharedBuffers:
         try:
             if data:
                 self._put_data(data, **kwargs)
+                self.counts["data"] += 1
 
             if detections:
                 self._put_detections(detections, **kwargs)
+                self.counts["detections"] += 1
 
             if filtered_detections:
                 self._put_results(filtered_detections, **kwargs)
+                self.counts["filtered_detections"] += 1
 
         except queue.Full:
-            self.logger.error("Queue is Full and timeout was exceeded.")
-            raise ValueError("Increase timeout?")
+            # self.logger.error("Queue is Full and timeout was exceeded.")
+            raise ValueError("Queue is Full and timeout was exceeded.")
 
         except:
             traceback.print_exc()
@@ -97,12 +127,17 @@ class SharedBuffers:
 
         try:
             if data:
+                self.counts["data"] = max(self.counts["data"] - 1, 0)
                 return self._get_data(**kwargs)
 
             if detections:
+                self.counts["detections"] = max(self.counts["detections"] - 1, 0)
                 return self._get_detections(**kwargs)
 
             if filtered_detections:
+                self.counts["filtered_detections"] = max(
+                    self.counts["filtered_detections"] - 1, 0
+                )
                 return self._get_results(**kwargs)
 
         except queue.Empty:
@@ -148,7 +183,14 @@ class DataLoadingThread(threading.Thread):
     Thread responsible for loading and preparing data
     """
 
-    def __init__(self, shared_buffers: SharedBuffers, data_source: Sequence[str]):
+    def __init__(
+        self,
+        shared_buffers: SharedBuffers,
+        data_source: Sequence[str],
+        batchsize: int = 2,
+        tile_size: int = 800,
+        overlap_ratio: float = 0.2,
+    ):
         super(DataLoadingThread, self).__init__(name="DataLoadingThread")
 
         self.shared_buffers = shared_buffers
@@ -157,10 +199,17 @@ class DataLoadingThread(threading.Thread):
         assert isinstance(data_source, Sequence)
         self._source_iterator = iter(data_source)
 
-        self.tile_size = 800
-        self.overlap_ratio = 0.2
+        self.tile_size = tile_size
+        self.overlap_ratio = overlap_ratio
         self.stride = int((1 - self.overlap_ratio) * self.tile_size)
         self.count = 0
+        self.batchsize = batchsize
+
+    # TODO: input type checking
+    def _checks(
+        self,
+    ):
+        pass
 
     def _get_patches(self, image: torch.Tensor):
         if image.dim() == 2:
@@ -282,9 +331,9 @@ class DataLoadingThread(threading.Thread):
         if len(batch_of_patches) == 3:
             batch_of_patches.unsqueeze_(0)
 
-        data = TensorDataset(batch_of_patches)
+        # data = TensorDataset(batch_of_patches)
 
-        return data, offset_info
+        return batch_of_patches, offset_info
 
     def run(self):
         """Main thread execution loop"""
@@ -292,28 +341,31 @@ class DataLoadingThread(threading.Thread):
 
         while not self.shared_buffers.is_closed:
             # Load data
-            tile = self._load_data()
+            tile = None
+            for _ in range(self.batchsize):
+                tile = self._load_data()
+                if tile == "DONE":
+                    self.logger.info("No more data to load")
+                    break
+                # Preprocess data
+                data, offset_info = self.preprocess_data(tile=tile)
+                # Package data with metadata
+                data_package = dict(
+                    metadata={
+                        "tile": tile,
+                        "idx": self.count,
+                    },
+                    data=data,
+                    offset_info=offset_info,
+                )
+
+                # wait until there is space
+                while self.shared_buffers.is_full_data_queue:
+                    time.sleep(2)
+                self.shared_buffers.put(data=data_package)
+
             if tile == "DONE":
-                self.logger.info("No more data to load")
                 break
-
-            # Preprocess data
-            data, offset_info = self.preprocess_data(tile=tile)
-
-            # Package data with metadata
-            data_package = {}
-            data_package.update(
-                {
-                    "tile": tile,
-                    "data": data,
-                    "idx": self.count,
-                    "offset_info": offset_info,
-                },
-            )
-
-            # while self.shared_buffers.is_full_data_queue:
-            self.shared_buffers.put(data=data_package)
-
         # Signal end of data loading
         self.shared_buffers.put(data="DONE")
 
@@ -331,12 +383,20 @@ class DetectionThread(threading.Thread):
 
         self.count = 0
         self.config = config
+        self.max_wait_time = 0.1  # seconds for batch collection
 
     def set_model(self, model: YOLO, path_weights: str, task="detect"):
         if model:
             self.model = model
-        else:
+
+        elif path_weights:
             self.model = YOLO(path_weights, task=task)
+
+        elif self.config.inference_service_url:
+            return None
+
+        else:
+            raise ValueError()
 
         self.logger.info("Model loaded successfully")
 
@@ -356,14 +416,25 @@ class DetectionThread(threading.Thread):
             self.logger.info("Warm up failed")
             traceback.print_exc()
 
-    def _trim_result(self, results: List[UltralyticsResults]) -> List:
+    def _trim_result(self, results: List[UltralyticsResults]) -> List[dict]:
         trimmed = []
         for res in results:
+            if isinstance(res, dict):
+                trimmed.append(res)
+                continue
+
             if res.obb is not None:
                 boxes = res.obb
             else:
                 boxes = res.boxes
-            trimmed.append(boxes)
+
+            o = dict(
+                bbox=boxes.xyxy.cpu().tolist(),
+                label=boxes.cls.cpu().flatten().tolist(),
+                score=boxes.conf.cpu().flatten().tolist(),
+            )
+            trimmed.append(o)
+
         return trimmed
 
     def _pad_if_needed(self, batch: torch.Tensor, out_shape: tuple) -> torch.Tensor:
@@ -382,82 +453,162 @@ class DetectionThread(threading.Thread):
 
         return batch
 
+    def _predict(self, batch: torch.Tensor):
+        url = self.config.inference_service_url
+
+        if url:
+            as_bytes = batch.cpu().numpy().tobytes()
+            payload = {
+                "tensor": base64.b64encode(as_bytes).decode("utf-8"),
+                "shape": list(batch.shape),
+                "iou_nms": self.config.nms_iou,
+                "conf": self.config.confidence_threshold,
+            }
+
+            res = requests.post(url=url, json=payload).json()
+            res = res["detections"]
+
+        else:
+            res = self.model(
+                batch,
+                verbose=False,
+                imgsz=self.config.tilesize,
+                conf=self.config.confidence_threshold,
+                iou=self.config.nms_iou,
+                device=self.config.device,
+            )
+
+        return res
+
     def run_detection(
         self,
-        data: Any,
-    ) -> List:
+        data: LoadingDataset,
+    ) -> dict:
         """
         Run object detection on input data
         """
 
-        loader = DataLoader(data, batch_size=self.config.batch_size, shuffle=False)
+        batchsize = (
+            self.config.batch_size * 4
+            if self.config.inference_service_url
+            else self.config.batch_size
+        )
+
+        loader = DataLoader(data, batch_size=batchsize, shuffle=False)
 
         if self.config.verbose:
             loader = tqdm(loader, desc="sliced_inference")
 
         results = []
+        indices = []
         with torch.no_grad():
-            for (batch,) in loader:
+            for batch, index in loader:
+                num_images = batch.shape[0]
                 batch = self._pad_if_needed(
                     batch, out_shape=(self.config.batch_size, *batch.shape[1:])
                 )
-                res = self.model(
-                    batch,
-                    verbose=False,
-                    imgsz=self.config.tilesize,
-                    conf=self.config.confidence_threshold,
-                    iou=self.config.nms_iou,
-                )
-                b = batch.shape[0]
-                res = res[:b]
-                results = results + self._trim_result(res)
+                res = self._predict(batch)
+                res = res[:num_images]
+                results.extend(self._trim_result(res))
+                indices.extend(index.cpu().flatten().tolist())
 
-        self.count += 1
+                # for b in range(batch.shape[0]):
+                #     results[i]
 
+        # self.count += 1
+
+        results = {
+            i: [res for j, res in enumerate(results) if i == indices[j]]
+            for i in list(set(indices))
+        }
         return results
+
+    def collect_batch(self) -> LoadingDataset:
+        """Collect tensors into a batch using hybrid time/size strategy"""
+        batch = []
+        offsets = []
+        metadata = []
+        start_time = time.time()
+
+        while len(batch) < self.config.batch_size:
+            # Calculate remaining wait time
+            elapsed = time.time() - start_time
+            remaining_time = self.max_wait_time - elapsed
+
+            if remaining_time <= 0:
+                break
+
+            try:
+                # Get data from buffer
+                data_package = self.shared_buffers.get(data=True)
+
+                if data_package == "DONE":
+                    self.logger.info("No more data to process. DONE.")
+                    return "DONE", None, None
+
+                if data_package == "empty":
+                    self.logger.info("Buffer is empty.")
+                    return "empty", None, None
+
+                batch.append(data_package.pop("data"))
+                offsets.append(data_package.pop("offset_info"))
+                metadata.append(data_package.pop("metadata"))
+
+            except Exception:
+                traceback.print_exc()
+
+        dataset = LoadingDataset(data=batch, offset_info=offsets, metadata=metadata)
+
+        return dataset, offsets, metadata
 
     def run(self):
         """Main thread execution loop"""
         self.logger.info("Starting detection thread")
 
         # Load model
-        assert self.model is not None, "Provide base detection model i.e. YOLO"
-
+        assert self.model or self.config.inference_service_url, (
+            "Provide detection model or url to inference service i.e. YOLO"
+        )
+        sleep_time = 0
         while True:
-            # Get data from buffer
-            data_package = self.shared_buffers.get(data=True)
+            if self.shared_buffers.counts["data"] < self.config.batch_size * 4:
+                time.sleep(1.0 + sleep_time)
+                sleep_time += 0.5  # extend wait
+                continue
 
-            if data_package == "DONE":
-                self.logger.info("No more data to process")
+            # get data
+            data, offsets, metadata = self.collect_batch()
+
+            if data == "DONE":
                 break
 
-            if data_package == "empty":
-                raise ValueError("Error: Data buffer is empty")
+            if data == "empty":
+                raise ValueError("Buffer is empty")
 
-            # Run detection
-            data = data_package.pop("data")
-            t1 = time.perf_counter()
-            detection_results = self.run_detection(data)
-            t_end = time.perf_counter() - t1
+            try:
+                # Run detection
+                t1 = time.perf_counter()
+                detection_results = self.run_detection(data)
+                t_end = (time.perf_counter() - t1) / len(data)
 
-            self.logger.info(f"Detection time: {t_end:.3f}s")
+                self.logger.debug(f"Mean Detection time: {t_end:.3f}s")
 
-            # Package results with original metadata
-            results_package = {
-                "detections": detection_results,
-                "detection_time": t_end,
-            }
-            results_package.update(data_package)
+            except Exception as e:
+                traceback.print_exc()
+                raise ValueError()
 
-            # Put results in buffer
-            self.shared_buffers.put(detections=results_package)
+            # Put in queue
+            for i, results in detection_results.items():
+                results_package = {
+                    "detections": results,
+                    "offset_info": offsets[i],
+                    "metadata": metadata[i],
+                    "detection_time": t_end,
+                }
+                self.shared_buffers.put(detections=results_package)
 
         # Signal end of detections
         self.shared_buffers.put(detections="DONE")
-
-        # except Exception as e:
-        #     self.logger.error(f"Error in detection thread: {e}")
-        #     traceback.print_exc()
 
 
 class PostProcessingThread(threading.Thread):
@@ -554,31 +705,32 @@ class PostProcessingThread(threading.Thread):
         label = []
 
         for i, boxes in enumerate(result):
-            if boxes.xyxy.cpu().numel() == 0:
+            bbox = torch.Tensor(boxes["bbox"])
+
+            if bbox.numel() == 0:
                 continue
 
             # mapping to untiled coordinates
-            bbox = boxes.xyxy.cpu().clone()
             bbox[:, [0, 2]] = bbox[:, [0, 2]] + offset_info["x_offset"][i]
             bbox[:, [1, 3]] = bbox[:, [1, 3]] + offset_info["y_offset"][i]
 
             bboxs.append(bbox)
-            conf.append(boxes.conf.cpu())
-            label.append(boxes.cls.cpu())
+            conf.extend(boxes["score"])
+            label.extend(boxes["label"])
 
         if len(bboxs) == 0:
             return []
 
         bboxs = torch.vstack(bboxs)
-        conf = torch.hstack(conf)
-        label = torch.hstack(label).long()
+        conf = torch.Tensor(conf)
+        label = torch.Tensor(label).long()
 
-        window = 5.0  # due to obb conversion to xyxy
+        window = 10  # due to obb conversion to xyxy
         if torch.min(bboxs) < 0:
             if torch.min(bboxs) > -1 * window:
                 bboxs = torch.clamp(bboxs, min=0)
             else:
-                assert ValueError(f"{torch.min(bboxs)} < -{window}")
+                raise ValueError(f"{torch.min(bboxs)} < -{window}")
 
         if torch.max(bboxs[:, [0, 2]]) > tile_width:
             if torch.max(bboxs[:, [0, 2]]) < (
@@ -586,7 +738,9 @@ class PostProcessingThread(threading.Thread):
             ):  # due to obb conversion
                 bboxs[:, [0, 2]] = torch.clamp(bboxs[:, [0, 2]], min=0, max=tile_width)
             else:
-                raise ValueError(f"{torch.max(bboxs[:, [0, 2]])} > {tile_width}")
+                raise ValueError(
+                    f"{torch.max(bboxs[:, [0, 2]])} > {tile_width}+{window}"
+                )
 
         if torch.max(bboxs[:, [1, 3]]) > tile_height:
             if torch.max(bboxs[:, [1, 3]]) < (
@@ -626,7 +780,14 @@ class PostProcessingThread(threading.Thread):
         """Main thread execution loop"""
         self.logger.info("Starting post-processing thread")
 
+        sleep_time = 0
         while True:
+            # wait for detections to be computed
+            if self.shared_buffers.counts["detections"] < self.config.batch_size * 2:
+                time.sleep(1.0 + sleep_time)
+                sleep_time += 0.5  # extend wait
+                continue
+
             # Get detection results from buffer
             results_package = self.shared_buffers.get(detections=True)
 
@@ -639,7 +800,7 @@ class PostProcessingThread(threading.Thread):
 
             # Apply post-processing
             detections = results_package["detections"]
-            tile = results_package["tile"]
+            tile = results_package["metadata"]["tile"]
             offset_info = results_package["offset_info"]
 
             t1 = time.perf_counter()
@@ -647,7 +808,7 @@ class PostProcessingThread(threading.Thread):
                 detections, tile=tile, offset_info=offset_info
             )
             t2 = time.perf_counter() - t1
-            self.logger.info(f"Postprocessing took: {t2:.3f}s")
+            self.logger.debug(f"Postprocessing took: {t2:.3f}s")
             # Filter by confidence
             # detections = self.filter_detections(detections,
             #                                   self.output_config.get("conf_threshold", 0.5))
@@ -683,9 +844,9 @@ class ObjectDetectionSystem:
         self.shared_buffers = SharedBuffers(max_size=buffer_size, timeout=timeout)
 
         # Initialize threads
-        self.data_thread = None
-        self.detection_thread = None
-        self.postprocess_thread = None
+        self.data_thread: DataLoadingThread = None
+        self.detection_thread: DetectionThread = None
+        self.postprocess_thread: PostProcessingThread = None
         self.label_map = detection_label_map
         self.config = config
         self._detection_model = None
@@ -734,6 +895,24 @@ class ObjectDetectionSystem:
         self.data_thread.start()
         self.detection_thread.start()
         self.postprocess_thread.start()
+
+        # while True :
+
+        # if not self.detection_thread.is_alive():
+        #     if self.shared_buffers.counts["data"] >= self.config.batch_size:
+        # self.detection_thread.start()
+        # break
+        # time.sleep(1)
+
+        # if not self.postprocess_thread.is_alive():
+        #     if self.shared_buffers.counts["detections"] >= self.config.batch_size:
+        #         self.postprocess_thread.start()
+        #         # break
+        #     time.sleep(1)
+
+        # if self.postprocess_thread.is_alive():
+        #     break
+
         self.logger.info("All threads started")
 
         # wait for threads to finish
