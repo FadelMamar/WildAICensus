@@ -12,11 +12,11 @@ call set MLFLOW_S3_ENDPOINT_URL=http://localhost:9000
 call set AWS_SECRET_ACCESS_KEY=minioadmin
 call set AWS_ACCESS_KEY_ID=minioadmin
 
-call python tools\register_model.py register_detector "runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"^
-        "labeler" "engine" 960 1 "cuda:0" "http://localhost:5000" "False" "detect"
+call python tools\register_model.py register_detector "D:\datalabeling\base_models_weights\best.pt"^
+        "labeler" "torchscript" 800 8 "cpu" "http://localhost:5000" "False" "detect"
 
-
-
+@REM call python tools\register_model.py register_classifier "D:\datalabeling\base_models_weights\roi_classifier.ckpt"^
+@REM         2 "True" 8 128 384 "classifier" "http://localhost:5000"
 
 
 call deactivate

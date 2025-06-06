@@ -8,22 +8,16 @@ import yaml
 from datargs import parse
 from dotenv import load_dotenv
 
-from datalabeling.arguments import Dataprepconfigs
-from datalabeling.dataset import (
-    build_yolo_dataset,
-    convert_obb_to_dota,
-    convert_obb_to_yolo,
-    convert_yolo_to_coco,
-    convert_yolo_to_obb,
-    create_yolo_seg_directory,
+from datalabeling.common.config import DataConfig, LabelConfig
+from datalabeling.common.pipeline import (
+    LabelstudioToYolo,
+    ObbToDotaStep,
+    Pipeline,
+    YoloToObbStep,
+    ObbToYoloStep,
 )
-
-
-def load_yaml(data_config_yaml: str) -> dict:
-    with open(data_config_yaml, "r") as file:
-        data_config = yaml.load(file, Loader=yaml.FullLoader)
-
-    return data_config
+from datalabeling.common.io import load_yaml
+import os, traceback
 
 
 def load_datasets(data_config_yaml: str) -> list[str]:
@@ -46,82 +40,87 @@ if __name__ == "__main__":
 
     logger = logging.getLogger(__name__)
 
-    args = parse(Dataprepconfigs)
+    args = parse(DataConfig)
 
     # print(args)
 
-    # creates a yolo dataset given args and saves dataset creation configs
+    # TODO: update
     if args.build_yolo_dataset:
-        build_yolo_dataset(args=args)
-        print("Saving arguments to destination directory")
-        save_path = Path(args.dest_path_images).parent / "dataset_configs.json"
-        with open(save_path, "w") as file:
-            configs = [
-                "is_detector",
-                "discard_labels",
-                "ls_json_dir",
-                "keep_labels",
-                "coco_json_dir",
-                "dest_path_images",
-                "dest_path_labels",
-                "clear_yolo_dir",
-                "height",
-                "width",
-                "overlap_ratio",
-                "save_all",
-                "parse_ls_config",
-                "min_visibility",
-                "empty_ratio",
-            ]
-            configs = dict(
-                zip(configs, [args.__dict__[k] for k in configs], strict=False)
-            )
-            json.dump(configs, file, indent=2)
+        pass
+        # build_yolo_dataset(args=args)
+        # print("Saving arguments to destination directory")
+        # save_path = Path(args.dest_path_images).parent / "dataset_configs.json"
+        # with open(save_path, "w") as file:
+        #     configs = [
+        #         "is_detector",
+        #         "discard_labels",
+        #         "ls_json_dir",
+        #         "keep_labels",
+        #         "coco_json_dir",
+        #         "dest_path_images",
+        #         "dest_path_labels",
+        #         "clear_yolo_dir",
+        #         "height",
+        #         "width",
+        #         "overlap_ratio",
+        #         "save_all",
+        #         "parse_ls_config",
+        #         "min_visibility",
+        #         "empty_ratio",
+        #     ]
+        #     configs = dict(
+        #         zip(configs, [args.__dict__[k] for k in configs], strict=False)
+        #     )
+        #     json.dump(configs, file, indent=2)
 
     assert (args.yolo_to_obb + args.obb_to_yolo) < 2, "Both arguments can't be True"
 
     # convert yolo dataset to obb
-    if args.yolo_to_obb:
-        paths = load_datasets(args.data_config_yaml)
-        for p in paths:
-            try:
-                p_new = p.replace("images", "labels")
-                logger.info(f"Converting {p_new}: yolo->obb")
-                convert_yolo_to_obb(yolo_labels_dir=p_new, output_dir=p_new, skip=True)
-            except Exception:
-                logger.warning(f"Failed for {p_new}")
-                traceback.print_exc()
 
-    # convert obb dataset to yolo
-    if args.obb_to_yolo:
-        paths = load_datasets(args.data_config_yaml)
-        for p in paths:
-            try:
-                p_new = p.replace("images", "labels")
-                logger.info(f"Converting {p_new}: obb->yolo")
-                convert_obb_to_yolo(obb_labels_dir=p_new, output_dir=p_new, skip=True)
-            except Exception:
-                logger.warning(f"Failed for {p_new}")
-                traceback.print_exc()
+    paths = load_datasets(args.data_config_yaml)
+    steps = []
+    data_config = load_yaml(args.data_config_yaml)
 
-    if args.obb_to_dota:
-        data_config = load_yaml(args.data_config_yaml)
+    for p in paths:
+        try:
+            p_new = p.replace("images", "labels")
 
-        for split in ["train", "val", "test"]:
-            for img_dir in data_config[split]:
-                try:
-                    obb_img_dir = Path(data_config["path"], img_dir)
-                    labels_output_dir = Path(obb_img_dir).parent / "dota_labels"
-                    convert_obb_to_dota(
-                        obb_img_dir=obb_img_dir,
-                        output_dir=labels_output_dir,
+            if args.yolo_to_obb or args.obb_to_dota:
+                steps.append(
+                    YoloToObbStep(
+                        yolo_labels_dir=p_new,
+                        obb_labels_dir=p_new,
+                        skip=True,
+                    )
+                )
+
+            if args.obb_to_yolo:
+                steps.append(
+                    ObbToYoloStep(
+                        obb_labels_dir=p_new,
+                        yolo_labels_dir=p_new,
+                        skip=True,
+                    )
+                )
+
+            if args.obb_to_dota:
+                labels_output_dir = Path(p_new).parent / "dota_labels"
+                steps.append(
+                    ObbToDotaStep(
+                        obb_img_dir=p_new,
+                        dota_dir=labels_output_dir,
                         label_map=data_config["names"],
                         skip=True,
-                        clear_old_labels=args.clear_dota_labels,
-                    )
-                except Exception:
-                    logger.warning(f"obb->dota failed for {obb_img_dir}")
-                    traceback.print_exc()
+                        clear_old=args.clear_dota_labels,
+                    ),
+                )
+
+            pipeline = Pipeline(steps)
+            result_ctx = pipeline.run()
+
+        except Exception:
+            logger.warning(f"Failed for {p_new}")
+            traceback.print_exc()
 
     # create yolo-seg labels
     if args.create_yolo_seg_dir:

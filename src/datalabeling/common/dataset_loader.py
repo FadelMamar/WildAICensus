@@ -32,6 +32,7 @@ from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
 from .io import load_yaml, DataHandler, get_images_from_dirs
 from .processor import FeatureExtractor
 from ..ml.models import Detector
+from ..ml.workers import ObjectDetectionSystem
 from ..ml.interface import InferenceEngine
 
 
@@ -309,13 +310,12 @@ class LabelingDataset:
     def add_tile(self, tile: Tile) -> None:
         self.tiles.append(tile)
 
-    def add_predictions(
-        self,
-        engine: InferenceEngine,
-    ) -> None:
+    def add_predictions(self, engine: InferenceEngine, build: bool = False) -> None:
         self.tiles = engine.inference(
             tiles=self.tiles, images_paths=None, return_tiles=True
         )
+        if build:
+            self.build(force_rebuild=True)
         return None
 
     def import_data(self, path: str) -> None:
@@ -778,7 +778,7 @@ class ClassificationDatasetBuilder:
         from .evaluation import PerformanceEvaluator
 
         self.config = eval_config
-        self.detector = None
+        self.detector: InferenceEngine = None
         self.source_dirs = None
         self.output_dir = None
         self.perf_eval = PerformanceEvaluator(config=self.config)
@@ -801,7 +801,7 @@ class ClassificationDatasetBuilder:
     def run(
         self,
         strategies: list[str] = ["gt", "hn"],
-        detector: Detector = None,
+        detector: InferenceEngine = None,
         feature_extractor: FeatureExtractor = None,
         bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
@@ -811,17 +811,22 @@ class ClassificationDatasetBuilder:
         hn_kwargs=dict(w=50, h=50),
         max_workers: int = 1,
     ):
-        # assert strategy in ["gt", "fp",'hn'], "Provide gt for fp as a strategy"
+        assert len(set(strategies) & set(["gt", "fp", "hn"])) > 0, (
+            f"None of gt, fp, or hn was provided strategy. Received {strategies}"
+        )
+        assert isinstance(detector, InferenceEngine), (
+            f"Expected detector to be InferenceEngine. Received {type(detector)}"
+        )
 
         self.bbox_resize_factor = bbox_resize_factor
         self.detector = detector
         self.feature_extractor = feature_extractor
 
-        for strategy in strategies:
+        for strategy in list(set(strategies)):
             if strategy == "gt":
                 df_labels, _ = self.load_groundtruth(
-                    self.source_dirs,
-                    None,
+                    images_dirs=self.source_dirs,
+                    images_paths=None,
                     load_empty=save_true_negatives,
                     max_workers=max_workers,
                 )
@@ -833,11 +838,11 @@ class ClassificationDatasetBuilder:
                 )
 
             elif strategy == "fp":
-                assert self.detector is not None, "Provide a detector engine"
+                assert self.detector is not None, "Provide a detector"
                 self._save_fp(bbox_resize_factor=bbox_resize_factor, **fp_kwargs)
 
             elif strategy == "hn":
-                assert self.detector is not None, "Provide a detector engine"
+                assert self.detector is not None, "Provide a detector"
                 self._save_hn(bbox_resize_factor=bbox_resize_factor, **hn_kwargs)
 
             else:
@@ -997,10 +1002,10 @@ class ClassificationDatasetBuilder:
         w: int = None,
         h: int = None,
     ):
-        logger.info("Saving Hard negatives...")
+        logger.info("Computing Hard negatives...")
 
-        iters = [Path(p).glob("*") for p in self.source_dirs]
-        images_paths = chain.from_iterable(iters)
+        images_paths = get_images_from_dirs(images_dirs=self.source_dirs)
+
         is_tn = (
             lambda p: not Path(str(p).replace("images", "labels"))
             .with_suffix(".txt")
@@ -1010,9 +1015,10 @@ class ClassificationDatasetBuilder:
 
         logger.info(f"Running detector on {len(images_paths)} negative samples...")
 
-        predictions = self.detector.predict_directory(
-            path_to_dir=None, images_paths=images_paths, as_dataframe=False
+        predictions = self.detector.inference(
+            images_paths=images_paths, return_as_df=False
         )
+        predictions = dict(zip(images_paths, predictions))
 
         count = 0
         for file_name, detections in tqdm(
@@ -1102,7 +1108,7 @@ class ClassificationDatasetBuilder:
     ) -> tuple[pd.DataFrame, str]:
         paths = images_paths
         if paths is None:
-            assert images_dirs is None, (
+            assert images_dirs is not None, (
                 "Both images_dirs and images_paths are None. Provide exactly one."
             )
             iters = [Path(p).glob("*") for p in images_dirs]
@@ -1125,19 +1131,28 @@ class ClassificationDatasetBuilder:
     ):
         """Run batch detection and save cropped ROIs"""
 
-        df_metrics = self.perf_eval.evaluate(
-            images_dirs=self.source_dirs,
+        logger.info("Computing False Positives...")
+
+        # raise NotImplementedError("Debugging to do...")
+
+        # load predictions
+        tiles = [Tile(image_path=p) for p in get_images_from_dirs(self.source_dirs)]
+        dataset = LabelingDataset(tiles=tiles)
+        dataset.add_predictions(engine=self.detector, build=True)
+
+        df_metrics = self.perf_eval.run(
+            dataset=dataset,
             pred_results_dir=self.output_dir,
-            images_paths=None,
             save_tag="cls",
-            detector=self.detector,
             load_results=self.config.load_results,
         )
-        mask_fn = df_metrics["gt_FN"] == True
+
+        if df_metrics.empty:
+            return None
+
         mask_fp = df_metrics["pred_FP"] == True
-        mask = mask_fn + mask_fp
         for file_name, df_det in tqdm(
-            df_metrics.loc[mask, :].groupby("file_name"), desc="Saving FPs and FNs"
+            df_metrics.loc[mask_fp, :].groupby("file_name"), desc="Saving FPs and FNs"
         ):
             image = Image.open(file_name).convert("RGB")
             img_width, img_height = image.size
@@ -1151,7 +1166,6 @@ class ClassificationDatasetBuilder:
                     y1 = int(row["pred_y_min"])
                     x2 = int(row["pred_x_max"])
                     y2 = int(row["pred_y_max"])
-                    # label_id = row['pred_category_id']
                     label_name = "false_positives"
                 except:
                     continue
@@ -1184,6 +1198,7 @@ class ClassificationDatasetBuilder:
         return None
 
 
+# TODO: debug
 class DataPreparation:
     def __init__(self, dataset_config: DataConfig, label_config: LabelConfig):
         self.dataset_config = dataset_config

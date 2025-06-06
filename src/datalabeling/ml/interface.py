@@ -6,6 +6,7 @@ from time import time
 from urllib.parse import quote, unquote
 import pandas as pd
 from dotenv import load_dotenv
+from typing import Sequence
 
 # from label_studio_ml.utils import get_local_path
 from label_studio_tools.core.utils.io import get_local_path
@@ -32,7 +33,9 @@ class InferenceEngine(object):
         self.model_tag = "None"
 
     def set_detector(self, detector: ObjectDetectionSystem, model_tag: str):
-        assert isinstance(detector, ObjectDetectionSystem)
+        assert isinstance(detector, ObjectDetectionSystem), (
+            "Received {type(detector)} instead of ObjectDetectionSystem"
+        )
         self.detector = detector
         self.model_tag = model_tag
 
@@ -44,20 +47,18 @@ class InferenceEngine(object):
 
     def inference(
         self,
-        images_paths: list[str],
+        images_paths: Sequence[str],
         tiles: list[Tile] = None,
         return_tiles: bool = False,
         return_as_df: bool = False,
-    ) -> list[Detection]:
-        assert isinstance(images_paths, list)
+    ) -> list[Detection] | list[Tile] | pd.DataFrame:
         """Multithreaded detector"""
 
         paths = images_paths
         if paths is None:
             paths = [t.image_path for t in tiles]
 
-        self.detector.run(images_paths=paths)
-        detections = [out["final_detections"] for out in self.detector.outputs]
+        detections = self.detector.run(images_paths=paths)
 
         if tiles is not None:
             # if tiles are provided,
@@ -65,6 +66,9 @@ class InferenceEngine(object):
                 tile.predictions = detections[i]
 
         if return_tiles:
+            assert tiles is not None, (
+                "This is likely an errro. tiles have not been set."
+            )
             return tiles
 
         if return_as_df:

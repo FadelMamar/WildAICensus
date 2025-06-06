@@ -353,10 +353,10 @@ class Tile:
             df["x"] = df["x"] / self.width
             df["y"] = df["y"] / self.height
 
-        df.rename(columns={"parent_image": "file_name"}, inplace=True)
+            # check detections
+            self.check_detections(df)
 
-        # check detections
-        self.check_detections(df)
+        df.rename(columns={"parent_image": "file_name"}, inplace=True)
 
         return df
 
