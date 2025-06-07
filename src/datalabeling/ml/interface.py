@@ -15,9 +15,11 @@ from label_studio_sdk.client import LabelStudio
 from PIL import Image
 
 from .workers import ObjectDetectionSystem, GPSUtils
-from ..common.processor import DetectionsPostprocessor
+from .models import ImageClassifier, YOLO
+from ..common.processor import DetectionsPostprocessor, get_processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
+from ..common.mlflow_utils import load_registered_model
 
 
 logger = logging.getLogger(__name__)
@@ -217,3 +219,59 @@ class Annotator(InferenceEngine):
                 result=formatted_pred,
                 model_version=self.model_tag + tag,
             )
+
+
+def load_engine(
+    pred_config: PredictionConfig,
+    roi_classifier_path: str = r"..\base_models_weights\roi_classifier.ckpt",
+    roi_cls_is_features: bool = True,
+    roi_cls_label_map: dict = {0: "gt", 1: "tn"},
+    roi_keep_classes: list = ["gt"],
+    detection_label_map: dict = None,  # {0: "wildlife"},
+    feature_extractor_path: str = "facebook/dinov2-with-registers-small",
+    detection_model: YOLO = None,
+    mlflow_model_alias: str = "demo",
+    mlflow_model_name: str = "labeler",
+):
+    if detection_model is None:
+        detection_model, metadata = load_registered_model(
+            alias=mlflow_model_alias,
+            name=mlflow_model_name,
+            mlflow_tracking_url="http://localhost:5000",
+            load_unwrapped=True,
+        )
+
+    # build roi postprocessor
+    feature_extractor = get_processor("feature_extractor")(
+        hf_model_path=feature_extractor_path
+    )
+
+    path = roi_classifier_path
+    model = ImageClassifier.load_from_checkpoint(
+        path, cls_is_features=roi_cls_is_features, map_location=pred_config.device
+    )
+
+    roi_classifier = get_processor("classifier")(
+        model,
+        label_map=roi_cls_label_map,
+        device=pred_config.device,
+        feature_extractor=feature_extractor,
+        imgsz=pred_config.cls_imgsz,
+    )
+    roi_processor = DetectionsPostprocessor(
+        keep_classes=roi_keep_classes,
+    )
+    roi_processor.set_classifier(roi_classifier)
+
+    # build object detection system
+    detection_label_map = getattr(detection_model, "names", None) or {0: "wildlife"}
+    detector = ObjectDetectionSystem(
+        config=pred_config, detection_label_map=detection_label_map
+    )
+    detector.set_model(model=detection_model, task="detect", path_weights=None)
+    detector.set_processor(roi_processor=roi_processor)
+
+    engine = InferenceEngine(config=pred_config)
+    engine.set_detector(detector=detector, model_tag=mlflow_model_alias)
+
+    return engine, feature_extractor

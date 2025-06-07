@@ -47,6 +47,7 @@ dependencies = [
     "transformers>=4.51.3",
     "accelerate>=1.7.0",
     "fire>=0.7.0",
+    "fiftyone==1.2.0",
 ]
 
 [project.optional-dependencies]

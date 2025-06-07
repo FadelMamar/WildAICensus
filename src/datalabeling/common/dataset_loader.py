@@ -419,6 +419,7 @@ class LabelingDataset:
         images_dirs: Sequence[str] = None,
         paths: Sequence[str] = None,
         load_empty: bool = True,
+        label_map: dict = None,
         max_workers: int = 1,
     ):
         assert (images_dirs is None) + (paths is None) == 1, (
@@ -437,6 +438,7 @@ class LabelingDataset:
             images_paths=paths,
             load_empty=load_empty,
             max_workers=max_workers,
+            label_map=label_map,
         )
 
         # load tiles

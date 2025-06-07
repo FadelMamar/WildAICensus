@@ -45,6 +45,21 @@ def load_yaml(path: str):
     return cfg
 
 
+def load_datasets(data_config_yaml: str) -> list[str]:
+    data_config = load_yaml(data_config_yaml)
+    paths = list()
+    root = data_config["path"]
+    for split in ["train", "val", "test"]:
+        try:
+            for p in data_config[split]:
+                path = os.path.join(root, p)
+                paths.append(path)
+        except Exception as e:
+            print(f"Failed to load datasets for conversion {split} --> ", e)
+
+    return paths
+
+
 def get_images_paths(
     images_dir: str,
     patterns: tuple = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG"),
@@ -96,7 +111,7 @@ def check_directory_label():
 
 
 def load_yolo_label(
-    image_path: str | Path, load_empty: bool = True
+    image_path: str | Path, load_empty: bool = True, label_map: dict = None
 ) -> tuple[dict, str]:
     label_path = str(Path(image_path).with_suffix(".txt")).replace("images", "labels")
 
@@ -141,7 +156,8 @@ def load_yolo_label(
             df["y4"] = df["y3"]
 
             for col in cols_yolo:
-                df.pop(col)
+                if col != "label":
+                    df.pop(col)
         else:
             raise ValueError("Supported formats are 'yolo' and 'yolo-obb'.")
 
@@ -185,11 +201,18 @@ def load_yolo_label(
     df["y_max"] = df["y3"]
 
     # convert values to list
+    classes = []
     for col in df.keys():
         if isinstance(df[col], float):
             df[col] = [df[col]]
         elif isinstance(df[col], np.ndarray):
             df[col] = df[col].tolist()
+        if (col == "label") and label_map:
+            classes = list(map(label_map.get, df[col]))
+    if classes:
+        df["class"] = classes
+    else:
+        df["class"] = [None] * len(df["label"])
 
     return df, _format
 
@@ -204,6 +227,7 @@ class DataHandler:
         images_paths: list[str] | Sequence = None,
         load_empty: bool = True,
         max_workers: int = 1,
+        label_map: dict = None,
     ) -> tuple[pd.DataFrame, str]:
         results = dict()
         labels_format = set()
@@ -213,7 +237,7 @@ class DataHandler:
             assert images_paths is None, "It should not be provided."
             images_paths = list(Path(images_dir).glob("*"))
 
-        func = partial(load_yolo_label, load_empty=load_empty)
+        func = partial(load_yolo_label, load_empty=load_empty, label_map=label_map)
 
         logger.info("Loading groundtruth")
 

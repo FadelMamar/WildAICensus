@@ -160,19 +160,15 @@ calibration_service/
 
 > **Milestone:** Single repo builds all services and infra containers.
 
-### Week 2 – Training Service & MLflow Integration
+### Week 2 – Training  Service
 
 **Goals:** Implement training logic, integrate MLflow
 
 - Develop `training_service`:
   - YOLOv8 training wrapper in `trainer.py`
   - REST endpoint to start training jobs
-- Stand up `mlflow_service`:
-  - Dockerized MLflow server pointing at MinIO for artifact store
-  - Configure `MLFLOW_S3_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`
-- Connect training → MLflow:
-  - Use `mlflow.set_tracking_uri("http://mlflow:5000")`
-  - Log runs and register models
+  - Log runs 
+  - Export and register model weights 
 
 > **Milestone:** Train a model, view it in MLflow UI, and store artifacts in MinIO.
 

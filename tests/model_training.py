@@ -1,4 +1,5 @@
 import os
+
 os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
 
 from ultralytics import settings
@@ -53,14 +54,16 @@ if __name__ == "__main__":
 
     training_cfg.object_detector_arch = "custom_yolo"  # "yolo", "rtdetr", "custom_yolo"
     training_cfg.custom_yolo_kwargs = dict(
-        count_regressor_layers=22, # p5
+        count_regressor_layers=22,  # p5
         area_regressor_layers=16,
         roi_classifier_layers={"p3": 16, "p4": 19},
         fp_tp_loss_weight=3.,
         is_fp_tp_multiplier=False,
         count_loss_weight=1.,
         area_loss_weight=0.0,
-        roi_scale_factor=[2.0,],
+        roi_scale_factor=[
+            2.0,
+        ],
     )
 
     training_cfg.ultralytics_pos_weight = 1.
@@ -83,7 +86,7 @@ if __name__ == "__main__":
     training_cfg.cl_data_config_yaml = Path(training_cfg.yolo_yaml).resolve()
     training_cfg.cl_batch_size = training_cfg.batchsize
 
-    training_cfg.device = "cuda:0"
+    training_cfg.device = "cpu"  # "cuda:0"
 
     handler = TrainingManager(
         args=training_cfg,
