@@ -847,7 +847,7 @@ class RoiClassifierHead(torch.nn.Module):
         p4 = x.get("p4", None)
         gt_boxes = x.get("gt_bboxes")
         pred_boxes = x.get("pred_bboxes")
-        # target_labels = x.get("target_labels")
+        target_labels = x.get("target_labels")
         img = x.get("img")
 
         if p3 is None or p4 is None:
