@@ -1012,8 +1012,8 @@ class RoiClassifierHead(torch.nn.Module):
         # plt.imsave('test_img.jpg',img_bbox)
 
         # Encode original image crops
-        # with torch.no_grad():
-        img_features = self.image_encoder(original_crops)
+        with torch.no_grad():
+            img_features = self.image_encoder(original_crops)
 
         # Global average pooling to get feature vectors
         roi_feat_p3_pooled = F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
