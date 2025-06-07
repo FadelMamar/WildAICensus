@@ -85,14 +85,14 @@ if __name__ == "__main__":
             2.0,
         ],
         model=r"..\configs\yolo_configs\models\yolov8-p2.yaml",
-    ).load(r"..\base_models_weights\best.pt")
+    ) #.load(r"..\base_models_weights\best.pt")
 
     model.train(
-        data=r"..\configs\yolo_configs\data\data_config.yaml",
+        data=r"..\configs\yolo_configs\data\dataset_identification-detection.yaml",
         epochs=5,
-        batch=4,
-        freeze=0,
-        imgsz=640,
+        batch=64,
+        freeze=10,
+        imgsz=800,
         workers=0,
     )
     
