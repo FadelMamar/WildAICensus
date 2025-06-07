@@ -1,4 +1,5 @@
 import os
+
 os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
 
 from ultralytics import settings
@@ -26,7 +27,7 @@ if __name__ == "__main__":
     training_cfg.yolo_yaml = (
         r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
     )
-    training_cfg.yolo_arch_yaml =  r"yolo11n.pt"
+    training_cfg.yolo_arch_yaml = r"yolo11n.pt"
     training_cfg.path_weights = r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"
 
     training_cfg.ultralytics_pos_weight = 10.0
@@ -58,14 +59,15 @@ if __name__ == "__main__":
 
     training_cfg.object_detector_arch = "custom_yolo"  # "yolo", "rtdetr", "custom_yolo"
     training_cfg.custom_yolo_kwargs = dict(
-        count_regressor_layers=22, # p5
+        count_regressor_layers=22,  # p5
         area_regressor_layers=16,
         roi_classifier_layers={"p3": 16, "p4": 19},
-        fp_tp_loss_weight=0.,
-        is_fp_tp_multiplier=False,
+        fp_tp_loss_weight=0.0,
         count_loss_weight=3.0,
         area_loss_weight=0.0,
-        roi_scale_factor=[2.0,],
+        roi_scale_factor=[
+            2.0,
+        ],
     )
 
     training_cfg.cl_batch_size = (64,)
@@ -80,7 +82,7 @@ if __name__ == "__main__":
     training_cfg.cl_data_config_yaml = Path(training_cfg.yolo_yaml).resolve()
     training_cfg.cl_batch_size = training_cfg.batchsize
 
-    training_cfg.device = "cuda:0"
+    training_cfg.device = "cpu"  # "cuda:0"
 
     handler = TrainingManager(
         args=training_cfg,
