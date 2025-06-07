@@ -437,7 +437,7 @@ class CustomLoss(v8DetectionLoss):
         img_height: int,
         img_width: int,
         fg_mask: torch.Tensor,
-        max_num: int = 10,
+        max_num: int = 5,
         area_thresh: float = 100.0,
         scores_range: Tuple[float, float] = (0.4, 0.6),
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -452,7 +452,7 @@ class CustomLoss(v8DetectionLoss):
             img_height: Image height in pixels
             img_width: Image width in pixels
             fg_mask: Foreground mask [batch_size, n_predictions] indicating valid detections
-            max_num: Maximum number of boxes to sample per image
+            max_num: Maximum number of boxes to sample per negative image
             area_thresh: Minimum area threshold for valid bounding boxes
             scores_range: Score range for sampling (min_score, max_score)
 
@@ -460,7 +460,6 @@ class CustomLoss(v8DetectionLoss):
             Tuple of (selected_pred_bboxes, selected_gt_bboxes, selected_labels, image_indices)
         """
         batch_size = pred_scores.shape[0]
-        # device = pred_bboxes.device
 
         # Initialize output lists
         selected_pred_bboxes: List[torch.Tensor] = []
@@ -506,7 +505,7 @@ class CustomLoss(v8DetectionLoss):
                 scores=max_scores.detach(),
                 area_thresh=area_thresh,
                 scores_range=scores_range,
-                max_num=max_num,
+                max_num=fg_gt_bboxes.shape[0],
             )
 
             if valid_indices.numel() > 0:
@@ -697,6 +696,8 @@ class CustomLoss(v8DetectionLoss):
                 target_scores=target_scores,
                 image_idx=image_idx,
                 fg_mask=fg_mask,
+                max_num_boxes=2, # sampled per negative image
+                scores_range=(0.1,0.9)
             )
             loss[3] += fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
 
