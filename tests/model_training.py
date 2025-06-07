@@ -4,7 +4,7 @@ os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
 from ultralytics import settings
 
 # Update a setting
-settings.update({"mlflow": False})
+settings.update({"mlflow": True})
 
 from datalabeling.common.config import TrainingConfig
 from datalabeling.common.pipeline import ModelTrainingStep, Pipeline
@@ -26,15 +26,11 @@ if __name__ == "__main__":
     training_cfg.yolo_yaml = (
         r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
     )
-    training_cfg.yolo_arch_yaml =  r"yolo11n.pt"
+    training_cfg.yolo_arch_yaml =  r"..\configs\yolo_configs\models\yolo11s.yaml"
     training_cfg.path_weights = r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"
 
-    training_cfg.ultralytics_pos_weight = 10.0
-
     # training_cfg.cls_label_smoothing = 0.
-    # training_cfg.cls_num_classes = 2
-
-    training_cfg.weight_decay = 5e-4
+    # training_cfg.cls_num_classes = 2    
 
     # training_cfg.cls_data_dir = r"D:\PhD\Data per camp\Classification\cls-features"
     # training_cfg.cls_is_features = True
@@ -50,10 +46,9 @@ if __name__ == "__main__":
     training_cfg.project_name = "wildAI-detection"
     training_cfg.run_name = "yolo-custom-heads"
 
-    training_cfg.is_rtdetr = False
 
     training_cfg.lr0 = 3e-4
-    training_cfg.lrf = 1e-2
+    training_cfg.lrf = 1
     training_cfg.patience = 20
 
     training_cfg.object_detector_arch = "custom_yolo"  # "yolo", "rtdetr", "custom_yolo"
@@ -61,19 +56,27 @@ if __name__ == "__main__":
         count_regressor_layers=22, # p5
         area_regressor_layers=16,
         roi_classifier_layers={"p3": 16, "p4": 19},
-        fp_tp_loss_weight=0.,
+        fp_tp_loss_weight=3.,
         is_fp_tp_multiplier=False,
-        count_loss_weight=3.0,
+        count_loss_weight=1.,
         area_loss_weight=0.0,
         roi_scale_factor=[2.0,],
     )
 
-    training_cfg.cl_batch_size = (64,)
+    training_cfg.ultralytics_pos_weight = 1.
+    training_cfg.weight_decay = 5e-4
+
+    training_cfg.warmup_epochs = 0
+    training_cfg.dfl = 1.5 # 1.5
+    training_cfg.cls = .5 # 0.5
+    training_cfg.box = 7.5 # 7.5
+
+    training_cfg.cl_batch_size = (32,)
     training_cfg.use_continual_learning = True
-    training_cfg.cl_ratios = (0.5,)  # ratio = num_empty/num_non_empty
-    training_cfg.cl_epochs = (20,)
-    training_cfg.cl_freeze = (11,)
-    training_cfg.cl_lr0s = (1e-4,)
+    training_cfg.cl_ratios = (1.0,2.5,5)  # ratio = num_empty/num_non_empty
+    training_cfg.cl_epochs = (20,10,5)
+    training_cfg.cl_freeze = (11,14,20)
+    training_cfg.cl_lr0s = (1e-4,5e-5,1e-5)
     training_cfg.cl_save_dir = (
         r"D:\PhD\Data per camp\DetectionDataset\continuous_learning"
     )

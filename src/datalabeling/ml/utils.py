@@ -440,7 +440,7 @@ class CustomLoss(v8DetectionLoss):
                 pred_scores=pred_scores,
                 img_height=img_height,
                 img_width=img_width,
-                max_num=5,
+                max_num=2,
                 area_thresh=50**2,
             )
 
@@ -536,7 +536,7 @@ class CustomLoss(v8DetectionLoss):
             )
             loss[3] /= target_scores_sum
 
-        # TODO:  debug fp_tp
+        
         if (
             self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier
         ) and self.model.training:
@@ -551,7 +551,7 @@ class CustomLoss(v8DetectionLoss):
 
             scores_multiplier, fp_tp_loss = self.get_cnf_scores_multiplier_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
-                pred_bboxes=pred_bboxes.detach(),  # disable detach to allow gradient flowing through detection head as well
+                pred_bboxes=pred_bboxes, #.detach(),  # disable detach to allow gradient flowing through detection head as well
                 pred_scores=pred_scores.detach(),
                 batch_images=batch["img"],
                 target_labels=target_labels,
@@ -673,7 +673,7 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Dropout(p=0.2),
             nn.Linear(128, 128),
             nn.ReLU(),
-            nn.Dropout(p=0.2),
+            # nn.Dropout(p=0.2),
             nn.Linear(128, 1),
         )
 
@@ -681,49 +681,56 @@ class RoiClassifierHead(torch.nn.Module):
             reduction="sum"
         )  # nn.BCEWithLogitsLoss(reduction="sum")
 
-        # self.image_encoder = torch.hub.load(
-        #     "facebookresearch/dinov2", "dinov2_vits14_reg"
-        # )
+        self.image_encoder = torch.hub.load(
+            "facebookresearch/dinov2", "dinov2_vits14_reg"
+        )
         # self.image_encoder = torchvision.models.mobilenet_v3_small(weights="IMAGENET1K_V1")
         # self.image_encoder.classifier = nn.Sequential(torch.nn.Flatten(),
         #                                               nn.AdaptiveAvgPool1d(384)
         #                                             )
-        self.image_encoder = nn.Sequential(
-            nn.Conv2d(3, 64, kernel_size=3, stride=2),
-            nn.BatchNorm2d(64),
-            nn.ReLU(),
-            nn.Conv2d(64, 128, kernel_size=3, stride=2),
-            nn.BatchNorm2d(128),
-            nn.ReLU(),
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-        )
+        # self.image_encoder = nn.Sequential(
+        #     nn.Conv2d(3, 64, kernel_size=3, stride=2),
+        #     nn.BatchNorm2d(64),
+        #     nn.ReLU(),
+        #     nn.Conv2d(64, 128, kernel_size=3, stride=2),
+        #     nn.BatchNorm2d(128),
+        #     nn.ReLU(),
+        #     nn.AdaptiveAvgPool2d((1, 1)),
+        #     nn.Flatten(),
+        # )
 
-        self.device = "cpu"
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
         # self.register_buffer(
         #     "scale_factor", torch.Tensor(scale_factor), persistent=True
         # )
 
-        self.box_size = torch.Tensor([box_size])
+        self.box_size = torch.Tensor([box_size]).float()
 
     def forward(self, x: dict):
         p3 = x.get("p3", None)
         p4 = x.get("p4", None)
         gt_boxes = x.get("gt_bboxes")
         pred_boxes = x.get("pred_bboxes")
-        target_labels = x.get("target_labels")
+        # target_labels = x.get("target_labels")
         img = x.get("img")
 
-        device = p3.device
-        self.device = device
+        self.device = p3.device
+        num_preds = pred_boxes.shape[0]
 
-        img = img / 255.0 if torch.max(img) > 1 else img
-        self.image_encoder = self.image_encoder.to(device)
-        self.mlp = self.mlp.to(device)
-        gt_boxes = gt_boxes.to(device)
-        pred_boxes = pred_boxes.to(device)
-        self.box_size = self.box_size.to(device)
+        # randomly sample bboxes for faster training
+        max_number_bboxes = min(10,num_preds) 
+        sampled_indx = torch.randperm(num_preds,device=self.device)[:max_number_bboxes]
+
+        pred_boxes = pred_boxes.to(self.device)[sampled_indx]
+        img = img[sampled_indx]
+        gt_boxes = gt_boxes[sampled_indx] if gt_boxes.numel() > 0 else gt_boxes
+        
+        self.image_encoder = self.image_encoder.to(self.device)
+        self.mlp = self.mlp.to(self.device)
+        gt_boxes = gt_boxes.to(self.device)
+        
+        self.box_size = self.box_size.to(self.device)
 
         if gt_boxes.numel() > 0:
             box_ious = complete_intersection_over_union(
@@ -737,7 +744,7 @@ class RoiClassifierHead(torch.nn.Module):
 
         else:  # only negative samples
             num_boxes = pred_boxes.shape[0]
-            fp_tp_target_label = torch.zeros((num_boxes, 1)).to(device)
+            fp_tp_target_label = torch.zeros((num_boxes, 1)).to(self.device)
 
         if p3 is None or p4 is None:
             raise ValueError("p3 or p4 are not available")
@@ -822,9 +829,8 @@ class RoiClassifierHead(torch.nn.Module):
             confidence_multipliers: tensor (M,) with confidence adjustment factors
         """
 
-        device = p3.device
         image_size = img.shape[2:]
-        batch_indices = torch.arange(pred_boxes.shape[0], device=device).view(-1, 1)
+        batch_indices = torch.arange(pred_boxes.shape[0], device=self.device).view(-1, 1)
 
         # Prepare for RoI extraction
         all_roi_features = []
@@ -844,9 +850,9 @@ class RoiClassifierHead(torch.nn.Module):
             roi_boxes.append(gt_roi_boxes)
 
         # compute the difference between gt_roi_boxes and pred_roi_boxes
-        roi_feat_p3_pooled = torch.zeros(1, device=device)
-        roi_feat_p4_pooled = torch.zeros(1, device=device)
-        img_features = torch.zeros(1, device=device)
+        roi_feat_p3_pooled = torch.zeros(1, device=self.device)
+        roi_feat_p4_pooled = torch.zeros(1, device=self.device)
+        img_features = torch.zeros(1, device=self.device)
 
         for m, roi_box in zip(multipliers, roi_boxes):
             # RoI align on P3 (higher resolution)
@@ -884,8 +890,8 @@ class RoiClassifierHead(torch.nn.Module):
             # plt.imsave('test_img.jpg',img_bbox)
 
             # Encode original image crops
-            # with torch.no_grad():
-            img_features = m * self.image_encoder(original_crops) + img_features
+            with torch.no_grad():
+                img_features = m * self.image_encoder(original_crops) + img_features
 
             # Global average pooling to get feature vectors
             roi_feat_p3_pooled = (
