@@ -45,6 +45,21 @@ def load_yaml(path: str):
     return cfg
 
 
+def load_datasets(data_config_yaml: str) -> list[str]:
+    data_config = load_yaml(data_config_yaml)
+    paths = list()
+    root = data_config["path"]
+    for split in ["train", "val", "test"]:
+        try:
+            for p in data_config[split]:
+                path = os.path.join(root, p)
+                paths.append(path)
+        except Exception as e:
+            print(f"Failed to load datasets for conversion {split} --> ", e)
+
+    return paths
+
+
 def get_images_paths(
     images_dir: str,
     patterns: tuple = ("*.JPG", "*.jpg", "*.png", "*.PNG", "*.jpeg", "*.JPEG"),

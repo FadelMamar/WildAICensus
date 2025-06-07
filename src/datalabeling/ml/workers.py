@@ -512,11 +512,6 @@ class DetectionThread(threading.Thread):
                 results.extend(self._trim_result(res))
                 indices.extend(index.cpu().flatten().tolist())
 
-                # for b in range(batch.shape[0]):
-                #     results[i]
-
-        # self.count += 1
-
         results = {
             i: [res for j, res in enumerate(results) if i == indices[j]]
             for i in list(set(indices))
