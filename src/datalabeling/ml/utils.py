@@ -2,7 +2,7 @@ import logging
 import os
 import traceback
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Tuple, List, Optional
 import pandas as pd
 import numpy as np
 import yaml, json
@@ -262,7 +262,6 @@ class CustomLoss(v8DetectionLoss):
         model,
         pos_weight: float = 1.0,
         fp_tp_loss_weight: float = 0.0,
-        is_fp_tp_multiplier: bool = True,
         count_loss_weight=0.0,
         area_loss_weight=0.0,
     ):
@@ -271,7 +270,6 @@ class CustomLoss(v8DetectionLoss):
         self.fp_tp_loss_weight = fp_tp_loss_weight
         self.count_loss_weight = count_loss_weight
         self.area_loss_weight = area_loss_weight
-        self.is_fp_tp_multiplier = is_fp_tp_multiplier
 
         self.model = model
         self.count_loss = nn.SmoothL1Loss(reduction="sum")
@@ -320,9 +318,12 @@ class CustomLoss(v8DetectionLoss):
 
         return loss.sum()
 
-    def sample_tn(
-        self, img_height: int, img_width: int, w: int = 50, h: int = 50, num: int = 10
+    def _generate_synthetic_boxes(
+        self, img_height: int, img_width: int, area_thresh: float, num: int = 10
     ) -> torch.Tensor:
+        w = int(np.sqrt(area_thresh))
+        h = w
+
         xs = torch.randint(
             low=0,
             high=img_width - w,
@@ -344,83 +345,219 @@ class CustomLoss(v8DetectionLoss):
             boxes.append(box)
             count += 1
 
-        return torch.vstack(boxes)
+        return torch.vstack(boxes).to(self.device)
 
-    def sample_pred_by_area_score(
+    def _sample_pred(
+        self,
+        bboxes: torch.Tensor,
+        scores: torch.Tensor,
+        max_num: int,
+        area_thresh: Optional[float] = None,
+        scores_range: Optional[Tuple[float, float]] = (0.35, 0.6),
+    ) -> torch.Tensor:
+        """
+        Sample prediction indices based on bounding box area and score criteria.
+
+        Args:
+            bboxes: Bounding boxes [n_preds, 4] in xyxy format
+            scores: Prediction scores [n_preds]
+            max_num: Maximum number of indices to sample
+            area_thresh: Minimum area threshold for valid boxes
+            scores_range: Score range (min_score, max_score) for filtering
+
+        Returns:
+            Selected indices [n_selected] where n_selected <= max_num
+        """
+        n_preds = bboxes.shape[0]
+        device = bboxes.device
+
+        if n_preds == 0:
+            return torch.empty(0, dtype=torch.long, device=device)
+
+        # Compute bbox areas
+        widths = torch.clamp(bboxes[:, 2] - bboxes[:, 0], min=0)  # Ensure non-negative
+        heights = torch.clamp(bboxes[:, 3] - bboxes[:, 1], min=0)
+        areas = widths * heights
+
+        indices = torch.arange(n_preds, device=device)
+
+        # Create selection masks
+        area_mask = None
+        if area_thresh is not None and area_thresh > 0:
+            area_mask = areas >= area_thresh
+            if not area_mask.any():
+                area_mask = None
+
+        score_mask = None
+        if scores_range is not None and len(scores_range) == 2:
+            min_score, max_score = scores_range
+            score_mask = (scores >= min_score) & (scores <= max_score)
+            if not score_mask.any():
+                score_mask = None
+
+        # Combine masks
+        if area_mask is not None and score_mask is not None:
+            valid_mask = area_mask & score_mask
+        elif area_mask is not None:
+            valid_mask = area_mask
+        elif score_mask is not None:
+            valid_mask = score_mask
+        else:
+            valid_mask = None
+
+        # Fallback to non-degenerate boxes if no valid mask
+        if valid_mask is None or not valid_mask.any():
+            # Select boxes that are not degenerate (have positive area)
+            valid_mask = areas > 0
+            if not valid_mask.any():
+                # If all boxes are degenerate, return empty tensor
+                return torch.empty(0, dtype=torch.long, device=device)
+
+        valid_indices = indices[valid_mask]
+
+        # Randomly sample up to max_num indices
+        n_valid = valid_indices.shape[0]
+        if n_valid == 0:
+            return torch.empty(0, dtype=torch.long, device=device)
+
+        sample_size = min(max_num, n_valid)
+        if sample_size == n_valid:
+            return valid_indices
+
+        # Random sampling without replacement
+        random_idx = torch.randperm(n_valid, device=device)[:sample_size]
+        return valid_indices[random_idx]
+
+    def _sample_pred_by_score(
         self,
         pred_bboxes: torch.Tensor,
         pred_scores: torch.Tensor,
+        gt_bboxes: torch.Tensor,
+        target_labels: torch.Tensor,
         img_height: int,
         img_width: int,
-        max_num=10,
-        area_thresh=50**2,  #
-        scores_range: tuple = (0.3, 0.65),
-    ):
+        fg_mask: torch.Tensor,
+        max_num: int = 10,
+        area_thresh: float = 100.0,
+        scores_range: Tuple[float, float] = (0.4, 0.6),
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Sample bounding boxes based on a combination of bbox area and prediction scores.
 
         Args:
-            pred_bboxes: torch.Size([b, 34000, 4]) in xyxy format [x1, y1, x2, y2]
-            pred_scores: torch.Size([b, 34000, nc]) class prediction scores
-            top_k: Number of samples to select per image
-            area_weight: Weight for area component in sampling (0-1)
-            score_weight: Weight for score component in sampling (0-1)
+            pred_bboxes: Predicted bounding boxes [batch_size, n_predictions, 4] in xyxy format
+            pred_scores: Class prediction scores [batch_size, n_predictions, n_classes]
+            gt_bboxes: Ground truth bounding boxes [batch_size, n_gt, 4]
+            target_labels: Ground truth labels [batch_size, n_gt, n_classes]
+            img_height: Image height in pixels
+            img_width: Image width in pixels
+            fg_mask: Foreground mask [batch_size, n_predictions] indicating valid detections
+            max_num: Maximum number of boxes to sample per image
+            area_thresh: Minimum area threshold for valid bounding boxes
+            scores_range: Score range for sampling (min_score, max_score)
 
         Returns:
+            Tuple of (selected_pred_bboxes, selected_gt_bboxes, selected_labels, image_indices)
         """
-        batch_size, n_preds, n_classes = pred_scores.shape
+        batch_size = pred_scores.shape[0]
+        # device = pred_bboxes.device
 
-        selected_bboxes = []
-        image_idx = []
-        for i in range(batch_size):
-            box_size = int(np.sqrt(area_thresh))
-            boxes = self.sample_tn(
-                img_height=img_height,
-                img_width=img_width,
-                w=box_size,
-                h=box_size,
-                num=max_num,
+        # Initialize output lists
+        selected_pred_bboxes: List[torch.Tensor] = []
+        image_indices: List[torch.Tensor] = []
+        selected_gt_bboxes: List[torch.Tensor] = []
+        selected_labels: List[torch.Tensor] = []
+
+        for batch_idx in range(batch_size):
+            # Extract foreground predictions for current image
+            fg_indices = fg_mask[batch_idx]
+
+            if not fg_indices.any():
+                # No foreground detections - generate synthetic boxes
+                synthetic_boxes = self._generate_synthetic_boxes(
+                    img_height, img_width, area_thresh, max_num
+                )
+                selected_pred_bboxes.append(synthetic_boxes)
+                image_indices.append(
+                    torch.full(
+                        (synthetic_boxes.shape[0],), batch_idx, device=self.device
+                    )
+                )
+
+                # Add empty tensors for GT data
+                selected_gt_bboxes.append(torch.zeros_like(synthetic_boxes))
+                selected_labels.append(
+                    torch.full((synthetic_boxes.shape[0],), -1, device=self.device)
+                )
+                continue
+
+            # Get foreground predictions
+            fg_bboxes = pred_bboxes[batch_idx, fg_indices]  # [n_fg, 4]
+            fg_scores = pred_scores[batch_idx, fg_indices]  # [n_fg, n_classes]
+            fg_gt_bboxes = gt_bboxes[batch_idx, fg_indices]
+            fg_gt_labels = target_labels[batch_idx, fg_indices]
+
+            # Get max scores across classes
+            max_scores, _ = fg_scores.max(dim=1)  # [n_fg]
+
+            # Sample valid indices
+            valid_indices = self._sample_pred(
+                bboxes=fg_bboxes.detach(),
+                scores=max_scores.detach(),
+                area_thresh=area_thresh,
+                scores_range=scores_range,
+                max_num=max_num,
             )
 
-            selected_bboxes.append(boxes)
-            image_idx.append([i] * max_num)
+            if valid_indices.numel() > 0:
+                # Select valid predictions
+                selected_pred_bboxes.append(fg_bboxes[valid_indices])
+                image_indices.append(
+                    torch.full((valid_indices.shape[0],), batch_idx, device=self.device)
+                )
+                # Select corresponding GT data if available
+                selected_gt_bboxes.append(fg_gt_bboxes[valid_indices])
+                selected_labels.append(fg_gt_labels[valid_indices])
 
-        #     bboxes = pred_bboxes[i]  # [34000, 4]
-        #     scores, _ = pred_scores[i].max(dim=1)  # [34000,]
+            else:
+                # No valid prediction samples found - generate synthetic boxes
+                synthetic_boxes = self._generate_synthetic_boxes(
+                    img_height, img_width, area_thresh, fg_gt_bboxes.shape[0]
+                )
+                selected_pred_bboxes.append(synthetic_boxes)
+                image_indices.append(
+                    torch.full(
+                        (synthetic_boxes.shape[0],), batch_idx, device=self.device
+                    )
+                )
+                selected_gt_bboxes.append(fg_gt_bboxes)
+                selected_labels.append(fg_gt_labels)
 
-        #     # Compute bbox areas
-        #     widths = bboxes[:, 2] - bboxes[:, 0]  # x2 - x1
-        #     heights = bboxes[:, 3] - bboxes[:, 1]  # y2 - y1
-        #     areas = widths * heights  # Area = (x2 - x1) * (y2 - y1)
+        # Concatenate all results
+        final_pred_bboxes = (
+            torch.cat(selected_pred_bboxes, dim=0)
+            if selected_pred_bboxes
+            else torch.empty(0, 4, device=self.device)
+        )
+        final_image_indices = (
+            torch.cat(image_indices, dim=0)
+            if image_indices
+            else torch.empty(0, dtype=torch.long, device=self.device)
+        )
+        final_gt_bboxes = (
+            torch.cat(selected_gt_bboxes, dim=0)
+            if selected_gt_bboxes and selected_gt_bboxes[0].numel() > 0
+            else torch.empty(0, 4, device=self.device)
+        )
+        final_labels = (
+            torch.cat(selected_labels, dim=0)
+            if selected_labels and selected_labels[0].numel() > 0
+            else torch.empty(0, device=self.device)
+        )
 
-        #     # select based on area
-        #     selector_areas = areas >= area_thresh
+        return final_pred_bboxes, final_gt_bboxes, final_labels, final_image_indices
 
-        #     # select based on scores
-        #     selector_scores = (scores > min(scores_range)) & (scores < max(scores_range))
-
-        #     # selected
-        #     valid_mask = selector_areas & selector_scores
-        #     valid_indices = torch.arange(0, n_preds, device=pred_scores.device)
-        #     valid_indices = valid_indices[valid_mask]
-        #     if valid_indices.shape[0] == 0:
-        #         random_idx = torch.randint(low=0, high=valid_indices.shape[0], size=max_num)
-        #         pass
-        #     else:
-        #         # size = min(max_num, valid_indices.shape[0])
-        #         random_idx = torch.randint(low=0, high=valid_indices.shape[0], size=max_num)
-        #         valid_indices = valid_indices[random_idx]
-        #         # if size < max_num:
-        #         #     pass
-        # selected_bboxes.append(bboxes[valid_indices])
-        # image_idx.append([i] * max_num)
-
-        selected_bboxes = torch.vstack(selected_bboxes).to(self.device)
-        image_idx = torch.Tensor(image_idx).flatten().long().to(self.device)
-
-        return selected_bboxes, image_idx
-
-    def get_cnf_scores_multiplier_from_fptp(
+    def compute_loss_from_fptp(
         self,
         target_bboxes: torch.Tensor,
         pred_bboxes: torch.Tensor,
@@ -430,27 +567,31 @@ class CustomLoss(v8DetectionLoss):
         target_scores: torch.Tensor,
         fg_mask: torch.Tensor,
         image_idx: torch.Tensor,
+        max_num_boxes: int = 5,
+        box_area_thresh: int = 100,
+        scores_range: Tuple = (0.4, 0.6),
     ) -> Tuple[torch.Tensor]:
         # batch has only negative samples
 
-        if fg_mask.sum() < 1.0:
-            _, _, img_height, img_width = batch_images.shape
-            pred_bboxes, image_idx = self.sample_pred_by_area_score(
-                pred_bboxes=pred_bboxes,
-                pred_scores=pred_scores,
-                img_height=img_height,
-                img_width=img_width,
-                max_num=5,
-                area_thresh=50**2,
-            )
+        fg_mask = fg_mask > 0.0
 
-            gt_bboxes = target_bboxes[fg_mask > 0.0]
-            target_labels = target_labels[fg_mask > 0.0]
+        # max_num = int(fg_mask.sum()) if fg_mask.any() else num_max_boxes
+        # max_num = min(max_num,num_max_boxes)
+        # max_num = 5
 
-        else:
-            gt_bboxes = target_bboxes[fg_mask]
-            pred_bboxes = pred_bboxes[fg_mask]
-            target_labels = target_labels[fg_mask]
+        _, _, img_height, img_width = batch_images.shape
+        pred_bboxes, gt_bboxes, target_labels, image_idx = self._sample_pred_by_score(
+            pred_bboxes=pred_bboxes.detach(),
+            gt_bboxes=target_bboxes,
+            target_labels=target_labels,
+            pred_scores=pred_scores.detach(),
+            img_height=img_height,
+            img_width=img_width,
+            max_num=max_num_boxes,
+            area_thresh=box_area_thresh,
+            scores_range=scores_range,
+            fg_mask=fg_mask,
+        )
 
         p3_layer_idx = self.model.roi_classifier_layers["p3"]
         p4_layer_idx = self.model.roi_classifier_layers["p4"]
@@ -537,11 +678,9 @@ class CustomLoss(v8DetectionLoss):
             loss[3] /= target_scores_sum
 
         # TODO:  debug fp_tp
-        if (
-            self.fp_tp_loss_weight > 0.0 or self.is_fp_tp_multiplier
-        ) and self.model.training:
+        if (self.fp_tp_loss_weight > 0.0) and self.model.training:
             if fg_mask.sum() < 1.0:  # batch has only negative samples
-                bbox_idx = target_gt_idx[fg_mask > 0.0]  # tensor([])
+                bbox_idx = target_gt_idx[fg_mask > 0.0].cpu()  # tensor([])
                 image_idx = bbox_idx.clone()  # tensor([])
             else:
                 bbox_idx = target_gt_idx[fg_mask].cpu()  # valid bbox indices
@@ -549,7 +688,7 @@ class CustomLoss(v8DetectionLoss):
                     batch["batch_idx"][bbox_idx].long().cpu()
                 )  # mapping img -> bbox
 
-            scores_multiplier, fp_tp_loss = self.get_cnf_scores_multiplier_from_fptp(
+            fp_tp_loss = self.compute_loss_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
                 pred_bboxes=pred_bboxes.detach(),  # disable detach to allow gradient flowing through detection head as well
                 pred_scores=pred_scores.detach(),
@@ -559,10 +698,6 @@ class CustomLoss(v8DetectionLoss):
                 image_idx=image_idx,
                 fg_mask=fg_mask,
             )
-
-            # if self.is_fp_tp_multiplier:
-            #     pred_scores[fg_mask] *= scores_multiplier
-            # else:
             loss[3] += fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
 
         # Cls loss
@@ -699,7 +834,7 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Flatten(),
         )
 
-        self.device = "cpu"
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
         # self.register_buffer(
         #     "scale_factor", torch.Tensor(scale_factor), persistent=True
@@ -715,47 +850,61 @@ class RoiClassifierHead(torch.nn.Module):
         target_labels = x.get("target_labels")
         img = x.get("img")
 
-        device = p3.device
-        self.device = device
-
-        img = img / 255.0 if torch.max(img) > 1 else img
-        self.image_encoder = self.image_encoder.to(device)
-        self.mlp = self.mlp.to(device)
-        gt_boxes = gt_boxes.to(device)
-        pred_boxes = pred_boxes.to(device)
-        self.box_size = self.box_size.to(device)
-
-        if gt_boxes.numel() > 0:
-            box_ious = complete_intersection_over_union(
-                preds=pred_boxes.detach(), target=gt_boxes, aggregate=False
-            )
-            best_iou, best_gt_idx = box_ious.max(dim=1)
-
-            fp_tp_target_label = best_iou.unsqueeze(1).clamp(
-                0.0
-            )  # (best_iou > self.tp_iou_threshold)*1
-
-        else:  # only negative samples
-            num_boxes = pred_boxes.shape[0]
-            fp_tp_target_label = torch.zeros((num_boxes, 1)).to(device)
-
         if p3 is None or p4 is None:
             raise ValueError("p3 or p4 are not available")
 
-        # Predict confidence multipliers
-        features = self._extract_roi_features(
-            gt_boxes=gt_boxes,
-            pred_boxes=pred_boxes,
+        self.device = p3.device
+
+        self.image_encoder = self.image_encoder.to(self.device)
+        self.mlp = self.mlp.to(self.device)
+        gt_boxes = gt_boxes.to(self.device)
+        pred_boxes = pred_boxes.to(self.device)
+        self.box_size = self.box_size.to(self.device)
+
+        positive_mask = target_labels > -1.0
+        fp_tp_target_label = torch.zeros_like(target_labels).float()
+
+        # extract ROI features for pred
+        pred_features = self._extract_roi_features(
+            boxes=pred_boxes,
             p3=p3,
             p4=p4,
             roi_align_shape=(self.box_size, self.box_size),
             img=img,
         )
+        features = torch.zeros_like(pred_features)
+
+        if positive_mask.any():
+            # get ious
+            box_ious = complete_intersection_over_union(
+                preds=pred_boxes.detach()[positive_mask],
+                target=gt_boxes[positive_mask],
+                aggregate=False,
+            )
+            best_iou, best_gt_idx = box_ious.max(dim=1)
+
+            # update target
+            fp_tp_target_label[positive_mask] = best_iou.clamp(
+                0.0
+            )  # (best_iou > self.tp_iou_threshold)*1
+
+            # extract positive roi features
+            gt_features_pos = self._extract_roi_features(
+                boxes=gt_boxes[positive_mask],
+                p3=p3[positive_mask],
+                p4=p4[positive_mask],
+                roi_align_shape=(self.box_size, self.box_size),
+                img=img[positive_mask],
+            )
+            features[positive_mask] = gt_features_pos
+
+        else:
+            features = pred_features
 
         logits = self.mlp(features)  # (M, nc)
-        loss = self.loss(logits, fp_tp_target_label)
+        loss = self.loss(logits, fp_tp_target_label.unsqueeze(1))
 
-        return logits.sigmoid(), loss
+        return loss
 
     def _extract_patches(self, images: torch.Tensor, boxes: torch.Tensor):
         """
@@ -806,13 +955,12 @@ class RoiClassifierHead(torch.nn.Module):
         boxes = boxes.to(self.device)
         return image_patches
 
-    def _extract_roi_features(self, gt_boxes, pred_boxes, p3, p4, img, roi_align_shape):
+    def _extract_roi_features(self, boxes, p3, p4, img, roi_align_shape):
         """
         Extract multi-scale RoI features and compute confidence multipliers
 
         Args:
-            target: tensor (M, 4) with [x1, y1, x2, y2,]
-            pred: tensor (M, 4) with [x1, y1, x2, y2,]
+            boxes: tensor (M, 4) with [x1, y1, x2, y2,]
             p3: feature map from YOLO P3 level (B, C, H, W)
             p4: feature map from YOLO P4 level (B, C, H, W)
             original_image: tensor (B, 3, H, W) original input image
@@ -822,91 +970,66 @@ class RoiClassifierHead(torch.nn.Module):
             confidence_multipliers: tensor (M,) with confidence adjustment factors
         """
 
-        device = p3.device
         image_size = img.shape[2:]
-        batch_indices = torch.arange(pred_boxes.shape[0], device=device).view(-1, 1)
-
-        # Prepare for RoI extraction
-        all_roi_features = []
 
         # Expand boxes by scale factor around center
-        scaled_pred_boxes = self._expand_boxes(pred_boxes, image_size)
-        pred_roi_boxes = torch.cat([batch_indices, scaled_pred_boxes], dim=1)
-        multipliers = [-1]
-        roi_boxes = [
-            pred_roi_boxes,
-        ]
+        scaled_boxes = self._expand_boxes(boxes, image_size)
+        batch_indices = torch.arange(boxes.shape[0], device=self.device).view(-1, 1)
+        roi_box = torch.cat([batch_indices, scaled_boxes], dim=1)
 
-        if gt_boxes.numel() > 0:
-            scaled_gt_boxes = self._expand_boxes(gt_boxes, image_size)
-            gt_roi_boxes = torch.cat([batch_indices, scaled_gt_boxes], dim=1)
-            multipliers.append(1)
-            roi_boxes.append(gt_roi_boxes)
+        # RoI align on P3 (higher resolution)
+        roi_features_p3 = roi_align(
+            p3,
+            roi_box,
+            output_size=roi_align_shape,
+            spatial_scale=1.0 / 8,  # P3 stride
+            aligned=True,
+        )  # (M, C, *roi_align_shape)
 
-        # compute the difference between gt_roi_boxes and pred_roi_boxes
-        roi_feat_p3_pooled = torch.zeros(1, device=device)
-        roi_feat_p4_pooled = torch.zeros(1, device=device)
-        img_features = torch.zeros(1, device=device)
+        # RoI align on P4 (lower resolution, larger receptive field)
+        roi_features_p4 = roi_align(
+            p4,
+            roi_box,
+            output_size=roi_align_shape,
+            spatial_scale=1.0 / 16,  # P4 stride
+            aligned=True,
+        )  # (M, C, *roi_align_shape)
 
-        for m, roi_box in zip(multipliers, roi_boxes):
-            # RoI align on P3 (higher resolution)
-            roi_features_p3 = roi_align(
-                p3,
-                roi_box,
-                output_size=roi_align_shape,
-                spatial_scale=1.0 / 8,  # P3 stride
-                aligned=True,
-            )  # (M, C, *roi_align_shape)
+        # RoI original images
+        original_crops = roi_align(
+            img,
+            roi_box,
+            output_size=roi_align_shape,  # Standard input size for image encoder
+            spatial_scale=1.0,  # Original image scale
+            aligned=True,
+        )  # (M, 3, *roi_align_shape)
 
-            # RoI align on P4 (lower resolution, larger receptive field)
-            roi_features_p4 = roi_align(
-                p4,
-                roi_box,
-                output_size=roi_align_shape,
-                spatial_scale=1.0 / 16,  # P4 stride
-                aligned=True,
-            )  # (M, C, *roi_align_shape)
+        # original_crops = self._extract_patches(images=img, boxes=roi_box[:, 1:])
+        # grid_crops = torchvision.utils.make_grid(img).permute(1,2,0)
+        # import matplotlib.pyplot as plt
+        # plt.imsave('test.jpg',grid_crops)
+        # img_bbox = torchvision.utils.draw_bounding_boxes(img[0],roi_box[:,1:].int()).permute(1,2,0)
+        # plt.imsave('test_img.jpg',img_bbox)
 
-            # RoI original images
-            original_crops = roi_align(
-                img,
-                roi_box,
-                output_size=roi_align_shape,  # Standard input size for image encoder
-                spatial_scale=1.0,  # Original image scale
-                aligned=True,
-            )  # (M, 3, *roi_align_shape)
+        # Encode original image crops
+        # with torch.no_grad():
+        img_features = self.image_encoder(original_crops)
 
-            # original_crops = self._extract_patches(images=img, boxes=roi_box[:, 1:])
-            # grid_crops = torchvision.utils.make_grid(img).permute(1,2,0)
-            # import matplotlib.pyplot as plt
-            # plt.imsave('test.jpg',grid_crops)
-            # img_bbox = torchvision.utils.draw_bounding_boxes(img[0],roi_box[:,1:].int()).permute(1,2,0)
-            # plt.imsave('test_img.jpg',img_bbox)
-
-            # Encode original image crops
-            # with torch.no_grad():
-            img_features = m * self.image_encoder(original_crops) + img_features
-
-            # Global average pooling to get feature vectors
-            roi_feat_p3_pooled = (
-                m * F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
-                + roi_feat_p3_pooled
-            )
-            roi_feat_p4_pooled = (
-                m * F.adaptive_avg_pool2d(roi_features_p4, (1, 1)).flatten(1)
-                + roi_feat_p4_pooled
-            )
+        # Global average pooling to get feature vectors
+        roi_feat_p3_pooled = F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
+        roi_feat_p4_pooled = F.adaptive_avg_pool2d(roi_features_p4, (1, 1)).flatten(1)
 
         # Concatenate P3 and P4 features for this scale
-        scale_features = torch.cat(
-            [roi_feat_p3_pooled, roi_feat_p4_pooled, img_features], dim=1
+        features = torch.cat(
+            [
+                roi_feat_p4_pooled,
+                roi_feat_p3_pooled,
+                img_features,
+            ],
+            dim=1,
         )
-        all_roi_features.append(scale_features)
 
-        # Concatenate all scales
-        multiscale_features = torch.cat(all_roi_features, dim=1)
-
-        return multiscale_features
+        return features
 
     def _expand_boxes(self, boxes: torch.Tensor, image_size: tuple):
         """
@@ -959,7 +1082,6 @@ class DetectionSystem(DetectionModel):
         ],
         pos_weight: float = 1.0,
         fp_tp_loss_weight: float = 0.0,
-        is_fp_tp_multiplier: bool = False,
         count_loss_weight: float = 0.0,
         area_loss_weight: float = 0.0,
         **kwargs,
@@ -975,7 +1097,6 @@ class DetectionSystem(DetectionModel):
 
         self.pos_weight = pos_weight
         self.fp_tp_loss_weight = fp_tp_loss_weight
-        self.is_fp_tp_multiplier = is_fp_tp_multiplier
         self.count_loss_weight = count_loss_weight
         self.area_loss_weight = area_loss_weight
 
@@ -985,9 +1106,6 @@ class DetectionSystem(DetectionModel):
         assert count_loss_weight >= 0.0
         assert area_loss_weight >= 0.0
         assert fp_tp_loss_weight >= 0.0
-
-        if is_fp_tp_multiplier:
-            assert fp_tp_loss_weight == 0, "should be 0 when is_fp_tp_multiplier=True"
 
         assert isinstance(roi_classifier_layers, dict)
         assert (
@@ -1100,7 +1218,6 @@ class DetectionSystem(DetectionModel):
             model=self,
             pos_weight=self.pos_weight,
             fp_tp_loss_weight=self.fp_tp_loss_weight,
-            is_fp_tp_multiplier=self.is_fp_tp_multiplier,
             count_loss_weight=self.count_loss_weight,
             area_loss_weight=self.area_loss_weight,
         )
@@ -1168,7 +1285,6 @@ class CustomYOLO(YOLO):
         roi_scale_factor: list[float] = [2.0, 3.0, 4.0],
         pos_weight: float = 1.0,
         fp_tp_loss_weight: float = 0.0,
-        is_fp_tp_multiplier: bool = False,
         count_loss_weight: float = 0.0,
         area_loss_weight: float = 0.0,
         model="yolo11n.pt",
@@ -1205,7 +1321,7 @@ class CustomYOLO(YOLO):
         args_det_system["fp_tp_loss_weight"] = fp_tp_loss_weight
         args_det_system["count_loss_weight"] = count_loss_weight
         args_det_system["area_loss_weight"] = area_loss_weight
-        args_det_system["is_fp_tp_multiplier"] = is_fp_tp_multiplier
+        # args_det_system["is_fp_tp_multiplier"] = is_fp_tp_multiplier
 
         # add to environment variables
         os.environ["args_det_system"] = json.dumps(args_det_system)
