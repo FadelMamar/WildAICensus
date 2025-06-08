@@ -7,6 +7,7 @@ import pandas as pd
 import numpy as np
 import yaml, json
 from itertools import product
+from random import shuffle
 
 from ultralytics.utils.loss import v8DetectionLoss, E2EDetectLoss
 from ultralytics.models.yolo.detect import DetectionTrainer
@@ -14,8 +15,10 @@ from ultralytics.nn.tasks import DetectionModel
 from ultralytics.utils.tal import make_anchors
 from ultralytics.utils.ops import xywh2xyxy
 from ultralytics import YOLO
-import albumentations as A
+from ultralytics.data.utils import polygon2mask
 
+from transformers import AutoModel
+import albumentations as A
 
 import torch
 import torch.nn as nn
@@ -262,29 +265,32 @@ class CustomLoss(v8DetectionLoss):
         model,
         pos_weight: float = 1.0,
         fp_tp_loss_weight: float = 0.0,
-        count_loss_weight=0.0,
-        area_loss_weight=0.0,
+        count_loss_weight: float = 0.0,
+        area_loss_weight: float = 0.0,
+        mask_loss_weight: float = 0.0,
     ):
         super().__init__(model=model)
 
         self.fp_tp_loss_weight = fp_tp_loss_weight
         self.count_loss_weight = count_loss_weight
         self.area_loss_weight = area_loss_weight
+        self.mask_loss_weight = mask_loss_weight
 
         self.model = model
         self.count_loss = nn.SmoothL1Loss(reduction="sum")
         self.area_loss = nn.SmoothL1Loss(reduction="sum")
 
-        assert isinstance(pos_weight, float)
-        pos_weight = (
-            torch.Tensor(
-                [
-                    pos_weight,
-                ]
+        assert isinstance(pos_weight, float) or pos_weight is None
+        if pos_weight:
+            pos_weight = (
+                torch.Tensor(
+                    [
+                        pos_weight,
+                    ]
+                )
+                .reshape(1, 1)
+                .to(self.device)
             )
-            .reshape(1, 1)
-            .to(self.device)
-        )
         self.bce = torch.nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
 
         logger.debug(
@@ -318,6 +324,19 @@ class CustomLoss(v8DetectionLoss):
 
         return loss.sum()
 
+    def compute_mask_loss(
+        self, gt_boxes: torch.Tensor, fg_mask: torch.Tensor, batch_images: torch.Tensor
+    ):
+        p3_layer_idx = self.model.mask_p3_layer_indx
+        x = dict(
+            p3=self.model.activations[p3_layer_idx],
+            img=batch_images,
+            gt_boxes=gt_boxes,
+            fg_mask=fg_mask,
+        )
+
+        return self.model.mask_head(**x)
+
     def _generate_synthetic_boxes(
         self, img_height: int, img_width: int, area_thresh: float, num: int = 10
     ) -> torch.Tensor:
@@ -336,14 +355,12 @@ class CustomLoss(v8DetectionLoss):
             size=(num,),
         )
 
-        count = 0
         boxes = []
-        for x, y in product(xs, ys):
-            if count == num:
-                break
+        pairs = list(product(xs, ys))
+        shuffle(pairs)  # shuffle
+        for x, y in pairs[:num]:
             box = torch.Tensor([x, y, x + w, y + h])
             boxes.append(box)
-            count += 1
 
         return torch.vstack(boxes).to(self.device)
 
@@ -437,8 +454,8 @@ class CustomLoss(v8DetectionLoss):
         img_height: int,
         img_width: int,
         fg_mask: torch.Tensor,
-        max_num: int = 5,
-        area_thresh: float = 100.0,
+        max_num_tn: int = 5,
+        area_thresh: float = 400,
         scores_range: Tuple[float, float] = (0.4, 0.6),
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -452,7 +469,7 @@ class CustomLoss(v8DetectionLoss):
             img_height: Image height in pixels
             img_width: Image width in pixels
             fg_mask: Foreground mask [batch_size, n_predictions] indicating valid detections
-            max_num: Maximum number of boxes to sample per negative image
+            max_num_tn: Maximum number of boxes to sample per negative image
             area_thresh: Minimum area threshold for valid bounding boxes
             scores_range: Score range for sampling (min_score, max_score)
 
@@ -474,7 +491,7 @@ class CustomLoss(v8DetectionLoss):
             if not fg_indices.any():
                 # No foreground detections - generate synthetic boxes
                 synthetic_boxes = self._generate_synthetic_boxes(
-                    img_height, img_width, area_thresh, max_num
+                    img_height, img_width, area_thresh, max_num_tn
                 )
                 selected_pred_bboxes.append(synthetic_boxes)
                 image_indices.append(
@@ -563,12 +580,12 @@ class CustomLoss(v8DetectionLoss):
         pred_scores: torch.Tensor,
         batch_images: torch.Tensor,
         target_labels: torch.Tensor,
-        target_scores: torch.Tensor,
+        # target_scores: torch.Tensor,
         fg_mask: torch.Tensor,
         image_idx: torch.Tensor,
-        max_num_boxes: int = 5,
+        max_num_tn: int = 5,
         box_area_thresh: int = 100,
-        scores_range: Tuple = (0.4, 0.6),
+        scores_range: Tuple = (0.1, 0.9),
     ) -> Tuple[torch.Tensor]:
         # batch has only negative samples
 
@@ -586,7 +603,7 @@ class CustomLoss(v8DetectionLoss):
             pred_scores=pred_scores.detach(),
             img_height=img_height,
             img_width=img_width,
-            max_num=max_num_boxes,
+            max_num_tn=max_num_tn,
             area_thresh=box_area_thresh,
             scores_range=scores_range,
             fg_mask=fg_mask,
@@ -619,6 +636,7 @@ class CustomLoss(v8DetectionLoss):
             self.count_loss_weight > 0.0
             or self.area_loss_weight > 0.0
             or self.fp_tp_loss_weight > 0.0
+            or self.mask_loss_weight > 0.0
         ):
             loss = torch.zeros(4, device=self.device)  # box, cls, dfl, auxilary
         else:
@@ -671,12 +689,11 @@ class CustomLoss(v8DetectionLoss):
         if (
             self.count_loss_weight > 0.0 or self.area_loss_weight > 0.0
         ) and self.model.training:
-            loss[3] += self.compute_count_area_loss(
+            area_count_loss = self.compute_count_area_loss(
                 targets, scale_tensor=imgsz[[1, 0, 1, 0]]
             )
-            loss[3] /= target_scores_sum
+            loss[3] += area_count_loss / target_scores_sum
 
-        # TODO:  debug fp_tp
         if (self.fp_tp_loss_weight > 0.0) and self.model.training:
             if fg_mask.sum() < 1.0:  # batch has only negative samples
                 bbox_idx = target_gt_idx[fg_mask > 0.0].cpu()  # tensor([])
@@ -689,19 +706,28 @@ class CustomLoss(v8DetectionLoss):
 
             fp_tp_loss = self.compute_loss_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
-                pred_bboxes=pred_bboxes, #.detach(),  # disable detach to allow gradient flowing through detection head as well
+                pred_bboxes=pred_bboxes,  # .detach(),  # disable detach to allow gradient flowing through detection head as well
                 pred_scores=pred_scores.detach(),
                 batch_images=batch["img"],
                 target_labels=target_labels,
-                target_scores=target_scores,
+                # target_scores=target_scores,
                 image_idx=image_idx,
                 fg_mask=fg_mask,
-                max_num_boxes=2, # sampled per negative image
-                scores_range=(0.1,0.9)
+                max_num_tn=5,
+                box_area_thresh=2500,
+                scores_range=(0.1, 0.9),
             )
-            loss[3] += fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
+            loss[3] = loss[3] + fp_tp_loss * self.fp_tp_loss_weight / target_scores_sum
 
-        # Cls loss
+        if self.mask_loss_weight > 0.0 and self.model.training:
+            mask_loss = self.compute_mask_loss(
+                target_bboxes / stride_tensor,
+                fg_mask=fg_mask,
+                batch_images=batch["img"],
+            )
+            loss[3] = loss[3] + mask_loss * self.mask_loss_weight / target_scores_sum
+
+        # Cls loss -> Objectness
         loss[1] = (
             self.bce(pred_scores, target_scores.to(dtype)).sum() / target_scores_sum
         )  # BCE
@@ -787,6 +813,121 @@ class RegressorHead(torch.nn.Module):
         return self.mlp(x)
 
 
+class MaskHead(torch.nn.Module):
+    def __init__(
+        self,
+    ):
+        super().__init__()
+
+        self.upsampler = nn.Sequential(
+            # nn.LazyConv2d(64, kernel_size=1, stride=1, padding=0),
+            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # *2
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # *4
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.ConvTranspose2d(16, 1, 3, stride=2, padding=1, output_padding=1),  # *8
+            nn.BatchNorm2d(1),
+        )
+
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+    def _bbox_to_mask(self, bboxes: torch.Tensor, imgsz: tuple = (800, 800)):
+        """
+        Convert multiple bounding boxes to polygons in batch.
+
+        Args:
+            bboxes: Tensor/array of shape (N, 4) with N bounding boxes
+            format: Output format - 'numpy' or 'torch'
+
+        Returns:
+            mask
+        """
+        if isinstance(bboxes, list):
+            bboxes = torch.Tensor(bboxes)
+        elif isinstance(bboxes, np.ndarray):
+            bboxes = torch.from_numpy(bboxes).float()
+        else:
+            bboxes = bboxes.cpu()
+
+        # Extract coordinates
+        x1, y1, x2, y2 = bboxes[:, 0], bboxes[:, 1], bboxes[:, 2], bboxes[:, 3]
+
+        polygons = (
+            torch.stack(
+                [
+                    torch.stack([x1, y1], dim=1),  # top-left
+                    torch.stack([x2, y1], dim=1),  # top-right
+                    torch.stack([x2, y2], dim=1),  # bottom-right
+                    torch.stack([x1, y2], dim=1),  # bottom-left
+                ],
+                dim=1,
+            )
+            .cpu()
+            .tolist()
+        )
+        polygons = [np.array(p) for p in polygons]
+
+        mask = polygon2mask(
+            imgsz,  # tuple
+            polygons,  # input as list
+            color=1,  # 8-bit binary
+            downsample_ratio=1,
+        )
+        mask = torch.from_numpy(mask).int()
+
+        return mask
+
+    def forward(
+        self,
+        p3: torch.Tensor,
+        gt_boxes: torch.Tensor,
+        fg_mask: torch.Tensor,
+        img: torch.Tensor,
+    ):
+        if p3 is None:
+            raise ValueError("p3 is not available")
+        else:
+            assert all([p3.shape[i] == (img.shape[i] / 8) for i in [2, 3]]), (
+                f"p3:{p3.shape[2:]} != img:{img.shape[2:]}/8"
+            )
+
+        self.device = p3.device
+        self.upsampler = self.upsampler.to(self.device)
+
+        B, C, H, W = img.shape
+
+        if fg_mask.sum() < 1:
+            target_mask = torch.zeros(B, 1, H, W).to(self.device)
+
+        else:
+            target_mask = []
+            for batch_idx in range(img.shape[0]):
+                # Extract foreground predictions for current image
+                fg_indices = fg_mask[batch_idx]
+                if not fg_indices.any():
+                    # No foreground detections in img
+                    target_mask.append(torch.zeros(1, H, W).to(self.device))
+                    continue
+                # Get foreground masks
+                fg_gt_bboxes = gt_boxes[batch_idx, fg_indices]
+                mask = self._bbox_to_mask(fg_gt_bboxes, imgsz=img.shape[2:])
+                mask = mask.unsqueeze(0).to(self.device)
+                target_mask.append(mask)
+            target_mask = torch.stack(target_mask, dim=0)
+
+        # pos_weight = fg_mask.sum().to(self.device).clamp(0.,10.)
+        # pos_weight = pos_weight if pos_weight > 0 else None
+        pos_weight = None
+
+        logits = self.upsampler(p3)
+        loss = nn.functional.binary_cross_entropy_with_logits(
+            logits, target_mask, reduction="sum", pos_weight=pos_weight
+        )
+        return loss
+
+
 class RoiClassifierHead(torch.nn.Module):
     def __init__(
         self,
@@ -795,13 +936,6 @@ class RoiClassifierHead(torch.nn.Module):
     ):
         super().__init__()
 
-        # assert isinstance(scale_factor, list), (
-        #     f"Expected 'list' but received {type(scale_factor)}"
-        # )
-        # assert all([a > 0.99 for a in scale_factor]), (
-        #     "All scaling factors must be greater than 1.0"
-        # )
-
         self.mlp = nn.Sequential(
             nn.AdaptiveAvgPool1d(384),
             nn.Linear(384, 128),
@@ -809,21 +943,22 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Dropout(p=0.2),
             nn.Linear(128, 128),
             nn.ReLU(),
-            # nn.Dropout(p=0.2),
             nn.Linear(128, 1),
         )
 
-        self.loss = nn.SmoothL1Loss(
-            reduction="sum"
-        )  # nn.BCEWithLogitsLoss(reduction="sum")
+        # self.loss = nn.SmoothL1Loss(
+        #     reduction="sum"
+        # )
+        self.loss = nn.BCEWithLogitsLoss(reduction="sum")
 
-        self.image_encoder = torch.hub.load(
-            "facebookresearch/dinov2", "dinov2_vits14_reg"
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        self.image_encoder = AutoModel.from_pretrained(
+            "facebook/dinov2-with-registers-small",
+            torch_dtype="auto",
+            device_map="auto",
         )
-        # self.image_encoder = torchvision.models.mobilenet_v3_small(weights="IMAGENET1K_V1")
-        # self.image_encoder.classifier = nn.Sequential(torch.nn.Flatten(),
-        #                                               nn.AdaptiveAvgPool1d(384)
-        #                                             )
+        # self.tain_image_encoder = False
         # self.image_encoder = nn.Sequential(
         #     nn.Conv2d(3, 64, kernel_size=3, stride=2),
         #     nn.BatchNorm2d(64),
@@ -835,11 +970,7 @@ class RoiClassifierHead(torch.nn.Module):
         #     nn.Flatten(),
         # )
 
-        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
-
-        # self.register_buffer(
-        #     "scale_factor", torch.Tensor(scale_factor), persistent=True
-        # )
+        # self._non_persistent_buffers_set.add('image_encoder')
 
         self.box_size = torch.Tensor([box_size]).float()
 
@@ -852,7 +983,7 @@ class RoiClassifierHead(torch.nn.Module):
         img = x.get("img")
 
         if p3 is None or p4 is None:
-            raise ValueError("p3 or p4 are not available")
+            raise ValueError("p3 or p4 is not available")
 
         self.device = p3.device
 
@@ -1013,8 +1144,16 @@ class RoiClassifierHead(torch.nn.Module):
         # plt.imsave('test_img.jpg',img_bbox)
 
         # Encode original image crops
+        # if self.tain_image_encoder:
+        #     img_features = self.image_encoder(original_crops)
+        # else:
         with torch.no_grad():
             img_features = self.image_encoder(original_crops)
+
+        try:
+            img_features = img_features.pooler_output
+        except:
+            pass
 
         # Global average pooling to get feature vectors
         roi_feat_p3_pooled = F.adaptive_avg_pool2d(roi_features_p3, (1, 1)).flatten(1)
@@ -1078,11 +1217,13 @@ class DetectionSystem(DetectionModel):
         roi_classifier_layers: dict = {},
         count_regressor_layers: int = None,
         area_regressor_layers: int = None,
+        mask_p3_layer_indx: int = None,
         roi_scale_factor: list = [
             2.0,
         ],
-        pos_weight: float = 1.0,
+        pos_weight: float | None = 1.0,
         fp_tp_loss_weight: float = 0.0,
+        mask_loss_weight: float = 0.0,
         count_loss_weight: float = 0.0,
         area_loss_weight: float = 0.0,
         **kwargs,
@@ -1100,10 +1241,12 @@ class DetectionSystem(DetectionModel):
         self.fp_tp_loss_weight = fp_tp_loss_weight
         self.count_loss_weight = count_loss_weight
         self.area_loss_weight = area_loss_weight
+        self.mask_loss_weight = mask_loss_weight
 
-        assert pos_weight > 0.0, (
-            f"Expected positive weight > 0.0 but received {pos_weight}"
-        )
+        if pos_weight is not None:
+            assert pos_weight > 0.0, (
+                f"Expected positive weight > 0.0 but received {pos_weight}"
+            )
         assert count_loss_weight >= 0.0
         assert area_loss_weight >= 0.0
         assert fp_tp_loss_weight >= 0.0
@@ -1130,6 +1273,10 @@ class DetectionSystem(DetectionModel):
         self.area_regressor_layers = area_regressor_layers
         if self.area_regressor_layers and area_loss_weight > 0.0:
             self.area_regressor = RegressorHead(out_channels=64)
+
+        self.mask_p3_layer_indx = mask_p3_layer_indx
+        if self.mask_p3_layer_indx and self.mask_loss_weight > 0.0:
+            self.mask_head = MaskHead()
 
         self._is_operational = True
 
@@ -1160,9 +1307,11 @@ class DetectionSystem(DetectionModel):
             return hook
 
         # registering hooks to intermediate layers
-        layers = [self.count_regressor_layers, self.area_regressor_layers] + list(
-            self.roi_classifier_layers.values()
-        )
+        layers = [
+            self.count_regressor_layers,
+            self.area_regressor_layers,
+            self.mask_p3_layer_indx,
+        ] + list(self.roi_classifier_layers.values())
         layers_to_register = [a for a in layers if a is not None]
 
         for l in layers_to_register:
@@ -1283,11 +1432,13 @@ class CustomYOLO(YOLO):
         count_regressor_layers: int = None,
         area_regressor_layers: int = None,
         roi_classifier_layers: dict = None,
+        mask_p3_layer_indx: int = None,
         roi_scale_factor: list[float] = [2.0, 3.0, 4.0],
-        pos_weight: float = 1.0,
+        pos_weight: float | None = None,
         fp_tp_loss_weight: float = 0.0,
         count_loss_weight: float = 0.0,
         area_loss_weight: float = 0.0,
+        mask_loss_weight: float = 0.0,
         model="yolo11n.pt",
         task="detect",
         verbose=False,
@@ -1322,7 +1473,8 @@ class CustomYOLO(YOLO):
         args_det_system["fp_tp_loss_weight"] = fp_tp_loss_weight
         args_det_system["count_loss_weight"] = count_loss_weight
         args_det_system["area_loss_weight"] = area_loss_weight
-        # args_det_system["is_fp_tp_multiplier"] = is_fp_tp_multiplier
+        args_det_system["mask_p3_layer_indx"] = mask_p3_layer_indx
+        args_det_system["mask_loss_weight"] = mask_loss_weight
 
         # add to environment variables
         os.environ["args_det_system"] = json.dumps(args_det_system)

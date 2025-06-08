@@ -27,11 +27,11 @@ if __name__ == "__main__":
     training_cfg.yolo_yaml = (
         r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
     )
-    training_cfg.yolo_arch_yaml =  r"..\configs\yolo_configs\models\yolo11s.yaml"
+    training_cfg.yolo_arch_yaml = r"..\configs\yolo_configs\models\yolo11s.yaml"
     training_cfg.path_weights = r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"
 
     # training_cfg.cls_label_smoothing = 0.
-    # training_cfg.cls_num_classes = 2    
+    # training_cfg.cls_num_classes = 2
 
     # training_cfg.cls_data_dir = r"D:\PhD\Data per camp\Classification\cls-features"
     # training_cfg.cls_is_features = True
@@ -47,7 +47,6 @@ if __name__ == "__main__":
     training_cfg.project_name = "wildAI-detection"
     training_cfg.run_name = "yolo-custom-heads"
 
-
     training_cfg.lr0 = 3e-4
     training_cfg.lrf = 1e-1
     training_cfg.patience = 20
@@ -56,6 +55,8 @@ if __name__ == "__main__":
     training_cfg.custom_yolo_kwargs = dict(
         count_regressor_layers=22,  # p5
         area_regressor_layers=16,
+        mask_p3_layer_indx=16,
+        mask_loss_weight=1.0,
         roi_classifier_layers={"p3": 16, "p4": 19},
         fp_tp_loss_weight=3.,
         count_loss_weight=1.,
@@ -69,9 +70,9 @@ if __name__ == "__main__":
     training_cfg.weight_decay = 5e-4
 
     training_cfg.warmup_epochs = 0
-    training_cfg.dfl = 1.5 # 1.5
-    training_cfg.cls = .5 # 0.5
-    training_cfg.box = 7.5 # 7.5
+    training_cfg.dfl = 1.5  # 1.5
+    training_cfg.cls = 0.5  # 0.5
+    training_cfg.box = 7.5  # 7.5
 
     training_cfg.cl_batch_size = (32,)
     training_cfg.use_continual_learning = True
