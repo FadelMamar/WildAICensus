@@ -294,7 +294,7 @@ class CustomLoss(v8DetectionLoss):
         self.bce = torch.nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
 
         logger.debug(
-            f"Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}"
+            f"Instantiating BCE loss in custom V8Detection loss with pos_weight={pos_weight}"
         )
 
     def compute_count_area_loss(self, target_bboxes: torch.Tensor, scale_tensor):
@@ -725,7 +725,7 @@ class CustomLoss(v8DetectionLoss):
                 fg_mask=fg_mask,
                 batch_images=batch["img"],
             )
-            loss[3] = loss[3] + mask_loss * self.mask_loss_weight / target_scores_sum
+            loss[3] = loss[3] + mask_loss * self.mask_loss_weight / batch_size
 
         # Cls loss -> Objectness
         loss[1] = (
@@ -821,7 +821,7 @@ class MaskHead(torch.nn.Module):
 
         self.upsampler = nn.Sequential(
             # nn.LazyConv2d(64, kernel_size=1, stride=1, padding=0),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # *2
+            nn.ConvTranspose2d(128, 32, 3, stride=2, padding=1, output_padding=1),  # *2
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # *4
@@ -923,7 +923,7 @@ class MaskHead(torch.nn.Module):
 
         logits = self.upsampler(p3)
         loss = nn.functional.binary_cross_entropy_with_logits(
-            logits, target_mask, reduction="sum", pos_weight=pos_weight
+            logits, target_mask, reduction="mean", pos_weight=pos_weight
         )
         return loss
 
@@ -1327,7 +1327,7 @@ class DetectionSystem(DetectionModel):
                 logger.debug("removing hook")
             self.hooks_handles = []
         except Exception as e:
-            print(e)
+            logger.error(e)
 
     def _forward_aux(
         self,
@@ -1370,6 +1370,7 @@ class DetectionSystem(DetectionModel):
             fp_tp_loss_weight=self.fp_tp_loss_weight,
             count_loss_weight=self.count_loss_weight,
             area_loss_weight=self.area_loss_weight,
+            mask_loss_weight=self.mask_loss_weight
         )
 
 
