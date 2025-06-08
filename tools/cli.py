@@ -43,7 +43,8 @@ logger = logging.getLogger(__name__)
 # TODO debug
 def create_classification_data(
     yaml_path: str,
-    strategies: list[str] = ["gt", "hn"],
+    save_dir: str,
+    strategies: list[str] = ["gt", "hn", "fp"],
     alias="demo",
 ):
     eval_config = EvaluationConfig()
@@ -62,9 +63,10 @@ def create_classification_data(
         tilesize=800,
         overlap_ratio=0.2,
         confidence_threshold=0.2,
+        batch_size=8,
         # min_area=100,
         # max_area=None,
-        cls_imgsz=128,
+        cls_imgsz=196,
         # device="cpu",
     )
 
@@ -72,12 +74,15 @@ def create_classification_data(
         eval_config,
     )
 
-    yaml_path = r"..\configs\yolo_configs\data\data_config.yaml"
     cfg = load_yaml(yaml_path)
 
-    root_dir = r"D:\datalabeling\.tmp\cls-features"
-
-    engine, feature_extractor = load_engine(pred_config)
+    engine, feature_extractor = load_engine(
+        pred_config,
+        roi_classifier_path=None,
+        roi_cls_is_features=True,
+        roi_cls_label_map={},
+        mlflow_model_alias=alias,
+    )
 
     for split in ["train", "val"]:
         source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
@@ -85,7 +90,7 @@ def create_classification_data(
         print(f"source_dirs: {source_dirs}")
 
         handler.set_dirs(
-            source_dirs=source_dirs, output_dir=os.path.join(root_dir, split)
+            source_dirs=source_dirs, output_dir=os.path.join(save_dir, split)
         )
 
         handler.run(

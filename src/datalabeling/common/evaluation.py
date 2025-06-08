@@ -15,7 +15,6 @@ from ultralytics.utils.metrics import ConfusionMatrix
 from ultralytics.data import converter
 
 from ..ml.interface import InferenceEngine
-from ..ml.utils import remove_label_cache
 from .config import EvaluationConfig
 from .dataset_loader import LabelingDataset
 
@@ -333,7 +332,8 @@ class CustomValidator(DetectionValidator):
 # TODO: debug
 def ultralytics_val(args: EvaluationConfig):
     # remove label.cache files
-    remove_label_cache(data_config_yaml=args.data_config)
+    # from ..ml.utils import remove_label_cache
+    # remove_label_cache(data_config_yaml=args.data_config)
 
     for split in args.splits:
         print("-" * 20, split, "-" * 20)

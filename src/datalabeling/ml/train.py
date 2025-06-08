@@ -39,13 +39,15 @@ from .models import ImageClassifier, HerdnetTrainer
 logger = logging.getLogger(__name__)
 
 
-def load_ultralytics_model_class(object_detector_arch: str, path:str,task:str="detect",**kwargs):
+def load_ultralytics_model_class(
+    object_detector_arch: str, path: str, task: str = "detect", **kwargs
+):
     if object_detector_arch == "rtdetr":
         return RTDETR(path)
     if object_detector_arch == "yolo":
-        return YOLO(model=path,task=task)
+        return YOLO(model=path, task=task)
     if object_detector_arch == "custom_yolo":
-        return CustomYOLO(model=path,**kwargs)
+        return CustomYOLO(model=path, **kwargs)
     else:
         raise NotImplementedError(
             f"object_detector_arch `{object_detector_arch}` is not supported."
@@ -114,9 +116,9 @@ class TrainingManager:
         model = load_ultralytics_model_class(
             object_detector_arch=self.args.object_detector_arch,
             path=path,
-            **self.args.custom_yolo_kwargs
+            **self.args.custom_yolo_kwargs,
         )
-        
+
         if self.args.path_weights and self.args.yolo_arch_yaml:
             model = model.load(self.args.path_weights)
 
@@ -287,6 +289,8 @@ class TrainingManager:
         )
 
         datamodule.setup("fit")
+
+        self.model.set_label_class_map(class_to_label_map=datamodule.class_to_idx)
 
         # loggers and callbacks
         mlf_logger = MLFlowLogger(

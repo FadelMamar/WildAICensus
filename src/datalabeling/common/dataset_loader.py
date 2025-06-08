@@ -19,7 +19,7 @@ from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.pool import ThreadPool
 from functools import partial
 import fiftyone as fo
-
+from random import shuffle
 from .annotation_utils import (
     ImageProcessor,
     GPSUtils,
@@ -872,8 +872,8 @@ class ClassificationDatasetBuilder:
         bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
         tn_kwargs=dict(w=50, h=50, number=3),
-        tp_kwargs=dict(w=None, h=None),
-        fp_kwargs=dict(w=None, h=None),
+        tp_kwargs=dict(w=50, h=50),
+        fp_kwargs=dict(w=50, h=50),
         hn_kwargs=dict(w=50, h=50),
         max_workers: int = 1,
     ):
@@ -887,6 +887,13 @@ class ClassificationDatasetBuilder:
         self.bbox_resize_factor = bbox_resize_factor
         self.detector = detector
         self.feature_extractor = feature_extractor
+
+        # load predictions
+        dataset = None
+        if "fp" in strategies or "hn" in strategies:
+            tiles = [Tile(image_path=p) for p in get_images_from_dirs(self.source_dirs)]
+            dataset = LabelingDataset(tiles=tiles)
+            dataset.add_predictions(engine=self.detector, build=True)
 
         for strategy in list(set(strategies)):
             if strategy == "gt":
@@ -905,11 +912,15 @@ class ClassificationDatasetBuilder:
 
             elif strategy == "fp":
                 assert self.detector is not None, "Provide a detector"
-                self._save_fp(bbox_resize_factor=bbox_resize_factor, **fp_kwargs)
+                self._save_fp(
+                    dataset=dataset, bbox_resize_factor=bbox_resize_factor, **fp_kwargs
+                )
 
             elif strategy == "hn":
                 assert self.detector is not None, "Provide a detector"
-                self._save_hn(bbox_resize_factor=bbox_resize_factor, **hn_kwargs)
+                self._save_hn(
+                    dataset=dataset, bbox_resize_factor=bbox_resize_factor, **hn_kwargs
+                )
 
             else:
                 raise NotImplementedError(f"strategy:{strategy} is not defined.")
@@ -958,7 +969,7 @@ class ClassificationDatasetBuilder:
     def _save_tn(
         self,
         file_name: str,
-        bbox_resize_factor: int,
+        bbox_resize_factor: int = 1,
         w: int = 50,
         h: int = 50,
         number: int = 2,
@@ -980,12 +991,11 @@ class ClassificationDatasetBuilder:
             high=img_height - h * bbox_resize_factor,
             size=number,
         )
-        count = 0
         batch = []
-        for x, y in product(xs, ys):
-            if count == number:
-                break
+        pairs = list(product(xs, ys))
+        shuffle(pairs)
 
+        for x, y in pairs[:number]:
             # rescale w,h
             w_ = (np.random.rand() + 0.5) * w
             h_ = (np.random.rand() + 0.5) * h
@@ -1007,7 +1017,6 @@ class ClassificationDatasetBuilder:
                 tag=f"#{y1}_{y2}_{x1}_{x2}",
             )
             batch.append(data)
-            count += 1
 
         # save data
         self._save_batch(batch)
@@ -1018,7 +1027,7 @@ class ClassificationDatasetBuilder:
         self,
         df_gt: pd.DataFrame,
         file_name: str,
-        bbox_resize_factor: int,
+        bbox_resize_factor: int = 1,
         w: int = None,
         h: int = None,
     ):
@@ -1064,39 +1073,31 @@ class ClassificationDatasetBuilder:
 
     def _save_hn(
         self,
-        bbox_resize_factor: int,
+        dataset: LabelingDataset,
+        bbox_resize_factor: int = 1,
         w: int = None,
         h: int = None,
     ):
         logger.info("Computing Hard negatives...")
 
-        images_paths = get_images_from_dirs(images_dirs=self.source_dirs)
-
-        is_tn = (
-            lambda p: not Path(str(p).replace("images", "labels"))
+        is_tp = (
+            lambda p: Path(str(p).replace("images", "labels"))
             .with_suffix(".txt")
             .exists()
         )
-        images_paths = [p for p in images_paths if is_tn(p)]
-
-        logger.info(f"Running detector on {len(images_paths)} negative samples...")
-
-        predictions = self.detector.inference(
-            images_paths=images_paths, return_as_df=False
-        )
-        predictions = dict(zip(images_paths, predictions))
 
         count = 0
-        for file_name, detections in tqdm(
-            predictions.items(), desc="Saving Hard negatives"
-        ):
-            image = Image.open(file_name).convert("RGB")
+        for tile in tqdm(dataset.tiles, desc="Saving Hard negatives"):
+            if is_tp(tile.image_path):
+                continue  # skip true positives
+
+            image = Image.open(tile.image_path).convert("RGB")
             img_width, img_height = image.size
             image = np.asarray(image)
 
             batch = []
 
-            for det in detections:
+            for det in tile.predictions:
                 if det.is_empty:
                     continue
 
@@ -1121,7 +1122,7 @@ class ClassificationDatasetBuilder:
                 data = dict(
                     image=image[y1:y2, x1:x2],
                     label_name=self.tn_label,
-                    file_name=file_name,
+                    file_name=tile.image_path,
                     tag=f"#{y1}_{y2}_{x1}_{x2}",
                 )
                 batch.append(data)
@@ -1191,7 +1192,8 @@ class ClassificationDatasetBuilder:
 
     def _save_fp(
         self,
-        bbox_resize_factor,
+        dataset: LabelingDataset,
+        bbox_resize_factor: int = 1,
         w: int = None,
         h: int = None,
     ):
@@ -1200,11 +1202,6 @@ class ClassificationDatasetBuilder:
         logger.info("Computing False Positives...")
 
         # raise NotImplementedError("Debugging to do...")
-
-        # load predictions
-        tiles = [Tile(image_path=p) for p in get_images_from_dirs(self.source_dirs)]
-        dataset = LabelingDataset(tiles=tiles)
-        dataset.add_predictions(engine=self.detector, build=True)
 
         df_metrics = self.perf_eval.run(
             dataset=dataset,

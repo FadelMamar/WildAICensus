@@ -258,25 +258,35 @@ def load_engine(
         hf_model_path=feature_extractor_path
     )
 
-    path = roi_classifier_path
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=roi_cls_is_features, map_location=pred_config.device
-    )
+    roi_processor = None
+    try:
+        model = ImageClassifier.load_from_checkpoint(
+            roi_classifier_path,
+            cls_is_features=roi_cls_is_features,
+            map_location=pred_config.device,
+        )
 
-    roi_classifier = get_processor("classifier")(
-        model,
-        label_map=roi_cls_label_map,
-        device=pred_config.device,
-        feature_extractor=feature_extractor,
-        imgsz=pred_config.cls_imgsz,
-    )
-    roi_processor = DetectionsPostprocessor(
-        keep_classes=roi_keep_classes,
-    )
-    roi_processor.set_classifier(roi_classifier)
+        roi_classifier = get_processor("classifier")(
+            model,
+            label_map=roi_cls_label_map,
+            device=pred_config.device,
+            feature_extractor=feature_extractor,
+            imgsz=pred_config.cls_imgsz,
+        )
+        roi_processor = DetectionsPostprocessor(
+            keep_classes=roi_keep_classes,
+        )
+        roi_processor.set_classifier(roi_classifier)
+    except:
+        traceback.print_exc()
+        logger.warning("Roi classifier is not loaded.")
 
     # build object detection system
-    detection_label_map = getattr(detection_model, "names", None) or {0: "wildlife"}
+    detection_label_map = (
+        getattr(detection_model, "names", None)
+        or detection_label_map
+        or {0: "wildlife"}
+    )
     detector = ObjectDetectionSystem(
         config=pred_config, detection_label_map=detection_label_map
     )
