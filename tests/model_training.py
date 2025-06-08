@@ -49,7 +49,7 @@ if __name__ == "__main__":
 
 
     training_cfg.lr0 = 3e-4
-    training_cfg.lrf = 1
+    training_cfg.lrf = 1e-1
     training_cfg.patience = 20
 
     training_cfg.object_detector_arch = "custom_yolo"  # "yolo", "rtdetr", "custom_yolo"
@@ -58,15 +58,14 @@ if __name__ == "__main__":
         area_regressor_layers=16,
         roi_classifier_layers={"p3": 16, "p4": 19},
         fp_tp_loss_weight=3.,
-        is_fp_tp_multiplier=False,
         count_loss_weight=1.,
-        area_loss_weight=0.0,
+        area_loss_weight=1.0,
         roi_scale_factor=[
             2.0,
         ],
     )
 
-    training_cfg.ultralytics_pos_weight = 1.
+    training_cfg.ultralytics_pos_weight = 5.
     training_cfg.weight_decay = 5e-4
 
     training_cfg.warmup_epochs = 0
@@ -76,17 +75,17 @@ if __name__ == "__main__":
 
     training_cfg.cl_batch_size = (32,)
     training_cfg.use_continual_learning = True
-    training_cfg.cl_ratios = (1.0,2.5,5)  # ratio = num_empty/num_non_empty
-    training_cfg.cl_epochs = (20,10,5)
-    training_cfg.cl_freeze = (11,14,20)
-    training_cfg.cl_lr0s = (1e-4,5e-5,1e-5)
+    training_cfg.cl_ratios = (5.,)  # ratio = num_empty/num_non_empty
+    training_cfg.cl_epochs = (20,)
+    training_cfg.cl_freeze = (11,)
+    training_cfg.cl_lr0s = (1e-4,)
     training_cfg.cl_save_dir = (
         r"D:\PhD\Data per camp\DetectionDataset\continuous_learning"
     )
     training_cfg.cl_data_config_yaml = Path(training_cfg.yolo_yaml).resolve()
     training_cfg.cl_batch_size = training_cfg.batchsize
 
-    training_cfg.device = "cpu"  # "cuda:0"
+    training_cfg.device = "cuda:0"
 
     handler = TrainingManager(
         args=training_cfg,
