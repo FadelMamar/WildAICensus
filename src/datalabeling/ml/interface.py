@@ -16,7 +16,7 @@ from PIL import Image
 
 from .workers import ObjectDetectionSystem, GPSUtils
 from .models import ImageClassifier, YOLO
-from ..common.processor import DetectionsPostprocessor, get_processor
+from ..common.processor import DetectionsPostprocessor, get_processor, FeatureExtractor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
 from ..common.mlflow_utils import load_registered_model
@@ -34,6 +34,12 @@ class InferenceEngine(object):
         self.detection_processor = None
         self.model_tag = "None"
 
+        # LS label config
+        self.labelstudio_client: LabelStudio = None
+        self.from_name = "label"
+        self.to_name = "image"
+        self.label_type = "rectanglelabels"
+
     def set_detector(self, detector: ObjectDetectionSystem, model_tag: str):
         assert isinstance(detector, ObjectDetectionSystem), (
             "Received {type(detector)} instead of ObjectDetectionSystem"
@@ -46,6 +52,30 @@ class InferenceEngine(object):
         detection_processor: DetectionsPostprocessor = None,
     ):
         self.detector.set_processor(roi_processor=detection_processor)
+
+    def set_ls_client(self, dotenv_path: str):
+        # # Load environment variables
+        if dotenv_path is not None:
+            load_dotenv(dotenv_path=dotenv_path)
+        else:
+            logging.warning(
+                msg="Pass argument `dotenv_path` to access label studio API"
+            )
+
+        # # label studio client
+        LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+        API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+
+        if LABEL_STUDIO_URL is None:
+            raise ValueError("env variable LABEL_STUDIO_URL is not set.")
+        if API_KEY is None:
+            raise ValueError("env variable API_KEY is not set.")
+
+        self.labelstudio_client = LabelStudio(
+            base_url=LABEL_STUDIO_URL, api_key=API_KEY
+        )
+
+        return None
 
     def inference(
         self,
@@ -110,82 +140,24 @@ class InferenceEngine(object):
 
         return dfs
 
+    def _upload_single_task(self, task, tag: str = ""):
+        task_id = task.id
+        img_url = task.data["image"]
 
-class Annotator(InferenceEngine):
-    def __init__(
-        self,
-        config: PredictionConfig,
-        dotenv_path: str = None,
-    ):
-        super().__init__(config)
-
-        # # Load environment variables
-        if dotenv_path is not None:
-            load_dotenv(dotenv_path=dotenv_path)
-        else:
-            logging.warning(
-                msg="Pass argument `dotenv_path` to access label studio API"
+        try:
+            # using unquote to deal with special characters
+            img_path = get_local_path(
+                unquote(img_url),
+                download_resources=False,
+                hostname=os.getenv("LABEL_STUDIO_URL"),
             )
 
-        # # label studio client
-        LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
-        API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
-        self.labelstudio_client = LabelStudio(
-            base_url=LABEL_STUDIO_URL, api_key=API_KEY
-        )
-
-        # LS label config
-        self.from_name = "label"
-        self.to_name = "image"
-        self.label_type = "rectanglelabels"
-
-    def upload_predictions(
-        self,
-        project_id: int,
-        top_n: int = 0,  # download_resources: bool = True,
-        tag: str = "",
-    ) -> None:
-        """Uploads predictions using label studio API.
-        Make sure to set the API key and url inside .env
-
-        Args:
-            project_id (int): project id from Label studio
-            top_n (int): top n tasks to be uploaded in descending order of task_id. Default 0 which disables the feature.
-        """
-        # Select project
-        project = self.labelstudio_client.projects.get(id=project_id)
-
-        # Upload predictions for each task
-        tasks = self.labelstudio_client.tasks.list(
-            project=project.id,
-        )
-        for i, task in enumerate(tasks):
-            if top_n > 0:
-                if i > top_n:
-                    break
-
-            task_id = task.id
-            img_url = task.data["image"]
-
-            try:
-                # using unquote to deal with special characters
+            if not Path(img_path).exists():
                 img_path = get_local_path(
                     unquote(img_url),
-                    download_resources=False,
+                    download_resources=True,
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
-
-                if not Path(img_path).exists():
-                    img_path = get_local_path(
-                        unquote(img_url),
-                        download_resources=True,
-                        hostname=os.getenv("LABEL_STUDIO_URL"),
-                    )
-
-            except Exception:
-                traceback.print_exc()
-                logger.warn(f"Failed to load {img_path}. Skipping...")
-                continue
 
             logger.info(f"Uploading predictions for: {img_path}")
 
@@ -220,6 +192,40 @@ class Annotator(InferenceEngine):
                 model_version=self.model_tag + tag,
             )
 
+        except Exception:
+            traceback.print_exc()
+            logger.warning(f"Failed to load {img_path}. Skipping...")
+
+        return None
+
+    def upload_predictions(
+        self,
+        project_id: int,
+        top_n: int = 0,  # download_resources: bool = True,
+        tag: str = "",
+    ) -> None:
+        """Uploads predictions using label studio API.
+        Make sure to set the API key and url inside .env
+
+        Args:
+            project_id (int): project id from Label studio
+            top_n (int): top n tasks to be uploaded in descending order of task_id. Default 0 which disables the feature.
+        """
+        # Select project
+        project = self.labelstudio_client.projects.get(id=project_id)
+
+        # Upload predictions for each task
+        tasks = self.labelstudio_client.tasks.list(
+            project=project.id,
+        )
+
+        for i, task in enumerate(tasks):
+            if top_n > 0:
+                if i > top_n:
+                    break
+
+            self._upload_single_task(task=task, tag=tag)
+
 
 def load_engine(
     pred_config: PredictionConfig,
@@ -232,14 +238,20 @@ def load_engine(
     detection_model: YOLO = None,
     mlflow_model_alias: str = "demo",
     mlflow_model_name: str = "labeler",
-):
+    set_ls_client: bool = False,
+    dot_env_path: str = None,
+) -> tuple[InferenceEngine, FeatureExtractor]:
     if detection_model is None:
+        logger.info(
+            f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
+        )
         detection_model, metadata = load_registered_model(
             alias=mlflow_model_alias,
             name=mlflow_model_name,
             mlflow_tracking_url="http://localhost:5000",
             load_unwrapped=True,
         )
+        logger.info(f"model's metadata={metadata}")
 
     # build roi postprocessor
     feature_extractor = get_processor("feature_extractor")(
@@ -273,5 +285,8 @@ def load_engine(
 
     engine = InferenceEngine(config=pred_config)
     engine.set_detector(detector=detector, model_tag=mlflow_model_alias)
+
+    if set_ls_client:
+        engine.set_ls_client(dotenv_path=dot_env_path)
 
     return engine, feature_extractor

@@ -30,7 +30,7 @@ from label_studio_sdk.client import LabelStudio
 
 
 from .config import DataConfig
-from .io import save_json
+from .io import save_json, load_yolo_label
 
 logger = logging.getLogger(__name__)
 
@@ -321,71 +321,15 @@ def convert_obb_to_dota(
     return None
 
 
-def convert_segment_masks_to_yolo_seg(
-    masks_sam2: np.ndarray, output_path: str, num_classes: int, verbose: bool = False
-):
-    """Inspired by https://github.com/ultralytics/ultralytics/blob/main/ultralytics/data/converter.py#L350
-    Converts a SAM2 segmentation mask to the YOLO segmentation format.
-
-    """
-    assert len(masks_sam2.shape) == 3, "[b,h,w]"
-    pixel_to_class_mapping = {i + 1: i for i in range(num_classes)}
-
-    file = open(output_path, "w", encoding="utf-8")
-    for i in range(masks_sam2.shape[0]):
-        mask = masks_sam2[i]
-        img_height, img_width = mask.shape  # Get image dimensions
-
-        unique_values = np.unique(
-            mask
-        )  # Get unique pixel values representing different classes
-        yolo_format_data = []
-
-        for value in unique_values:
-            if value == 0:
-                continue  # Skip background
-            class_index = pixel_to_class_mapping.get(value, -1)
-            if class_index == -1:
-                logger.info(f"Unknown class for pixel value {value}, skipping.")
-                continue
-
-            # Create a binary mask for the current class and find contours
-            contours, _ = cv2.findContours(
-                (mask == value).astype(np.uint8),
-                cv2.RETR_EXTERNAL,
-                cv2.CHAIN_APPROX_SIMPLE,
-            )  # Find contours
-
-            for contour in contours:
-                if (
-                    len(contour) >= 3
-                ):  # YOLO requires at least 3 points for a valid segmentation
-                    contour = contour.squeeze()  # Remove single-dimensional entries
-                    yolo_format = [class_index]
-                    for point in contour:
-                        # Normalize the coordinates
-                        yolo_format.append(
-                            round(point[0] / img_width, 6)
-                        )  # Rounding to 6 decimal places
-                        yolo_format.append(round(point[1] / img_height, 6))
-                    yolo_format_data.append(yolo_format)
-
-        # Save Ultralytics YOLO format data to file
-
-        for item in yolo_format_data:
-            line = " ".join(map(str, item))
-            file.write(line + "\n")
-    if verbose:
-        logger.info(f"Processed and stored at {output_path}.")
-    file.close()
-
-
 def create_yolo_seg_directory(
     data_config_yaml: str,
     model_sam: SAM,
     device: str = "cpu",
     copy_images_dir: bool = True,
+    clear: bool = True,
 ):
+    from ultralytics.utils.ops import xywh2xyxy
+
     with open(data_config_yaml, "r") as file:
         data_config = yaml.load(file, Loader=yaml.FullLoader)
 
@@ -397,6 +341,7 @@ def create_yolo_seg_directory(
     splits = [s for s in ["val", "train", "test"] if s in data_config.keys()]
     logger.info(f"Convertings splits: {splits}")
 
+    # TODO: optimize, drop pd.read_csv
     def is_dir_yolo(labels_dir: str) -> None:
         for label_path in tqdm(
             Path(labels_dir).glob("*.txt"), desc="checking labels format"
@@ -408,87 +353,73 @@ def create_yolo_seg_directory(
                 raise ValueError("Annotations should be in the yolo format")
         return None
 
-    for split in splits:
-        datasets = list()
+    def compute_save_segs(dataset: YOLODataset, save_dir: Path):
+        #  Saving segmentations
+        for label in tqdm(dataset.labels, desc=f"Creating yolo-seg for split={split}"):
+            h, w = label["shape"]
+            boxes = label["bboxes"]
+            img_path = Path(label["im_file"])
+            if len(boxes) == 0:  # skip empty labels
+                continue
+            boxes[:, [0, 2]] *= w
+            boxes[:, [1, 3]] *= h
+            im = cv2.imread(img_path)
+            sam_results = model_sam(
+                im, bboxes=xywh2xyxy(boxes), verbose=False, save=False, device=device
+            )
+            label["segments"] = sam_results[0].masks.xyn
 
-        # Load YOLO dataset
-        for path in data_config[split]:
-            # create Segmentations directory inside split
-            images_path = os.path.join(data_config["path"], path)
+        for label in dataset.labels:
+            texts = []
+            lb_name = Path(label["im_file"]).with_suffix(".txt").name
+            txt_file = save_dir / lb_name
+            cls = label["cls"]
+            for i, s in enumerate(label["segments"]):
+                if len(s) == 0:
+                    continue
+                line = (int(cls[i]), *s.reshape(-1))
+                texts.append(("%g " * len(line)).rstrip() % line)
+            with open(txt_file, "a", encoding="utf-8") as f:
+                f.writelines(text + "\n" for text in texts)
 
-            # check folder format
-            is_dir_yolo(images_path.replace("images", "labels"))
-
-            seg_dir = Path(images_path).parent / "Segmentations"
-            seg_Labels_dir = seg_dir / "labels"
-            if seg_Labels_dir.exists():
+    def create_seg_labels_dir(images_dir: str):
+        seg_dir = Path(images_dir).parent / "Segmentations"
+        seg_Labels_dir = seg_dir / "labels"
+        if seg_Labels_dir.exists():
+            if clear:
                 shutil.rmtree(seg_Labels_dir)
                 logger.info(f"Deleting existing segmentation labels : {seg_Labels_dir}")
-            seg_Labels_dir.mkdir(exist_ok=True, parents=True)
-            if copy_images_dir:
-                if (seg_dir / "images").exists():
-                    shutil.rmtree(seg_dir / "images")
-                    logger.info(f"Deleting directory: {seg_dir / 'images'}")
-                shutil.copytree(images_path, seg_dir / "images")
-                logger.info(f"Copying {images_path} into {seg_dir}")
+        seg_Labels_dir.mkdir(exist_ok=True, parents=True)
+
+        if copy_images_dir:
+            if (seg_dir / "images").exists():
+                shutil.rmtree(seg_dir / "images")
+                logger.info(f"Deleting directory: {seg_dir / 'images'}")
+            shutil.copytree(images_dir, seg_dir / "images")
+            logger.info(f"Copying {images_dir} into {seg_dir}")
+
+        return seg_Labels_dir
+
+    for split in splits:
+        # Load YOLO dataset
+        for path in data_config[split]:
+            images_dir = os.path.join(data_config["path"], path)
+
+            # check folder format
+            is_dir_yolo(images_dir.replace("images", "labels"))
+
+            seg_Labels_dir = create_seg_labels_dir(images_dir)
+
             dataset = YOLODataset(
-                img_path=images_path,
+                img_path=images_dir,
                 task="detect",
                 data={"names": data_config["names"]},
                 augment=False,
-                imgsz=640,  # used for dataloading only
+                # imgsz=640,  # used for dataloading only
                 classes=None,
             )
-            datasets.append(dataset)
-        dataset = YOLOConcatDataset(datasets)
 
-        #  Saving segmentations
-        for data in tqdm(dataset, desc=f"Creating yolo-seg for split={split}"):
-            # skip negative samples
-            if data["cls"].nelement() == 0:
-                continue
-            # Run inference with bboxes prompt
-            bboxes = torch.cat(
-                [data["bboxes"][:, :2], data["bboxes"][:, :2] + data["bboxes"][:, 2:]],
-                1,
-            )
-            imgsz = data["ori_shape"][0]
-            bboxes = (bboxes * imgsz).long().cpu().tolist()
-            labels = (
-                data["cls"].ravel().long().cpu() + 1
-            )  # account for background class
-            (results,) = model_sam(
-                data["im_file"],
-                bboxes=bboxes,
-                labels=labels.tolist(),
-                device=device,
-                verbose=False,
-            )
-            # create masks
-            mask = results.masks.data.cpu() * labels.view(-1, 1, 1)
-            mask = mask.numpy()
-            try:
-                assert len(mask.shape) == 3
-                assert mask.min() >= 0 and mask.max() > 0, (
-                    f"Error in mask. Please check {data['im_file']}"
-                )
-            except Exception as e:
-                logger.info(
-                    f"Error in mask min={mask.min()},max={mask.max()}."
-                    f"Please check {data['im_file']}. Skipping"
-                )
-                logger.info(e)
-                continue
-            # convert masks to yolo-seg
-            img_path = Path(data["im_file"])
-            output_dir = img_path.parent.parent / "Segmentations" / "labels"
-            output_path = output_dir / img_path.with_suffix(".txt").name
-            convert_segment_masks_to_yolo_seg(
-                masks_sam2=mask,
-                output_path=output_path,
-                num_classes=data_config["nc"],
-                verbose=False,
-            )
+            compute_save_segs(dataset=dataset, save_dir=seg_Labels_dir)
 
 
 def convert_yolo_to_coco(

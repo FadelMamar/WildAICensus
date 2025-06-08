@@ -49,7 +49,8 @@ def load_datasets(data_config_yaml: str) -> list[str]:
     data_config = load_yaml(data_config_yaml)
     paths = list()
     root = data_config["path"]
-    for split in ["train", "val", "test"]:
+    splits = ["train", "val", "test"]
+    for split in splits:
         try:
             for p in data_config[split]:
                 path = os.path.join(root, p)
@@ -69,7 +70,7 @@ def get_images_paths(
     return images_paths
 
 
-def get_images_from_dirs(images_dirs: Sequence[str]) -> list:
+def get_images_from_dirs(images_dirs: Sequence[str]) -> list[str]:
     c = chain.from_iterable([get_images_paths(d) for d in images_dirs])
     c = list(set(c))
 

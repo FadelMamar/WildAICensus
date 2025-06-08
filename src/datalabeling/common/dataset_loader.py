@@ -18,6 +18,7 @@ from label_studio_tools.core.utils.io import get_local_path
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.pool import ThreadPool
 from functools import partial
+import fiftyone as fo
 
 from .annotation_utils import (
     ImageProcessor,
@@ -556,6 +557,69 @@ class LabelingDataset:
         # build dataset
         dataset = cls(tiles=tiles)
         dataset.build()
+
+        return dataset
+
+    # TODO: Debug
+    def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
+        try:
+            # Try to load existing dataset
+            dataset = fo.load_dataset(dataset_name)
+            logger.info(f"Loaded existing dataset: {dataset_name}")
+        except ValueError:
+            # Create new dataset if it doesn't exist
+            dataset = fo.Dataset(dataset_name, persistent=persistent)
+            logger.info(f"Created new dataset: {dataset_name}")
+
+        samples = []
+
+        for img_path, df_detections in tqdm(
+            self.data.groupby("file_name"), desc="Creating-fifytone-dataset"
+        ):
+            if not os.path.exists(img_path):
+                logger.warning(f"Warning: Image not found at {img_path}.Skipping")
+                continue
+
+            sample = fo.Sample(filepath=img_path)
+
+            if df_detections.dropna().empty:
+                logger.info(f"Image at {img_path} is a negative sample")
+                sample["is_positive"] = False
+                samples.append(sample)
+                continue
+
+            # conf = bboxes['scores']
+            class_name = df_detections["class"].tolist()
+
+            # get bbox [x, y, w, h] in normalized coords [0,1]
+            bboxes = df_detections[["x_min", "y_min"]].copy()
+            bboxes.loc[:, "x_min"] /= df_detections.loc[:, "width"]
+            bboxes.loc[:, "y_min"] /= df_detections.loc[:, "height"]
+            bboxes["w"] = 0.0
+            bboxes["h"] = 0.0
+            bboxes.loc[:, "w"] = (
+                df_detections.loc[:, "x_max"] - df_detections.loc[:, "x_min"]
+            ) / df_detections.loc[:, "width"]
+            bboxes.loc[:, "h"] = (
+                df_detections.loc[:, "y_max"] - df_detections.loc[:, "y_min"]
+            ) / df_detections.loc[:, "height"]
+            bboxes = bboxes[["x_min", "y_min", "w", "h"]].to_numpy().tolist()
+
+            # Convert detections to FiftyOne format
+            fo_detections = []
+            for i, box in enumerate(bboxes):
+                fo_detection = fo.Detection(
+                    label=class_name[i],
+                    bounding_box=box,
+                    # confidence=det.get('confidence', None)
+                )
+                fo_detections.append(fo_detection)
+
+            sample["gt"] = fo.Detections(detections=fo_detections)
+            sample["is_positive"] = True
+            samples.append(sample)
+
+        dataset.add_samples(samples)
 
         return dataset
 

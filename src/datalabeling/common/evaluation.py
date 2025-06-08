@@ -9,12 +9,14 @@ import torch
 from torchmetrics.detection import MeanAveragePrecision
 from torchmetrics.functional.detection import complete_intersection_over_union
 from tqdm import tqdm
-from itertools import chain
 from multiprocessing.pool import ThreadPool
-from ..ml.models import Detector
+from ultralytics.models.yolo.detect import DetectionValidator
+from ultralytics.utils.metrics import ConfusionMatrix
+from ultralytics.data import converter
+
 from ..ml.interface import InferenceEngine
-from .config import DataConfig, EvaluationConfig
-from .io import DataHandler, get_images_paths
+from ..ml.utils import remove_label_cache
+from .config import EvaluationConfig
 from .dataset_loader import LabelingDataset
 
 logger = logging.getLogger(__name__)
@@ -33,8 +35,8 @@ class Metrics:
 
         self.bbox_cols = ["x_min", "y_min", "x_max", "y_max"]
 
-    # TODO: add ThreadPool
-    def run(self, dataset: LabelingDataset) -> pd.DataFrame:
+    # TODO: debug
+    def run(self, dataset: LabelingDataset, max_workers: int = 1) -> pd.DataFrame:
         logger.info("Computing evaluation metrics per image...")
 
         def iterator(df_pred, df_gt):
@@ -82,12 +84,16 @@ class Metrics:
 
         df_results = []
 
-        for df_gt_i, df_pred_i in tqdm(
-            iterator(df_pred=df_pred, df_gt=df_gt), desc="computing..."
-        ):
-            df_eval = self._run_per_image(df_gt_i=df_gt_i, df_pred_i=df_pred_i)
-            if not df_eval.empty:
-                df_results.append(df_eval)
+        def func(*x):
+            return self._run_per_image(df_gt_i=x[0], df_pred_i=x[1])
+
+        loader = iterator(df_pred=df_pred, df_gt=df_gt)
+
+        with ThreadPool(max_workers) as executor:
+            for df_eval in tqdm(executor.map(func, loader), desc="computing..."):
+                # df_eval = self._run_per_image(df_gt_i=df_gt_i, df_pred_i=df_pred_i)
+                if not df_eval.empty:
+                    df_results.append(df_eval)
 
         if len(df_results) > 0:
             df_results = pd.concat(
@@ -276,6 +282,123 @@ class PerformanceEvaluator:
         df_metrics_per_image = self.metrics.run(dataset)
 
         return df_metrics_per_image
+
+
+# TODO: debug
+class CustomValidator(DetectionValidator):
+    """From https://github.com/ultralytics/ultralytics/blob/main/ultralytics/models/yolo/detect/val.py
+    Adapted to compute confusion matrix for a given iou threshold
+    """
+
+    def init_metrics(self, model):
+        """
+        Initialize evaluation metrics for YOLO detection validation.
+
+        Args:
+            model (torch.nn.Module): Model to validate.
+        """
+        val = self.data.get(self.args.split, "")  # validation path
+        self.is_coco = (
+            isinstance(val, str)
+            and "coco" in val
+            and (
+                val.endswith(f"{os.sep}val2017.txt")
+                or val.endswith(f"{os.sep}test-dev2017.txt")
+            )
+        )  # is COCO
+        self.is_lvis = (
+            isinstance(val, str) and "lvis" in val and not self.is_coco
+        )  # is LVIS
+        self.class_map = (
+            converter.coco80_to_coco91_class()
+            if self.is_coco
+            else list(range(1, len(model.names) + 1))
+        )
+        self.args.save_json |= (
+            self.args.val and (self.is_coco or self.is_lvis) and not self.training
+        )  # run final val
+        self.names = model.names
+        self.nc = len(model.names)
+        self.end2end = getattr(model, "end2end", False)
+        self.metrics.names = self.names
+        self.metrics.plot = self.args.plots
+        self.confusion_matrix = ConfusionMatrix(
+            nc=self.nc, conf=self.args.conf, iou_thres=self.args.iou, task="detect"
+        )
+        self.seen = 0
+        self.jdict = []
+        self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+
+
+# TODO: debug
+def ultralytics_val(args: EvaluationConfig):
+    # remove label.cache files
+    remove_label_cache(data_config_yaml=args.data_config)
+
+    for split in args.splits:
+        print("-" * 20, split, "-" * 20)
+
+        val_args = dict(model=args.weights, data=args.data_config)
+
+        run_name = (
+            args.name
+            + "#"
+            + split
+            + f"#{round(args.conf_threshold * 100)}#{round(args.iou_threshold * 100)}#{args.augment}#{args.max_det}-"
+        )
+
+        validator = CustomValidator(
+            args=val_args, save_dir=Path(args.project_name) / run_name
+        )
+
+        # set args
+        validator.args.conf = args.conf_threshold
+        validator.args.iou = args.iou_threshold
+        validator.args.mode = "val"
+        validator.args.imgsz = args.imgsz
+        validator.args.batch = args.batch_size
+        validator.args.device = args.device
+        validator.args.augment = args.augment
+        validator.args.split = split
+        validator.args.name = run_name
+        validator.args.project = args.project_name
+        validator.args.max_det = args.max_det
+        validator.args.save_crop = False
+        validator.args.save_json = False
+        validator.args.plots = args.plots
+        validator.args.save_hybridd = args.save_hybrid
+        validator.args.save_txt = args.save_txt
+        validator.args.save_conf = args.save_txt
+
+        # run evaluation
+        results = validator()
+
+        cf_matrix = validator.confusion_matrix.matrix
+        labels = list(validator.names.values()) + ["background"]
+
+        for i, label in enumerate(labels + ["background"]):
+            if label == "background":
+                break
+
+            tp = cf_matrix[i, i]
+            actual_positive = cf_matrix[:, i].sum()
+            predicted_positive = cf_matrix[i, :].sum()
+            # fp = predicted_positive - tp
+            # fn = actual_positive - tp
+
+            precision = tp / (predicted_positive + 1e-8)
+            recall = tp / (actual_positive + 1e-8)
+            f1score = 2 * precision * recall / (precision + recall + 1e-8)
+
+            results = dict(
+                precision=round(precision, 4),
+                recall=round(recall, 4),
+                f1score=round(f1score, 4),
+            )
+
+            print(f"results for {label} : ", results, end="\n")
+
+        return results
 
 
 # =====================

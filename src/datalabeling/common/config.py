@@ -37,8 +37,7 @@ class DataConfig:
     dotenv_path: str = ""
 
     # slicing cfg
-    slice_width: int = 640
-    slice_height: int = 640
+    tilesize: int = 640
     overlap_ratio: float = 0.2
     min_area_ratio: float = 0.8
     empty_ratio: float = 1.0
@@ -79,6 +78,8 @@ class PredictionConfig:
     gsd: float = None  # cm/px
 
     batch_size: int = 8
+
+    roi_weights: str = None
 
     # Image classifier imgsz
     cls_imgsz: int = 96

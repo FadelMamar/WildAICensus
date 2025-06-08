@@ -1,9 +1,10 @@
-import logging
+import logging, os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from ultralytics import SAM
+from ultralytics.data.dataset import YOLOConcatDataset, YOLODataset
 
 from ..ml.train import TrainingManager
 from ..ml.models import Detector
@@ -15,6 +16,7 @@ from .annotation_utils import convert_yolo_to_obb as y2o
 from .annotation_utils import create_yolo_seg_directory as yolo2seg
 from .config import DataConfig, LabelConfig, TrainingConfig, EvaluationConfig
 from .dataset_loader import DataPreparation, ClassificationDatasetBuilder
+from .io import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +102,13 @@ class YoloToSegStep(PipelineStep):
         model_sam: SAM,
         device: str = "cuda",
         copy_images_dir: bool = True,
+        clear: bool = True,
     ):
         self.data_config_yaml = data_config_yaml
         self.model_sam = model_sam
         self.device = device
         self.copy_images_dir = copy_images_dir
+        self.clear = clear
 
     def run(self, context: Dict[str, Any] = None) -> None:
         yolo2seg(
@@ -112,24 +116,40 @@ class YoloToSegStep(PipelineStep):
             model_sam=self.model_sam,
             device=self.device,
             copy_images_dir=self.copy_images_dir,
+            clear=self.clear,
         )
-        # context["yolo_seg_path"] = self.out_path
 
 
 class YoloToCocoStep(PipelineStep):
     def __init__(
         self,
-        dataset: Any,
         coco_dir: str,
+        # imgsz:int,
         data_config: Dict[str, Any],
         split: str = "val",
         clear: bool = False,
     ):
-        self.dataset = dataset
+        self.dataset = None
         self.coco_dir = coco_dir
         self.data_config = data_config
         self.split = split
         self.clear = clear
+
+        # load dataset
+        datasets = []
+        for path in self.data_config[split]:
+            img_dir = os.path.join(self.data_config["path"], path)
+            d = YOLODataset(
+                img_path=img_dir,
+                task="detect",
+                data={"names": self.data_config["names"]},
+                augment=False,
+                # imgsz=imgsz,
+                classes=None,
+            )
+            datasets.append(d)
+
+        self.dataset = YOLOConcatDataset(datasets)
 
     def run(self, context: Dict[str, Any]) -> None:
         y2coco(

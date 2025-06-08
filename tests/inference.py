@@ -1,15 +1,8 @@
-from datalabeling.ml.models import Detector, ImageClassifier
-from datalabeling.common.processor import get_processor, DetectionsPostprocessor
-from datalabeling.common.annotation_utils import resize_bbox
-
 from datalabeling.common.config import PredictionConfig
-from datalabeling.ml.interface import InferenceEngine, Annotator
+from datalabeling.ml.interface import InferenceEngine, Annotator, load_engine
 from datalabeling.ml.workers import ObjectDetectionSystem
 
 from datalabeling.common.mlflow_utils import load_registered_model
-
-from ultralytics import YOLO
-from sahi.models.ultralytics import UltralyticsDetectionModel
 
 import torch
 import numpy as np
@@ -42,67 +35,19 @@ ALIAS = "demo"  # -rt-batch8'
 NAME = "labeler"
 
 
-def load_engine():
-    # get image classifier
-    path = r"..\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=True, map_location=config.device
-    )
-    roi_classifier = get_processor("classifier")(
-        model,
-        label_map={0: "gt", 1: "tn"},
-        device=config.device,
-        feature_extractor=get_processor("feature_extractor")(),
-        imgsz=config.cls_imgsz,
-    )
-
-    # build postprocessor
-    processor = DetectionsPostprocessor(
-        keep_classes=["gt"],
-    )
-    processor.set_classifier(roi_classifier)
-
-    # set detector
-    # detection_model, metadata = load_registered_model(
-    #     alias=ALIAS, name=NAME, load_unwrapped=True
-    # )
-    # version = metadata['version']
-    # if isinstance(detection_model, YOLO):
-    #     detection_model = UltralyticsDetectionModel(
-    #         model=detection_model,
-    #         confidence_threshold=config.confidence_threshold,
-    #         category_mapping={"0": "wildlife"},
-    #         # image_size=config.imgsz,
-    #         device=config.device,
-    #     )
-
-    # detector = Detector(config=config, detection_model=detection_model)
-
-    # detector = Detector(config=config, detection_model=None)
-    # detector.set_detection_model(
-    #     detection_model=None,
-    #     path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
-    #     yolo_model=None,
-    # )
-
-    detector = ObjectDetectionSystem(
-        config=config, buffer_size=32, timeout=15, detection_label_map={0: "wildlife"}
-    )
-    detector.set_processor(roi_processor=processor)
-    detector.set_model(
-        model=None, path_weights=r"D:\datalabeling\base_models_weights\best.pt"
-    )
-
-    # get inference engine
-    engine = InferenceEngine(config=config)
-    engine.set_detector(detector, model_tag=ALIAS)
-    # engine.set_processor(image_processor=None, detection_processor=processor)
-
-    return engine
-
-
 def run_inference_engine(img_path: str):
-    engine = load_engine()
+    engine, _ = load_engine(
+        pred_config=config,
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map={0: "wildlife"},
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=None,
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+    )
 
     detections = engine.inference(images_paths=[img_path])
 

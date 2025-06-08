@@ -15,13 +15,12 @@ from itertools import chain
 import folium
 from folium.plugins import MarkerCluster
 from streamlit_folium import folium_static
-from datalabeling.ml.train import ImageClassifier
 
-from datalabeling.common.processor import get_processor, DetectionsPostprocessor
 from datalabeling.common.config import TilingConfig
 from datalabeling.common.dataset_loader import LabelingDataset
 from datalabeling.common.config import PredictionConfig
-from datalabeling.ml.interface import Annotator
+from datalabeling.common.io import get_images_from_dirs
+from datalabeling.ml.interface import load_engine
 
 
 DOT_ENV = Path(__file__) / "../.env"
@@ -257,7 +256,7 @@ def main():
             project_id = st.number_input("Project ID", min_value=0, step=1)
             top_n = st.number_input("top_n", min_value=0, step=1, value=0)
             overlapfactor = st.number_input(
-                "overlapfactor", min_value=0.0, max_value=0.9,value=0.1
+                "overlapfactor", min_value=0.0, max_value=0.9, value=0.1
             )
             ratiowidth = st.number_input(
                 "ratiowidth", min_value=0.0, max_value=1.0, value=0.5
@@ -275,9 +274,7 @@ def main():
                 "flight_height in [m]", min_value=10.0, value=180.0
             )
             sensor_height = st.number_input(
-                "sensor_height in [mm]",
-                min_value=0.0,
-                value=24.0
+                "sensor_height in [mm]", min_value=0.0, value=24.0
             )
             gsd = st.number_input("gsd in [cm/px]", min_value=0.0, value=2.26)
             dest = st.text_input(
@@ -396,45 +393,26 @@ def get_annotator(annotator_kwargs: dict):
         tilesize=annotator_kwargs.get("tilesize", 800),
         overlap_ratio=annotator_kwargs.get("overlap_ratio", 0.2),
         confidence_threshold=annotator_kwargs.get("confidence_threshold", 0.2),
+        inference_service_url=annotator_kwargs.get("inference_service_url", None),
         # min_area=100,
         # max_area=None,
         cls_imgsz=96,
         # device='cuda'
     )
 
-    # get image classifier
-    path = r"D:\datalabeling\src\tests\runs-classifier\best-v6.ckpt"
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=True, map_location="cpu"
+    annotator, _ = load_engine(
+        pred_config=config,
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map=None,  # {0: "wildlife"},
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=None,
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+        set_ls_client=True,
     )
-    handler = get_processor("classifier")(
-        model,
-        label_map={0: "gt", 1: "tn"},
-        device=config.device,
-        feature_extractor=get_processor("feature_extractor")(),
-        imgsz=config.cls_imgsz,
-    )
-
-    # build postprocessor
-    processor = DetectionsPostprocessor(
-        keep_classes=["gt"],
-    )
-    processor.set_handler(handler)
-
-    # get annotator
-    # path_to_weights = annotator_kwargs.get('path_to_weights')
-    # if not Path(path_to_weights).exists():
-    path_to_weights = None
-
-    annotator = Annotator(
-        config=config,
-        dotenv_path=DOT_ENV,
-        path_to_weights=path_to_weights,
-        mlflow_model_alias=annotator_kwargs.get("mlflow_model_alias"),
-        mlflow_model_name=annotator_kwargs.get("mlflow_model_name"),
-    )
-
-    annotator.set_processor(image_processor=None, detection_processor=processor)
 
     return annotator
 
@@ -445,26 +423,14 @@ def run_inference(
     annotator_kwargs: dict,
     save_path: str = None,
     image_paths: list[None] = None,
-    exts: list[str] = [
-        "*.jpg",
-        "*.jpeg",
-        "*.png",
-    ],
 ) -> None:
-    raise NotImplementedError
-    handler = get_annotator(annotator_kwargs=annotator_kwargs)
-
-    exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
+    engine = get_annotator(annotator_kwargs=annotator_kwargs)
 
     if image_paths is None:
-        image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
+        assert image_dir is not None
+        image_paths = get_images_from_dirs([image_dir])
 
-    results = handler.batch_inference(
-        images_paths=image_paths,
-        save_path=save_path,
-        as_dataframe=True,
-        inference_service_url=annotator_kwargs.get("inference_service_url", None),
-    )
+    results = engine.inference(images_paths=image_paths, return_as_df=True)
 
     if save_path:
         results[["Latitude", "Longitude", "Elevation"]].to_csv(save_path, index=False)
@@ -476,16 +442,10 @@ def run_inference(
 def get_gps_coords(
     image_dir: str,
     image_paths: list[str] = None,
-    exts: list[str] = [
-        "*.jpg",
-        "*.jpeg",
-        "*.png",
-    ],
 ):
-    exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
-
     if image_paths is None:
-        image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
+        assert image_dir is None
+        image_paths = get_images_from_dirs([image_dir])
 
     gps_coords = [
         GPSUtils.get_gps_coord(file_name=path, return_as_decimal=True)[0]
@@ -561,13 +521,31 @@ def get_map_with_detections(
     return m
 
 
-# Mock API client functions (implement according to your API specs)
+# TODO: debug
 def upload_to_label_studio(project_id: int, annotator_kwargs: dict, top_n: int = 0):
-    annotator = get_annotator(annotator_kwargs=annotator_kwargs)
+    import subprocess
 
-    annotator.upload_predictions(
-        project_id=project_id, top_n=top_n, download_resources=False
-    )
+    # annotator = get_annotator(annotator_kwargs=annotator_kwargs)
+    # annotator.upload_predictions(
+    #     project_id=project_id,
+    #     top_n=top_n,
+    # )
+
+    script_path = "tools/upload_predictions.py"
+    args = ...
+    kwargs = {}
+    cwd = Path(__file__).parent.parent
+
+    cmd = ["uv run", script_path] + list(args)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=True)
+
+    return {
+        "success": True,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode,
+    }
 
 
 @st.cache_data

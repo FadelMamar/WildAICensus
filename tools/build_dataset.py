@@ -1,4 +1,4 @@
-import json
+import fire
 import logging
 import os
 import traceback
@@ -16,23 +16,79 @@ from datalabeling.common.pipeline import (
     YoloToObbStep,
     ObbToYoloStep,
 )
-from datalabeling.common.io import load_yaml
+from datalabeling.common.io import load_datasets
 import os, traceback
 
+import os
+from datalabeling.ml.interface import load_engine
+from dotenv import load_dotenv
+import os
 
-def load_datasets(data_config_yaml: str) -> list[str]:
-    data_config = load_yaml(data_config_yaml)
-    paths = list()
-    root = data_config["path"]
-    for split in ["train", "val", "test"]:
-        try:
-            for p in data_config[split]:
-                path = os.path.join(root, p)
-                paths.append(path)
-        except Exception as e:
-            print(f"Failed to load datasets for conversion {split} --> ", e)
 
-    return paths
+# TODO
+def create_classification_data(
+    yaml_path: str,
+    strategies: list[str] = ["gt", "hn"],
+    alias="demo",
+):
+    from datalabeling.common.config import EvaluationConfig, PredictionConfig
+    from datalabeling.common.io import load_yaml
+    from datalabeling.common.dataset_loader import (
+        ClassificationDatasetBuilder,
+    )
+
+    eval_config = EvaluationConfig()
+    eval_config.score_threshold = 0.25
+    eval_config.map_threshold = 0.3
+    eval_config.uncertainty_method = "entropy"
+    eval_config.uncertainty_threshold = 4
+    eval_config.score_col = "max_scores"
+    eval_config.tp_iou_threshold = 0.2
+    eval_config.load_results = (
+        False  # Set to True to load existing predictions if applicable
+    )
+
+    pred_config = PredictionConfig(
+        imgsz=800,
+        tilesize=800,
+        overlap_ratio=0.2,
+        confidence_threshold=0.2,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=128,
+        # device="cpu",
+    )
+
+    handler = ClassificationDatasetBuilder(
+        eval_config,
+    )
+
+    yaml_path = r"..\configs\yolo_configs\data\data_config.yaml"
+    cfg = load_yaml(yaml_path)
+
+    root_dir = r"D:\datalabeling\.tmp\cls-features"
+
+    engine, feature_extractor = load_engine(pred_config)
+
+    for split in ["train", "val"]:
+        source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
+
+        print(f"source_dirs: {source_dirs}")
+
+        handler.set_dirs(
+            source_dirs=source_dirs, output_dir=os.path.join(root_dir, split)
+        )
+
+        handler.run(
+            strategies=strategies,
+            save_true_negatives=True,
+            feature_extractor=feature_extractor,
+            detector=engine,
+            bbox_resize_factor=1,
+            tn_kwargs=dict(w=pred_config.cls_imgsz, h=pred_config.cls_imgsz, number=3),
+            tp_kwargs=dict(w=pred_config.cls_imgsz, h=pred_config.cls_imgsz),
+            hn_kwargs=dict(w=pred_config.cls_imgsz, h=pred_config.cls_imgsz),
+        )
 
 
 if __name__ == "__main__":

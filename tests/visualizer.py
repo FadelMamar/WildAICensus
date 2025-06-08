@@ -48,7 +48,7 @@ if __name__ == "__main__":
 
     # visualizer.run(port=5151)
 
-    visualizer.add_images()
+    visualizer.load_dataset()
 
     # while True:
 
