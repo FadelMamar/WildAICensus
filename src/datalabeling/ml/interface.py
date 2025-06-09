@@ -87,8 +87,12 @@ class InferenceEngine(object):
         """Multithreaded detector"""
 
         paths = images_paths
-        if paths is None:
+        if images_paths is None:
             paths = [t.image_path for t in tiles]
+        else:
+            paths = list(images_paths)
+
+        logger.info(f"Running inference on {len(paths)} images.")
 
         detections = self.detector.run(images_paths=paths)
 
@@ -99,7 +103,7 @@ class InferenceEngine(object):
 
         if return_tiles:
             assert tiles is not None, (
-                "This is likely an errro. tiles have not been set."
+                "This is likely an error. tiles have not been set."
             )
             return tiles
 
@@ -226,77 +230,75 @@ class InferenceEngine(object):
 
             self._upload_single_task(task=task, tag=tag)
 
+    @classmethod
+    def load_engine(
+        cls,
+        pred_config: PredictionConfig,
+        roi_classifier_path: str = None,
+        roi_cls_is_features: bool = True,
+        roi_cls_label_map: dict = {0: "gt", 1: "tn"},
+        roi_keep_classes: list = ["gt"],
+        detection_label_map: dict = {0: "wildlife"},
+        feature_extractor_path: str = "facebook/dinov2-with-registers-small",
+        detection_model: YOLO = None,
+        mlflow_model_alias: str = "demo",
+        mlflow_model_name: str = "labeler",
+        set_ls_client: bool = False,
+        dot_env_path: str = None,
+    ) -> tuple:
+        if detection_model is None:
+            logger.info(
+                f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
+            )
+            detection_model, metadata = load_registered_model(
+                alias=mlflow_model_alias,
+                name=mlflow_model_name,
+                mlflow_tracking_url="http://localhost:5000",
+                load_unwrapped=True,
+            )
+            logger.info(f"model's metadata={metadata}")
 
-def load_engine(
-    pred_config: PredictionConfig,
-    roi_classifier_path: str = r"..\base_models_weights\roi_classifier.ckpt",
-    roi_cls_is_features: bool = True,
-    roi_cls_label_map: dict = {0: "gt", 1: "tn"},
-    roi_keep_classes: list = ["gt"],
-    detection_label_map: dict = None,  # {0: "wildlife"},
-    feature_extractor_path: str = "facebook/dinov2-with-registers-small",
-    detection_model: YOLO = None,
-    mlflow_model_alias: str = "demo",
-    mlflow_model_name: str = "labeler",
-    set_ls_client: bool = False,
-    dot_env_path: str = None,
-) -> tuple[InferenceEngine, FeatureExtractor]:
-    if detection_model is None:
-        logger.info(
-            f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
-        )
-        detection_model, metadata = load_registered_model(
-            alias=mlflow_model_alias,
-            name=mlflow_model_name,
-            mlflow_tracking_url="http://localhost:5000",
-            load_unwrapped=True,
-        )
-        logger.info(f"model's metadata={metadata}")
-
-    # build roi postprocessor
-    feature_extractor = get_processor("feature_extractor")(
-        hf_model_path=feature_extractor_path
-    )
-
-    roi_processor = None
-    try:
-        model = ImageClassifier.load_from_checkpoint(
-            roi_classifier_path,
-            cls_is_features=roi_cls_is_features,
-            map_location=pred_config.device,
+        # build roi postprocessor
+        feature_extractor = get_processor("feature_extractor")(
+            hf_model_path=feature_extractor_path
         )
 
-        roi_classifier = get_processor("classifier")(
-            model,
-            label_map=roi_cls_label_map,
-            device=pred_config.device,
-            feature_extractor=feature_extractor,
-            imgsz=pred_config.cls_imgsz,
+        roi_processor = None
+        if roi_classifier_path is not None:
+            model = ImageClassifier.load_from_checkpoint(
+                roi_classifier_path,
+                cls_is_features=roi_cls_is_features,
+                map_location=pred_config.device,
+            )
+
+            roi_classifier = get_processor("classifier")(
+                model,
+                label_map=roi_cls_label_map,
+                device=pred_config.device,
+                feature_extractor=feature_extractor,
+                imgsz=pred_config.cls_imgsz,
+            )
+            roi_processor = DetectionsPostprocessor(
+                keep_classes=roi_keep_classes,
+            )
+            roi_processor.set_classifier(roi_classifier)
+
+        # build object detection system
+        detection_label_map = (
+            getattr(detection_model, "names", None)
+            or detection_label_map
+            or {0: "wildlife"}
         )
-        roi_processor = DetectionsPostprocessor(
-            keep_classes=roi_keep_classes,
+        detector = ObjectDetectionSystem(
+            config=pred_config, detection_label_map=detection_label_map
         )
-        roi_processor.set_classifier(roi_classifier)
-    except:
-        traceback.print_exc()
-        logger.warning("Roi classifier is not loaded.")
+        detector.set_model(model=detection_model, task="detect", path_weights=None)
+        detector.set_processor(roi_processor=roi_processor)
 
-    # build object detection system
-    detection_label_map = (
-        getattr(detection_model, "names", None)
-        or detection_label_map
-        or {0: "wildlife"}
-    )
-    detector = ObjectDetectionSystem(
-        config=pred_config, detection_label_map=detection_label_map
-    )
-    detector.set_model(model=detection_model, task="detect", path_weights=None)
-    detector.set_processor(roi_processor=roi_processor)
+        engine = cls(config=pred_config)
+        engine.set_detector(detector=detector, model_tag=mlflow_model_alias)
 
-    engine = InferenceEngine(config=pred_config)
-    engine.set_detector(detector=detector, model_tag=mlflow_model_alias)
+        if set_ls_client:
+            engine.set_ls_client(dotenv_path=dot_env_path)
 
-    if set_ls_client:
-        engine.set_ls_client(dotenv_path=dot_env_path)
-
-    return engine, feature_extractor
+        return engine, feature_extractor

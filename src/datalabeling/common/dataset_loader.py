@@ -844,7 +844,7 @@ class ClassificationDatasetBuilder:
         from .evaluation import PerformanceEvaluator
 
         self.config = eval_config
-        self.detector: InferenceEngine = None
+        # self.detector: InferenceEngine = None
         self.source_dirs = None
         self.output_dir = None
         self.perf_eval = PerformanceEvaluator(config=self.config)
@@ -885,7 +885,6 @@ class ClassificationDatasetBuilder:
         )
 
         self.bbox_resize_factor = bbox_resize_factor
-        self.detector = detector
         self.feature_extractor = feature_extractor
 
         # load predictions
@@ -893,7 +892,7 @@ class ClassificationDatasetBuilder:
         if "fp" in strategies or "hn" in strategies:
             tiles = [Tile(image_path=p) for p in get_images_from_dirs(self.source_dirs)]
             dataset = LabelingDataset(tiles=tiles)
-            dataset.add_predictions(engine=self.detector, build=True)
+            dataset.add_predictions(engine=detector, build=True)
 
         for strategy in list(set(strategies)):
             if strategy == "gt":
@@ -911,13 +910,11 @@ class ClassificationDatasetBuilder:
                 )
 
             elif strategy == "fp":
-                assert self.detector is not None, "Provide a detector"
                 self._save_fp(
                     dataset=dataset, bbox_resize_factor=bbox_resize_factor, **fp_kwargs
                 )
 
             elif strategy == "hn":
-                assert self.detector is not None, "Provide a detector"
                 self._save_hn(
                     dataset=dataset, bbox_resize_factor=bbox_resize_factor, **hn_kwargs
                 )

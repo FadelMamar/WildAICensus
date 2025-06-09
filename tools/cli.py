@@ -7,7 +7,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from dotenv import load_dotenv
 from label_studio_sdk.client import LabelStudio
-
+from ultralytics import YOLO
 from datalabeling.common.config import DataConfig, LabelConfig
 from datalabeling.common.pipeline import (
     LabelstudioToYolo,
@@ -19,7 +19,7 @@ from datalabeling.common.pipeline import (
     YoloToCocoStep,
 )
 from datalabeling.common.io import load_datasets
-from datalabeling.ml.interface import load_engine
+from datalabeling.ml.interface import InferenceEngine
 from datalabeling.common.config import TrainingConfig
 from datalabeling.ml.train import TrainingManager
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
@@ -46,6 +46,9 @@ def create_classification_data(
     save_dir: str,
     strategies: list[str] = ["gt", "hn", "fp"],
     alias="demo",
+    detection_model_path: str = None,
+    roi_classifier_path: str = None,
+    roi_cls_label_map: dict = {0: "gt", 1: "tn"},
 ):
     eval_config = EvaluationConfig()
     eval_config.score_threshold = 0.25
@@ -66,7 +69,7 @@ def create_classification_data(
         batch_size=8,
         # min_area=100,
         # max_area=None,
-        cls_imgsz=196,
+        cls_imgsz=98,
         # device="cpu",
     )
 
@@ -76,18 +79,23 @@ def create_classification_data(
 
     cfg = load_yaml(yaml_path)
 
-    engine, feature_extractor = load_engine(
+    model = None
+    if detection_model_path:
+        model = YOLO(detection_model_path)
+
+    engine, feature_extractor = InferenceEngine.load_engine(
         pred_config,
-        roi_classifier_path=None,
+        roi_classifier_path=roi_classifier_path,
+        detection_model=model,
         roi_cls_is_features=True,
-        roi_cls_label_map={},
+        roi_cls_label_map=roi_cls_label_map,
         mlflow_model_alias=alias,
     )
 
     for split in ["train", "val"]:
         source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
 
-        print(f"source_dirs: {source_dirs}")
+        logger.info(f"source_dirs: {source_dirs}")
 
         handler.set_dirs(
             source_dirs=source_dirs, output_dir=os.path.join(save_dir, split)

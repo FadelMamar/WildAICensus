@@ -38,15 +38,15 @@ class LoadingDataset(Dataset):
     def __init__(
         self,
         data: Sequence[torch.Tensor],
-        offset_info: Sequence[dict],
-        metadata: Sequence[dict],
+        # offset_info: Sequence[dict],
+        # metadata: Sequence[dict],
     ):
         super().__init__()
 
         data = list(data)
         self.data = torch.cat(data, dim=0)
-        self.offset_info = list(offset_info)
-        self.metadata = list(metadata)
+        # self.offset_info = list(offset_info)
+        # self.metadata = list(metadata)
         self.indices_map = dict()  # index in dataset -> offset_info
 
         index = 0
@@ -72,7 +72,7 @@ class SharedBuffers:
     - Add more buffers if needed for your specific use case
     """
 
-    def __init__(self, max_size: int = 64, timeout: int = 360):
+    def __init__(self, max_size: int = 64, timeout: int = 120):
         super(SharedBuffers, self)  # .__init__(name="SharedBuffers")
 
         self.raw_data_buffer = Queue(maxsize=max_size)
@@ -142,12 +142,13 @@ class SharedBuffers:
 
         except queue.Empty:
             self.logger.info("Queue is Empty or has been consumed.")
-            return "empty"
+            return "DONE"
 
         except Exception:
             self.logger.error("Un-catched error!")
             traceback.print_exc()
-            raise ValueError()
+            # raise ValueError()
+            return "DONE"
 
     @property
     def is_full_data_queue(
@@ -259,8 +260,9 @@ class DataLoadingThread(threading.Thread):
             return "DONE"
 
         except Exception:
+            self.logger.error("Un-catched error!")
             traceback.print_exc()
-            raise ValueError()
+            return "DONE"
 
     def _get_patches_from_tile(
         self, tile: Tile, patch_size: int
@@ -279,13 +281,21 @@ class DataLoadingThread(threading.Thread):
         image = image.convert("RGB")
         image = PILToTensor()(image)
 
-        if tile.width < patch_size or tile.height < patch_size:
+        if tile.width <= patch_size or tile.height <= patch_size:
             self.logger.debug("image is too small for patch extraction")
             offset_info = {
-                "y_offset": [0],
-                "x_offset": [0],
-                "y_end": tile.height,
-                "x_end": tile.width,
+                "y_offset": [
+                    0,
+                ],
+                "x_offset": [
+                    0,
+                ],
+                "y_end": [
+                    tile.height,
+                ],
+                "x_end": [
+                    tile.width,
+                ],
                 "file_name": str(tile.image_path),
             }
             return image, offset_info
@@ -325,6 +335,8 @@ class DataLoadingThread(threading.Thread):
             tile=tile, patch_size=self.tile_size
         )
 
+        # print(offset_info,"\n\n")
+
         if batch_of_patches.max() > 1.0:
             batch_of_patches = batch_of_patches / 255.0
 
@@ -335,39 +347,41 @@ class DataLoadingThread(threading.Thread):
 
         return batch_of_patches, offset_info
 
+    def _load_once(self):
+        tile = self._load_data()
+
+        if tile == "DONE":
+            self.shared_buffers.put(data="DONE")
+            self.logger.info(f"No more data to load. Loaded {self.count} samples.")
+            return "DONE"
+
+        # Preprocess data
+        data, offset_info = self.preprocess_data(tile=tile)
+        data_package = dict(
+            metadata={
+                "tile": tile,
+                "idx": self.count,
+            },
+            data=data,
+            offset_info=offset_info,
+        )
+
+        # push data
+        self.shared_buffers.put(data=data_package)
+        return "OK"
+
     def run(self):
         """Main thread execution loop"""
         self.logger.info("Starting data loading thread")
 
-        while not self.shared_buffers.is_closed:
-            # Load data
-            tile = None
+        while True:
             for _ in range(self.batchsize):
-                tile = self._load_data()
-                if tile == "DONE":
-                    self.logger.info("No more data to load")
-                    break
-                # Preprocess data
-                data, offset_info = self.preprocess_data(tile=tile)
-                # Package data with metadata
-                data_package = dict(
-                    metadata={
-                        "tile": tile,
-                        "idx": self.count,
-                    },
-                    data=data,
-                    offset_info=offset_info,
-                )
-
-                # wait until there is space
-                while self.shared_buffers.is_full_data_queue:
-                    time.sleep(2)
-                self.shared_buffers.put(data=data_package)
-
-            if tile == "DONE":
-                break
-        # Signal end of data loading
-        self.shared_buffers.put(data="DONE")
+                if self._load_once() == "DONE":
+                    return
+                elif self._load_once() == "OK":
+                    continue
+                else:
+                    return
 
 
 class DetectionThread(threading.Thread):
@@ -489,7 +503,7 @@ class DetectionThread(threading.Thread):
         """
 
         batchsize = (
-            self.config.batch_size * 4
+            self.config.batch_size * 2
             if self.config.inference_service_url
             else self.config.batch_size
         )
@@ -512,6 +526,8 @@ class DetectionThread(threading.Thread):
                 results.extend(self._trim_result(res))
                 indices.extend(index.cpu().flatten().tolist())
 
+        # collect results per image
+        # ever image is designed by an index
         results = {
             i: [res for j, res in enumerate(results) if i == indices[j]]
             for i in list(set(indices))
@@ -525,7 +541,7 @@ class DetectionThread(threading.Thread):
         metadata = []
         start_time = time.time()
 
-        while len(batch) < self.config.batch_size:
+        while len(batch) < self.config.batch_size * 2:
             # Calculate remaining wait time
             elapsed = time.time() - start_time
             remaining_time = self.max_wait_time - elapsed
@@ -533,26 +549,29 @@ class DetectionThread(threading.Thread):
             if remaining_time <= 0:
                 break
 
-            try:
-                # Get data from buffer
-                data_package = self.shared_buffers.get(data=True)
+            # try:
+            # Get data from buffer
+            data_package = self.shared_buffers.get(data=True)
 
-                if data_package == "DONE":
-                    self.logger.info("No more data to process. DONE.")
-                    return "DONE", None, None
+            if data_package == "DONE":
+                self.logger.info("No more data to process. DONE.")
+                break
+                # return "DONE", None, None
 
-                if data_package == "empty":
-                    self.logger.info("Buffer is empty.")
-                    return "empty", None, None
+            # if data_package == "empty":
+            #     self.logger.info("Buffer is empty.")
+            #     return "empty", None, None
 
-                batch.append(data_package.pop("data"))
-                offsets.append(data_package.pop("offset_info"))
-                metadata.append(data_package.pop("metadata"))
+            batch.append(data_package.pop("data"))
+            offsets.append(data_package.pop("offset_info"))
+            metadata.append(data_package.pop("metadata"))
 
-            except Exception:
-                traceback.print_exc()
+        if len(batch) < 1:
+            return "DONE", None, None
 
-        dataset = LoadingDataset(data=batch, offset_info=offsets, metadata=metadata)
+        dataset = LoadingDataset(
+            data=batch,
+        )
 
         return dataset, offsets, metadata
 
@@ -566,19 +585,17 @@ class DetectionThread(threading.Thread):
         )
         sleep_time = 0
         while True:
-            if self.shared_buffers.counts["data"] < self.config.batch_size * 4:
-                time.sleep(1.0 + sleep_time)
-                sleep_time += 0.5  # extend wait
-                continue
+            # if self.shared_buffers.counts["data"] < self.config.batch_size * 4:
+            #     time.sleep(1.0 + sleep_time)
+            #     sleep_time += 0.5  # extend wait
+            #     continue
 
             # get data
             data, offsets, metadata = self.collect_batch()
 
             if data == "DONE":
+                self.shared_buffers.put(detections="DONE")
                 break
-
-            if data == "empty":
-                raise ValueError("Buffer is empty")
 
             try:
                 # Run detection
@@ -590,9 +607,13 @@ class DetectionThread(threading.Thread):
 
             except Exception as e:
                 traceback.print_exc()
-                raise ValueError()
+                self.logger.error("Graceful shutdown.")
+                self.shared_buffers.put(detections="DONE")
+                break
+                # raise ValueError()
 
             # Put in queue
+
             for i, results in detection_results.items():
                 results_package = {
                     "detections": results,
@@ -601,9 +622,6 @@ class DetectionThread(threading.Thread):
                     "detection_time": t_end,
                 }
                 self.shared_buffers.put(detections=results_package)
-
-        # Signal end of detections
-        self.shared_buffers.put(detections="DONE")
 
 
 class PostProcessingThread(threading.Thread):
@@ -681,7 +699,10 @@ class PostProcessingThread(threading.Thread):
         # post process roi
         if self.roi_processor:
             detections = self.roi_processor.run(
-                detections, image=tile.load_image_data(), box_size=self.config.cls_imgsz
+                detections,
+                image=tile.load_image_data(),
+                box_size=self.config.cls_imgsz,
+                verbose=False,
             )
 
         self.count += 1
@@ -775,35 +796,40 @@ class PostProcessingThread(threading.Thread):
         """Main thread execution loop"""
         self.logger.info("Starting post-processing thread")
 
-        sleep_time = 0
+        # sleep_time = 0
         while True:
             # wait for detections to be computed
-            if self.shared_buffers.counts["detections"] < self.config.batch_size * 2:
-                time.sleep(1.0 + sleep_time)
-                sleep_time += 0.5  # extend wait
-                continue
+            # if self.shared_buffers.counts["detections"] < self.config.batch_size * 2:
+            #     time.sleep(1.0 + sleep_time)
+            #     sleep_time += 0.5  # extend wait
+            #     continue
 
             # Get detection results from buffer
             results_package = self.shared_buffers.get(detections=True)
 
             if results_package == "DONE":
+                self.shared_buffers.put(filtered_detections="DONE")
                 self.logger.info("No more data to process")
                 break
-
-            if results_package == "empty":
-                raise ValueError("Error: Detections buffer is empty")
 
             # Apply post-processing
             detections = results_package["detections"]
             tile = results_package["metadata"]["tile"]
             offset_info = results_package["offset_info"]
 
-            t1 = time.perf_counter()
-            detections = self.postprocess(
-                detections, tile=tile, offset_info=offset_info
-            )
-            t2 = time.perf_counter() - t1
-            self.logger.debug(f"Postprocessing took: {t2:.3f}s")
+            try:
+                t1 = time.perf_counter()
+                detections = self.postprocess(
+                    detections, tile=tile, offset_info=offset_info
+                )
+                t2 = time.perf_counter() - t1
+                self.logger.debug(f"Postprocessing took: {t2:.3f}s")
+            except:
+                traceback.print_exc()
+                self.shared_buffers.put(filtered_detections="DONE")
+                self.logger.info("Graceful shutdown of thread.")
+                break
+
             # Filter by confidence
             # detections = self.filter_detections(detections,
             #                                   self.output_config.get("conf_threshold", 0.5))
@@ -814,13 +840,6 @@ class PostProcessingThread(threading.Thread):
 
             # self.shared_buffers.put(filtered_detections=results_package)
             self.outputs.append(results_package)
-
-        # Signal end of post-processing
-        self.shared_buffers.put(filtered_detections="DONE")
-
-        # except Exception as e:
-        #     self.logger.error(f"Error in post-processing thread: {e}")
-        #     traceback.print_exc()
 
 
 class ObjectDetectionSystem:
@@ -928,7 +947,9 @@ class ObjectDetectionSystem:
         self.logger.info("All threads stopped")
         return None
 
-    def run(self, images_paths: Sequence[str]) -> List[Detection]:
+    def run(
+        self, images_paths: Sequence[str], img_loading_batch: int = 4
+    ) -> List[Detection]:
         """
         Run the system for a specified duration or until stopped
         """
@@ -936,7 +957,11 @@ class ObjectDetectionSystem:
 
         # Initialize threads
         self.data_thread = DataLoadingThread(
-            self.shared_buffers, data_source=images_paths
+            self.shared_buffers,
+            data_source=images_paths,
+            tile_size=self.config.tilesize,
+            batchsize=img_loading_batch,
+            overlap_ratio=self.config.overlap_ratio,
         )
 
         self.detection_thread = DetectionThread(self.shared_buffers, config=self.config)
@@ -967,58 +992,58 @@ class ObjectDetectionSystem:
         return detections
 
 
-if __name__ == "__main__":
-    config = PredictionConfig(
-        imgsz=800,
-        tilesize=800,
-        batch_size=4,
-        overlap_ratio=0.2,
-        confidence_threshold=0.2,
-        inference_service_url=None,
-        flight_height=180,
-        sensor_height=24,
-        gsd=None,
-        nms_iou=0.5,
-        verbose=True,
-        # min_area=100,
-        # max_area=None,
-        cls_imgsz=128,
-        # device="cuda:0",
-    )
+# if __name__ == "__main__":
+#     config = PredictionConfig(
+#         imgsz=800,
+#         tilesize=800,
+#         batch_size=4,
+#         overlap_ratio=0.2,
+#         confidence_threshold=0.2,
+#         inference_service_url=None,
+#         flight_height=180,
+#         sensor_height=24,
+#         gsd=None,
+#         nms_iou=0.5,
+#         verbose=True,
+#         # min_area=100,
+#         # max_area=None,
+#         cls_imgsz=128,
+#         # device="cuda:0",
+#     )
 
-    image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
-    # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
+#     image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
+#     # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
 
-    images = [image_path] * 5
+#     images = [image_path] * 5
 
-    # load Roi processor
-    path = r"D:\datalabeling\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=True, map_location=config.device
-    )
-    roi_classifier = get_processor("classifier")(
-        model,
-        label_map={0: "gt", 1: "tn"},
-        device=config.device,
-        feature_extractor=get_processor("feature_extractor")(),
-        imgsz=config.cls_imgsz,
-    )
-    roi_processor = DetectionsPostprocessor(
-        keep_classes=["gt"],  # from roi classifier
-    )
-    roi_processor.set_classifier(roi_classifier)
+#     # load Roi processor
+#     path = r"D:\datalabeling\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
+#     model = ImageClassifier.load_from_checkpoint(
+#         path, cls_is_features=True, map_location=config.device
+#     )
+#     roi_classifier = get_processor("classifier")(
+#         model,
+#         label_map={0: "gt", 1: "tn"},
+#         device=config.device,
+#         feature_extractor=get_processor("feature_extractor")(),
+#         imgsz=config.cls_imgsz,
+#     )
+#     roi_processor = DetectionsPostprocessor(
+#         keep_classes=["gt"],  # from roi classifier
+#     )
+#     roi_processor.set_classifier(roi_classifier)
 
-    detection_system = ObjectDetectionSystem(
-        data_source=images,
-        config=config,
-        buffer_size=32,
-        timeout=15,
-        detection_label_map={},
-        roi_processor=roi_processor,
-    )
+#     detection_system = ObjectDetectionSystem(
+#         data_source=images,
+#         config=config,
+#         buffer_size=32,
+#         timeout=15,
+#         detection_label_map={},
+#         roi_processor=roi_processor,
+#     )
 
-    detection_system.run()
+#     detection_system.run()
 
-    outputs = detection_system.outputs
+#     outputs = detection_system.outputs
 
-    pass
+#     pass
