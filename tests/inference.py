@@ -1,7 +1,7 @@
 from datalabeling.common.config import PredictionConfig
-from datalabeling.ml.interface import InferenceEngine, Annotator, load_engine
+from datalabeling.ml.interface import InferenceEngine
 from datalabeling.ml.workers import ObjectDetectionSystem
-
+from ultralytics import YOLO
 from datalabeling.common.mlflow_utils import load_registered_model
 
 import torch
@@ -14,12 +14,12 @@ from pathlib import Path
 from datalabeling.common.base import Tile
 
 config = PredictionConfig(
-    imgsz=800,
-    tilesize=800,
-    batch_size=8,
+    imgsz=640,
+    tilesize=640,
+    batch_size=4,
     overlap_ratio=0.2,
     confidence_threshold=0.2,
-    inference_service_url="http://localhost:4141/predict",  # None "http://localhost:4141/predict"
+    inference_service_url=None,  # "http://localhost:4141/predict",  # None "http://localhost:4141/predict"
     flight_height=180,
     sensor_height=24,
     gsd=None,
@@ -27,7 +27,7 @@ config = PredictionConfig(
     verbose=True,
     # min_area=100,
     # max_area=None,
-    cls_imgsz=128,
+    cls_imgsz=98,
     # device="cuda:0",
 )
 
@@ -35,8 +35,8 @@ ALIAS = "demo"  # -rt-batch8'
 NAME = "labeler"
 
 
-def run_inference_engine(img_path: str):
-    engine, _ = load_engine(
+def run_inference_engine(image_paths: list[str]):
+    engine, _ = InferenceEngine.load_engine(
         pred_config=config,
         roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
         roi_cls_is_features=True,
@@ -44,12 +44,12 @@ def run_inference_engine(img_path: str):
         roi_keep_classes=["gt"],
         detection_label_map={0: "wildlife"},
         feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=None,
+        detection_model=YOLO(r"D:\datalabeling\base_models_weights\best.pt"),
         mlflow_model_alias="demo",
         mlflow_model_name="labeler",
     )
 
-    detections = engine.inference(images_paths=[img_path])
+    detections = engine.inference(images_paths=image_paths)
 
     return detections
 
@@ -63,9 +63,9 @@ def run_detector(
         config=config, buffer_size=32, timeout=15, detection_label_map={0: "wildlife"}
     )
     # detector.set_processor(roi_processor=processor)
-    # detector.set_model(
-    #     model=None, path_weights=r"D:\datalabeling\base_models_weights\best.pt"
-    # )
+    detector.set_model(
+        model=None, path_weights=r"D:\datalabeling\base_models_weights\best.pt"
+    )
 
     results = detector.run(images_paths=image_paths)
 
@@ -79,7 +79,7 @@ def run_detector(
     # print(results[0])
     # print(results_url[0][0])
 
-    # print("Inference time improved: ", perf_counter() - t1_start)
+    print("Inference time improved: ", perf_counter() - t1_start)
 
     # t1_start = perf_counter()
     # results = detector.legacy_predict(tile=None,image_path=tile.image_path)
@@ -98,17 +98,20 @@ def run_annotator(
     inference_service_url=None,
     dotenv_path="../.env",
 ):
-    # get annotator
-    annotator = Annotator(
-        config=config,
-        dotenv_path=dotenv_path,
+    annotator, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map={0: "wildlife"},
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=None,
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+        set_ls_client=True,
+        dot_env_path=dotenv_path,
     )
-
-    detector = Detector(config=config, detection_model=detection_model)
-    annotator.set_detector(detector, model_tag=ALIAS)
-
-    if add_processor:
-        annotator.set_processor(image_processor=None, detection_processor=processor)
 
     annotator.upload_predictions(
         project_id=project_id, top_n=top_n, tag="-" + str(add_processor)
@@ -127,7 +130,11 @@ if __name__ == "__main__":
     images = Path(
         r"D:\workspace\data\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images"
     ).glob("*.JPG")
-    results = run_detector(image_paths=images)
+    images = list(images)[:20]
+
+    # results = run_detector(image_paths=images)
+
+    results = run_inference_engine(images)
 
     # data = tile.detections_to_df()
 

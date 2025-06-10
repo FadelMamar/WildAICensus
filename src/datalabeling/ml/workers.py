@@ -10,6 +10,7 @@ import queue
 from multiprocessing import Queue
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Sequence
+from itertools import chain
 import time
 from ultralytics import YOLO
 import torch
@@ -23,6 +24,8 @@ import traceback
 from ultralytics.engine.results import Results as UltralyticsResults
 from tqdm import tqdm
 from torchvision.ops import nms
+import asyncio
+import aiohttp
 
 from ..common.config import PredictionConfig
 from ..common.base import Tile, Detection
@@ -389,15 +392,22 @@ class DetectionThread(threading.Thread):
     Thread responsible for running object detection
     """
 
-    def __init__(self, shared_buffers: SharedBuffers, config: PredictionConfig):
+    def __init__(
+        self,
+        shared_buffers: SharedBuffers,
+        config: PredictionConfig,
+        enable_async: bool = False,
+    ):
         super().__init__(name="DetectionThread")
         self.shared_buffers = shared_buffers
         self.model = None
         self.logger = logging.getLogger(self.name)
 
+        self.session = None
         self.count = 0
         self.config = config
         self.max_wait_time = 0.1  # seconds for batch collection
+        self.enable_async = enable_async
 
     def set_model(self, model: YOLO, path_weights: str, task="detect"):
         if self.config.inference_service_url:
@@ -472,9 +482,12 @@ class DetectionThread(threading.Thread):
         return batch
 
     def _predict(self, batch: torch.Tensor):
-        url = self.config.inference_service_url
+        num_images = batch.shape[0]
+        batch = self._pad_if_needed(
+            batch, out_shape=(self.config.batch_size, *batch.shape[1:])
+        )
 
-        if url:
+        if self.config.inference_service_url:
             as_bytes = batch.cpu().numpy().tobytes()
             payload = {
                 "tensor": base64.b64encode(as_bytes).decode("utf-8"),
@@ -483,7 +496,9 @@ class DetectionThread(threading.Thread):
                 "conf": self.config.confidence_threshold,
             }
 
-            res = requests.post(url=url, json=payload).json()
+            res = requests.post(
+                url=self.config.inference_service_url, json=payload
+            ).json()
             res = res["detections"]
 
         else:
@@ -496,7 +511,84 @@ class DetectionThread(threading.Thread):
                 device=self.config.device,
             )
 
+        res = res[:num_images]
+
         return res
+
+    # TODO: debug
+    async def _async_predict(self, batch: torch.Tensor, index: torch.Tensor):
+        num_images = batch.shape[0]
+
+        batch = self._pad_if_needed(
+            batch, out_shape=(self.config.batch_size, *batch.shape[1:])
+        )
+
+        as_bytes = batch.cpu().numpy().tobytes()
+        payload = {
+            "tensor": base64.b64encode(as_bytes).decode("utf-8"),
+            "shape": list(batch.shape),
+            "iou_nms": self.config.nms_iou,
+            "conf": self.config.confidence_threshold,
+        }
+
+        async with self.session.post(
+            self.config.inference_service_url, json=payload
+        ) as response:
+            if response.status == 200:
+                result = await response.json()
+                res = result["detections"]
+            else:
+                raise ValueError(f"Request failed: {response.status}")
+
+        res = res[:num_images]
+        res = self._trim_result(res)
+        indices = index.cpu().flatten().tolist()
+
+        return res, indices
+
+    # TODO: debug
+    async def init_session(self):
+        self.session = aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=30),
+            connector=aiohttp.TCPConnector(limit=100),
+        )
+
+    # TODO: debug
+    async def async_run_detection(
+        self, data: LoadingDataset, max_concurrent: int = 10
+    ) -> dict:
+        """
+        Run object detection on input data
+        """
+
+        loader = DataLoader(data, batch_size=self.config.batch_size, shuffle=False)
+
+        if self.config.verbose:
+            loader = tqdm(loader, desc="sliced_inference")
+
+        tasks = [self._async_predict(batch, index) for batch, index in loader]
+        # res, indices = self._async_predict(batch,index)
+
+        # Limit concurrency to avoid overwhelming servers
+        semaphore = asyncio.Semaphore(max_concurrent)
+
+        async def bounded_request(task):
+            async with semaphore:
+                return await task
+
+        results = await asyncio.gather(*[bounded_request(task) for task in tasks])
+
+        indices = chain.from_iterable([task[1] for task in tasks])
+        results = chain.from_iterable([task[0] for task in tasks])
+        indices = list(indices)
+        results = list(results)
+
+        # collect results using image index
+        results = {
+            i: [res for j, res in enumerate(results) if i == indices[j]]
+            for i in list(set(indices))
+        }
+        return results
 
     def run_detection(
         self,
@@ -507,7 +599,7 @@ class DetectionThread(threading.Thread):
         """
 
         batchsize = (
-            self.config.batch_size * 2
+            self.config.batch_size
             if self.config.inference_service_url
             else self.config.batch_size
         )
@@ -521,12 +613,7 @@ class DetectionThread(threading.Thread):
         indices = []
         with torch.no_grad():
             for batch, index in loader:
-                num_images = batch.shape[0]
-                batch = self._pad_if_needed(
-                    batch, out_shape=(self.config.batch_size, *batch.shape[1:])
-                )
                 res = self._predict(batch)
-                res = res[:num_images]
                 results.extend(self._trim_result(res))
                 indices.extend(index.cpu().flatten().tolist())
 
@@ -587,6 +674,11 @@ class DetectionThread(threading.Thread):
         assert self.model or self.config.inference_service_url, (
             "Provide detection model or url to inference service i.e. YOLO"
         )
+
+        # TODO: debug
+        # if self.enable_async:
+        #     await self.init_session()
+
         # sleep_time = 0
         while True:
             # if self.shared_buffers.counts["data"] < self.config.batch_size * 4:
