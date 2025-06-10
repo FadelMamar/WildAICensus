@@ -16,7 +16,7 @@ from PIL import Image
 
 from .workers import ObjectDetectionSystem, GPSUtils
 from .models import ImageClassifier, YOLO
-from ..common.processor import DetectionsPostprocessor, get_processor, FeatureExtractor
+from ..common.processor import DetectionsPostprocessor, get_processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
 from ..common.mlflow_utils import load_registered_model
@@ -99,7 +99,7 @@ class InferenceEngine(object):
         if tiles is not None:
             # if tiles are provided,
             for i, tile in enumerate(tiles):
-                tile.predictions = detections[i]
+                tile.set_predictions(detections[i])
 
         if return_tiles:
             assert tiles is not None, (
@@ -246,7 +246,7 @@ class InferenceEngine(object):
         set_ls_client: bool = False,
         dot_env_path: str = None,
     ) -> tuple:
-        if detection_model is None:
+        if (detection_model is None) and (pred_config.inference_service_url is None):
             logger.info(
                 f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
             )

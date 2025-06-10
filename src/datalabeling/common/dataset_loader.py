@@ -311,7 +311,7 @@ class LabelingDataset:
     def add_tile(self, tile: Tile) -> None:
         self.tiles.append(tile)
 
-    def add_predictions(self, engine: InferenceEngine, build: bool = False) -> None:
+    def add_predictions(self, engine: InferenceEngine, build: bool = True) -> None:
         self.tiles = engine.inference(
             tiles=self.tiles, images_paths=None, return_tiles=True
         )

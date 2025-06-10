@@ -356,13 +356,13 @@ class DataLoadingThread(threading.Thread):
             return "DONE"
 
         # Preprocess data
-        data, offset_info = self.preprocess_data(tile=tile)
+        batch_of_patches, offset_info = self.preprocess_data(tile=tile)
         data_package = dict(
             metadata={
                 "tile": tile,
                 "idx": self.count,
             },
-            data=data,
+            data=batch_of_patches,
             offset_info=offset_info,
         )
 
@@ -400,17 +400,21 @@ class DetectionThread(threading.Thread):
         self.max_wait_time = 0.1  # seconds for batch collection
 
     def set_model(self, model: YOLO, path_weights: str, task="detect"):
-        if model:
+        if self.config.inference_service_url:
+            assert (model is None) and (path_weights is None)
+            self.logger.info(f"Using deployment @ {self.config.inference_service_url}")
+            return None
+
+        elif model:
             self.model = model
 
         elif path_weights:
             self.model = YOLO(path_weights, task=task)
 
-        elif self.config.inference_service_url:
-            return None
-
         else:
-            raise ValueError()
+            raise ValueError(
+                f"provide self.config.inference_service_url or model:YOLO or path_weights:str"
+            )
 
         self.logger.info("Model loaded successfully")
 
@@ -583,7 +587,7 @@ class DetectionThread(threading.Thread):
         assert self.model or self.config.inference_service_url, (
             "Provide detection model or url to inference service i.e. YOLO"
         )
-        sleep_time = 0
+        # sleep_time = 0
         while True:
             # if self.shared_buffers.counts["data"] < self.config.batch_size * 4:
             #     time.sleep(1.0 + sleep_time)
@@ -702,7 +706,7 @@ class PostProcessingThread(threading.Thread):
                 detections,
                 image=tile.load_image_data(),
                 box_size=self.config.cls_imgsz,
-                verbose=False,
+                verbose=self.config.verbose,
             )
 
         self.count += 1
@@ -777,8 +781,6 @@ class PostProcessingThread(threading.Thread):
         bboxs = bboxs.tolist()
         conf = conf.tolist()
         label = label.tolist()
-
-        # to coco format
         coco = [
             dict(
                 bbox=bboxs[i],

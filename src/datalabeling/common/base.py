@@ -7,6 +7,7 @@ import torch
 from torchvision.transforms import PILToTensor
 from PIL import Image
 import pandas as pd
+import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,18 @@ class Detection:
     gps_loc: str = None
     image_gps_loc: str = None
     parent_image: str = None
+
+    @classmethod
+    def empty(cls, parent_image: str = None):
+        return cls(
+            x_min=np.nan,
+            x_max=np.nan,
+            y_min=np.nan,
+            y_max=np.nan,
+            label=np.nan,
+            class_name=None,
+            parent_image=parent_image,
+        )
 
     @classmethod
     def from_coco(
@@ -155,25 +168,37 @@ class Detection:
     def x(
         self,
     ):
-        return math.floor((self.x_min + self.x_max) / 2)
+        x = (self.x_min + self.x_max) / 2
+        if not np.isnan(x):
+            return math.floor(x)
+        return x
 
     @property
     def y(
         self,
     ):
-        return math.floor((self.y_min + self.y_max) / 2)
+        y = (self.y_min + self.y_max) / 2
+        if not np.isnan(y):
+            return math.floor(y)
+        return y
 
     @property
     def w(
         self,
     ):
-        return int(self.x_max - self.x_min)
+        w = self.x_max - self.x_min
+        if not np.isnan(w):
+            return int(w)
+        return w
 
     @property
     def h(
         self,
     ):
-        return int(self.y_max - self.y_min)
+        h = self.y_max - self.y_min
+        if not np.isnan(h):
+            return int(h)
+        return h
 
     @property
     def gps_as_decimals(
@@ -264,15 +289,25 @@ class Tile:
         self,
     ):
         if self.x_offset is not None and self.y_offset is not None:
+            if self._pred_is_original:
+                logger.info(
+                    "Skipping - Predictions have already been mapped to the reference coordinates."
+                )
             if self.predictions and (not self._pred_is_original):
                 for det in self.predictions:
                     det.to_absolute_coords(self.x_offset, self.y_offset)
                 self._pred_is_original = True
 
             if self.annotations and (not self._annot_is_original):
+                if self._annot_is_original:
+                    logger.info(
+                        "Skipping - Annotations have already been mapped to the reference coordinates."
+                    )
                 for det in self.annotations:
                     det.to_absolute_coords(self.x_offset, self.y_offset)
                 self._annot_is_original = True
+        else:
+            logger.info("Failed...self.x_offset is None or self.y_offset is not None.")
 
     def update_detection_gps(
         self,
@@ -361,15 +396,36 @@ class Tile:
         return df
 
     def set_predictions(self, data: List[Detection]) -> None:
-        self.predictions = data
+        assert isinstance(data, list), f"Expected 'list' but received {type(list)}"
+
+        if len(data) > 0:
+            self.predictions = data
+
+        else:
+            self.predictions = [
+                Detection.empty(parent_image=self.image_path),
+            ]
+
         return None
 
     def set_annotations(self, data: List[Detection]) -> None:
-        self.annotations = data
+        assert isinstance(data, list), f"Expected 'list' but received {type(list)}"
+
+        if len(data) > 0:
+            self.annotations = data
+
+        else:
+            self.annotations = [
+                Detection.empty(parent_image=self.image_path),
+            ]
+
         return None
 
     def check_detections(self, df: pd.DataFrame) -> None:
         df = df[["x_min", "x_max", "y_min", "y_max"]].dropna().copy()
+
+        if df.empty:
+            return None
 
         assert df.to_numpy().min() >= 0
         assert df[["x_min", "x_max"]].to_numpy().max() <= self.width

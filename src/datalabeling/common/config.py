@@ -89,6 +89,18 @@ class PredictionConfig:
     # inference service
     inference_service_url: str = None
 
+    def __post_init__(self):
+        for a in [
+            self.batch_size,
+            self.nms_iou,
+            self.cls_imgsz,
+            self.imgsz,
+            self.tilesize,
+            self.confidence_threshold,
+            self.overlap_ratio,
+        ]:
+            assert a is not None
+
 
 @dataclass
 class TrainingConfig:
