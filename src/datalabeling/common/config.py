@@ -108,11 +108,12 @@ class TrainingConfig:
     is_single_cls: bool = False
     is_rtdetr: bool = False
     task: str = "detect"  # "detect" "obb" "segment"
-    model_type: str = "ultralytics"  # "ultralytics", "herdnet", "classifier"
+    model_type: str = "detector"  # "detector", "herdnet", "classifier"
 
     # active learning flags
     mlflow_tracking_uri: str = "http://localhost:5000"
     mlflow_model_alias: str = None
+    mlflow_model_name: str = None
 
     # training data
     yolo_yaml: str = None  # os.path.join(CUR_DIR,'../../../data/data_config.yaml')
@@ -164,7 +165,7 @@ class TrainingConfig:
     herdnet_ce_weight = None
     herdnet_down_ratio: int = 2
     herdnet_ptr_model_classes: int = 4
-    herndet_empty_ratio: float = 0.0
+    herdnet_empty_ratio: float = 0.0
     herdnet_valid_freq: int = 4
     herdnet_work_dir: str = "./runs-herndet"
     herdnet_lr_milestones: Sequence[int] = (20,)
@@ -262,7 +263,7 @@ class EvaluationConfig:
     tp_iou_threshold: float = 0.4
     fp_tp_ratio_threshold: float = 0.2
     fn_tp_ratio_threshold: float = 0.2
-    is_yolo_obb: bool = False
+    # is_yolo_obb: bool = False
     score_col: str = "max_scores"
     load_results: bool = False
 

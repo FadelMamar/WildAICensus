@@ -9,7 +9,7 @@ Created on Thu Apr 24 19:29:12 2025
 
 from tqdm import tqdm
 import os
-from datalabeling.common.config import TilingConfig
+from datalabeling.common.config import TilingConfig, EvaluationConfig, PredictionConfig
 from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
 from datalabeling.ml.workers import ObjectDetectionSystem
 from datalabeling.ml.interface import InferenceEngine
@@ -52,53 +52,7 @@ def load_herd_net():
         continue
 
 
-def load_engine(pred_config):
-    # detection_model, model_version = load_registered_model(
-    #     alias=alias,
-    #     name="labeler",
-    #     mlflow_tracking_url="http://localhost:5000",
-    #     load_unwrapped=True,
-    # )
-
-    path_weights = r"..\base_models_weights\best.pt"
-    detection_model = YOLO(model=path_weights)
-
-    # build roi postprocessor
-    feature_extractor = get_processor("feature_extractor")(
-        hf_model_path="facebook/dinov2-with-registers-small"
-    )
-    path = r"..\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=True, map_location=pred_config.device
-    )
-    roi_classifier = get_processor("classifier")(
-        model,
-        label_map={0: "gt", 1: "tn"},
-        device=pred_config.device,
-        feature_extractor=feature_extractor,
-        imgsz=pred_config.cls_imgsz,
-    )
-    roi_processor = DetectionsPostprocessor(
-        keep_classes=["gt"],
-    )
-    roi_processor.set_classifier(roi_classifier)
-
-    # build object detection system
-    detection_label_map = getattr(detection_model, "names", None) or {0: "wildlife"}
-    detector = ObjectDetectionSystem(
-        config=pred_config, detection_label_map=detection_label_map
-    )
-    detector.set_model(model=detection_model, task="detect", path_weights=None)
-    detector.set_processor(roi_processor=roi_processor)
-
-    engine = InferenceEngine(config=pred_config)
-    engine.set_detector(detector=detector, model_tag="demo")
-
-    return engine, feature_extractor
-
-
 def create_classification_data(strategies: list[str] = ["gt", "hn"], alias="demo"):
-    from datalabeling.common.config import EvaluationConfig, PredictionConfig
     from datalabeling.common.io import load_yaml
     from datalabeling.common.mlflow_utils import load_registered_model
     from datalabeling.common.dataset_loader import (
@@ -137,7 +91,16 @@ def create_classification_data(strategies: list[str] = ["gt", "hn"], alias="demo
 
     root_dir = r"D:\datalabeling\.tmp\cls-features"
 
-    engine, feature_extractor = load_engine(pred_config)
+    engine, feature_extractor = InferenceEngine.load_engine(
+        pred_config,
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_cls_is_features=True,
+        roi_keep_classes=["gt"],
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=YOLO(model=r"..\base_models_weights\best.pt"),
+        detection_label_map={0: "wildlife"},
+    )
 
     for split in ["train", "val"]:
         source_dirs = [os.path.join(cfg["path"], subset) for subset in cfg[split]]
@@ -182,12 +145,6 @@ def load_classification_features_data():
 
     for val_batch in tqdm(data.val_dataloader(), desc="train loader"):
         pass
-
-    # print("labels_map: ", data.labels_map)
-
-    # feature, label = next(iter(loader))
-
-    # return tr_batch, val_batch
 
 
 def load_dataset_from_ls(
@@ -240,14 +197,33 @@ def load_dataset_from_ls(
     )
 
     # add predictions
-    engine, pred_config = load_engine()
-    dataset.add_predictions(engine)
-    dataset.update_detection_gps(
-        sensor_height=config.sensor_height,
-        flight_height=config.flight_height,
-        gsd=config.gsd,
+    pred_config = PredictionConfig(
+        imgsz=800,
+        tilesize=800,
+        overlap_ratio=0.2,
+        confidence_threshold=0.2,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=98,
+        # device="cpu",
     )
-    dataset.build()
+    engine, feature_extractor = InferenceEngine.load_engine(
+        pred_config,
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_cls_is_features=True,
+        roi_keep_classes=["gt"],
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=YOLO(model=r"..\base_models_weights\best.pt"),
+        detection_label_map={0: "wildlife"},
+    )
+    # dataset.add_predictions(engine)
+    # dataset.update_detection_gps(
+    #     sensor_height=config.sensor_height,
+    #     flight_height=config.flight_height,
+    #     gsd=config.gsd,
+    # )
+    # dataset.build()
 
     return tile_metadata, dataset
 
@@ -264,11 +240,11 @@ def load_dataset_from_dirs():
 
 def load_dataset_from_yolo():
     images_dirs = [
-        r"D:\savmap_dataset_v2\raw\images",
+        r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images",
     ]
 
     dataset = LabelingDataset.from_yolo(
-        images_dirs=images_dirs, paths=None, load_empty=True, max_workers=1
+        images_dirs=images_dirs, paths=None, load_empty=True, max_workers=2
     )
 
     return dataset
@@ -289,14 +265,14 @@ if __name__ == "__main__":
     #                             # "fp"
     #                             ])
 
-    load_classification_features_data()
+    # load_classification_features_data()
 
-    # tile_metadata, dataset = load_dataset_from_ls(
-    #     project_id=4,
-    #     top_n=5,
-    #     load_existing_metadata=True,
-    #     untiled_data_dir=r"D:\savmap_dataset_v2\raw\images",
-    # )
+    tile_metadata, dataset = load_dataset_from_ls(
+        project_id=4,
+        top_n=0,
+        load_existing_metadata=True,
+        untiled_data_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
+    )
 
     # data = dataset.data
     # gps_data = dataset.export_detections_gps()

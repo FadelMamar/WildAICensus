@@ -420,6 +420,7 @@ class DetectionThread(threading.Thread):
 
         elif path_weights:
             self.model = YOLO(path_weights, task=task)
+            self.model.eval()
 
         else:
             raise ValueError(
@@ -502,14 +503,15 @@ class DetectionThread(threading.Thread):
             res = res["detections"]
 
         else:
-            res = self.model(
-                batch,
-                verbose=False,
-                imgsz=self.config.tilesize,
-                conf=self.config.confidence_threshold,
-                iou=self.config.nms_iou,
-                device=self.config.device,
-            )
+            with torch.inference_mode():
+                res = self.model(
+                    batch,
+                    verbose=False,
+                    imgsz=self.config.tilesize,
+                    conf=self.config.confidence_threshold,
+                    iou=self.config.nms_iou,
+                    device=self.config.device,
+                )
 
         res = res[:num_images]
 

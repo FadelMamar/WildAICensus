@@ -37,7 +37,7 @@ from ..ml.workers import ObjectDetectionSystem
 from ..ml.interface import InferenceEngine
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("DatasetLoaders")
 
 
 class TileBuilder:
@@ -433,6 +433,10 @@ class LabelingDataset:
         else:
             assert isinstance(paths, Sequence)
 
+        paths = list(paths)
+        assert len(paths) > 0, "No image has been provided."
+        assert all([Path(p).exists() for p in paths]), "Some paths do not exist."
+
         # load groundtruth
         df_labels, label_format = DataHandler.load_yolo_groundtruth(
             images_dir=None,
@@ -469,7 +473,7 @@ class LabelingDataset:
 
         if tile_metadata is None:
             tile_metadata = TileBuilder(config=config).run(
-                load_existing_metadata=load_existing_metadata
+                load_existing_metadata=load_existing_metadata, max_workers=max_workers
             )
 
         def load_unique_task(task) -> Tile | None:
@@ -483,7 +487,9 @@ class LabelingDataset:
                 )
 
                 # get tile gps_coords and offsets
-                value = tile_metadata.get(Path(image_path).stem, None)
+                value = tile_metadata.get(
+                    Path(img_url).stem, None
+                ) or tile_metadata.get(Path(image_path).stem, None)
                 tile_gps_loc = None
                 x1 = y1 = None
                 if value is None:
@@ -535,10 +541,9 @@ class LabelingDataset:
 
         # Single thread
         if max_workers < 2:
-            for i, task in enumerate(tasks):
+            for i, tile in enumerate(map(load_unique_task, tasks)):
                 if top_n > 0 and i >= top_n:
                     break
-                tile = load_unique_task(task)
                 if tile is not None:
                     tiles.append(tile)
 
@@ -549,8 +554,7 @@ class LabelingDataset:
 
         # Multi threads
         with ThreadPool(max_workers) as executor:
-            for i, task in enumerate(executor.map(load_unique_task, tasks)):
-                tile = load_unique_task(task)
+            for i, tile in enumerate(executor.map(load_unique_task, tasks)):
                 if tile is not None:
                     tiles.append(tile)
 
@@ -560,7 +564,55 @@ class LabelingDataset:
 
         return dataset
 
-    # TODO: Debug
+    def to_yolo(self, dir_path: str):
+        save_dir = Path(dir_path)
+        labels_dir = save_dir / "labels"
+        images_dir = save_dir / "images"
+
+        cols = ["label", "x", "y", "box_w", "box_h"]
+        if not save_dir.exists():
+            logger.info(f"dir_path={dir_path} does not exist. Creating...")
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        # get positive samples
+        data = self.data.copy().dropna()
+        if data.empty:
+            logger.info("Dataset to be saved in YOLO format has 0 positive samples.")
+        else:
+            data["x"] = (data["x_min"] + data["x_max"]) / (data["width"] * 2.0)
+            data["y"] = (data["y_min"] + data["y_max"]) / (data["height"] * 2.0)
+            data["box_w"] = (data["x_max"] - data["x_min"]) / (data["width"] * 2.0)
+            data["box_h"] = (data["y_max"] + data["y_min"]) / (data["height"] * 2.0)
+
+        for image_path, df in tqdm(
+            data.groupby("file_name"), desc="Saving yolo labels"
+        ):
+            try:
+                txt_file = labels_dir / Path(image_path).with_suffix(".txt").name
+                df[cols].drop_duplicates().to_csv(
+                    txt_file, sep=" ", index=False, header=False
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to saved yolo labels for {image_path} {e}\nSkipping"
+                )
+                continue
+
+        for image_path in tqdm(
+            self.data["file_name"].unique(), desc="Saving yolo images"
+        ):
+            dst = images_dir / Path(image_path).name
+            try:
+                shutil.copyfile(src=image_path, dst=dst)
+            except Exception as e:
+                logger.error(f"Failed to copy {image_path} -> {dst}.{e}\nSkipping")
+                continue
+
+        return None
+
     def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
         try:
             # Try to load existing dataset

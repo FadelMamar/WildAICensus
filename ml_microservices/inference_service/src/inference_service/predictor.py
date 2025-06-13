@@ -225,7 +225,7 @@ class MyModelAPI(ls.LitAPI):
             device=device,
         )
 
-    async def decode_request(self, request: dict) -> dict:
+    def decode_request(self, request: dict) -> dict:
         """
         Convert the JSON payload into model inputs.
         For example, extract and preprocess an image or numeric data.
@@ -268,7 +268,7 @@ class MyModelAPI(ls.LitAPI):
 
         return output
 
-    async def predict(self, x: dict) -> dict:
+    def predict(self, x: dict) -> dict:
         """
         Run the model forward pass.
         Input `x` is the output of decode_request.
@@ -287,7 +287,7 @@ class MyModelAPI(ls.LitAPI):
             logger.error(f"Error during prediction: {str(e)}")
             raise ValueError(f"Prediction failed: {str(e)}")
 
-    async def encode_response(self, output: dict):
+    def encode_response(self, output: dict):
         """
         Wrap the model output in a JSON-serializable dict.
         """

@@ -552,6 +552,7 @@ class Calibrator:
         study_name="demo-muti",
         load_study_if_exists=True,
         mlflow_exp_name="calibrating",
+        storage="sqlite:///hypsearch.sql",
     ):
         import optuna
         from optuna.samplers import TPESampler
@@ -584,7 +585,7 @@ class Calibrator:
             study_name=study_name,
             pruner=optuna.pruners.HyperbandPruner(),
             load_if_exists=load_study_if_exists,
-            storage="sqlite:///hypsearch.sql",
+            storage=storage,
             **opt_direction,
         )
 

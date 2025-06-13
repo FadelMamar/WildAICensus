@@ -112,45 +112,6 @@ def calibration():
 
     calibrator.run(dataset=dataset)
 
-    # mlflow.set_tracking_uri(uri="http://localhost:5000")
-
-    # n_trials = 20
-    # mlflow_exp_name = "calibrating"
-    # mlflow_metric_name = "fitness"
-    # study_name = "demo"
-
-    # try:
-    #     exp_id = mlflow.get_experiment_by_name(mlflow_exp_name).experiment_id
-    # except:
-    #     exp_id = mlflow.create_experiment(name=mlflow_exp_name)
-
-    # mlflow.set_experiment(experiment_id=exp_id)
-    # mlflc = MLflowCallback(metric_name=mlflow_metric_name,
-    #                        create_experiment=False,
-    #                        )
-
-    # opt_direction = dict()
-    # # opt_direction['directions'] = ["maximize"]*3 # multi-objective
-    # opt_direction['direction'] = "maximize"
-
-    # study = optuna.create_study(
-    #     # sampler=TPESampler(multivariate=True, group=True),
-    #     study_name=study_name,
-    #     pruner=optuna.pruners.HyperbandPruner(),
-    #     load_if_exists=True,
-    #     storage="sqlite:///hypsearch.sql",
-    #     **opt_direction
-    # )
-
-    # study.optimize(
-    #     objective,
-    #     n_trials=n_trials,
-    #     n_jobs=1,
-    #     show_progress_bar=True,
-    #     timeout=60 * 60 * 3,
-    #     callbacks=[mlflc],
-    # )
-
     return
 
 

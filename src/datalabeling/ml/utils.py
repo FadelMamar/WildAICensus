@@ -169,13 +169,12 @@ def get_data_cfg_paths_for_cl(
     return str(save_path_cfg)
 
 
-# TODO test
+# TODO test, debug
 def get_data_cfg_paths_for_HN(
     args: TrainingConfig,
     data_config_yaml: str,
-    eval_config: EvaluationConfig,
+    model: YOLO,
     split: str = "train",
-    data_config_root: str = "D:\\",
 ):
     """_summary_
 
@@ -187,57 +186,74 @@ def get_data_cfg_paths_for_HN(
         _type_: _description_
     """
 
-    from .models import Detector
+    from .interface import InferenceEngine, PredictionConfig
+    from ..common.dataset_loader import LabelingDataset
 
-    pred_results_dir = args.hn_save_dir
     save_path_samples = os.path.join(args.hn_save_dir, "hard_samples.txt")
     save_path = os.path.join(args.hn_save_dir, "hard_samples.yaml")
 
+    eval_config = EvaluationConfig()
     eval_config.uncertainty_threshold = args.hn_uncertainty_thrs
     eval_config.score_threshold = args.hn_score_thrs
-    eval_config.score_col = "max_scores"
 
     # Define detector
-    detector = Detector(
-        path_to_weights=args.path_weights,
-        confidence_threshold=args.hn_confidence_threshold,
-        overlap_ratio=args.hn_overlap_ratio,
-        tilesize=args.hn_tilesize,
+    config = PredictionConfig(
         imgsz=args.hn_imgsz,
-        use_sliding_window=args.hn_use_sliding_window,
+        tilesize=args.hn_tilesize,
+        batch_size=args.hn_batch_size,
+        overlap_ratio=args.hn_overlap_ratio,
+        confidence_threshold=args.hn_confidence_threshold,
+        inference_service_url=None,
+        flight_height=180,
+        sensor_height=24,
+        gsd=None,
+        nms_iou=0.5,
+        verbose=True,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=98,
         device=args.device,
-        is_yolo_obb=args.hn_is_yolo_obb,
     )
 
-    perf_eval = PerformanceEvaluator(config=eval_config)
+    model.eval()
+    engine, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=None,
+        detection_label_map=model.names,
+        detection_model=model,
+        mlflow_model_alias=None,
+        mlflow_model_name="labeler",
+    )
+
+    perf_eval = PerformanceEvaluator()
     hard_sampler = HardSampleSelector(config=eval_config)
 
     # data config yaml
-    yolo_config = load_yaml(path=data_config_yaml)
+    yolo_config = load_yaml(data_config_yaml)
 
-    # get images_paths
-    images_paths = os.path.join(yolo_config["path"], yolo_config[split])
-    images_paths = pd.read_csv(images_paths, header=None, names=["paths"])[
-        "paths"
-    ].to_list()
+    # build dataset and add predictions
+    images_dirs = [os.path.join(yolo_config["path"], p) for p in yolo_config[split]]
+    dataset = LabelingDataset.from_dirs(images_dirs)
+    dataset.add_predictions(engine=engine, build=True)
 
     # compute performance & uncertainty of model
-    df_results_per_img = perf_eval.evaluate(
-        images_dirs=None,
-        images_paths=images_paths,
-        pred_results_dir=pred_results_dir,
-        detector=detector,
+    df_results_per_img = perf_eval.run(
+        dataset=dataset,
+        pred_results_dir=args.hn_save_dir,
         load_results=args.hn_load_results,
+        tp_iou_threshold=eval_config.tp_iou_threshold,
         save_tag="hn-sampling",
     )
-    df_hard_negatives = hard_sampler.select_hard_samples(df_results_per_img)
+    df_hard_negatives = hard_sampler.run(df_results_per_img)
 
     # save image paths in data_config yaml
     hard_sampler.save_selection_references(
         df_hard_negatives=df_hard_negatives, save_path=save_path_samples
     )
 
-    # save data.yaml file in yolo format
+    data_config_root = list(Path(yolo_config["path"]).parents)[
+        -1
+    ]  # D:\ or C:\ or /home
     yolo_val_yaml = [
         os.path.relpath(os.path.join(yolo_config["path"], p), start=data_config_root)
         for p in yolo_config["val"]
@@ -250,6 +266,8 @@ def get_data_cfg_paths_for_HN(
         yolo_val=yolo_val_yaml,
         save_path=save_path,
     )
+
+    model.train()
 
     return str(save_path)
 
@@ -778,7 +796,11 @@ class CustomTrainer(DetectionTrainer):
         pos_weight = json.loads(os.environ.get("pos_weight", "1.0"))
 
         model = CustomDetModel(
-            pos_weight, cfg, nc=self.data["nc"], ch=3, verbose=verbose and RANK == -1
+            cfg,
+            nc=self.data["nc"],
+            ch=3,
+            pos_weight=pos_weight,
+            verbose=verbose and RANK == -1,
         )
         if weights:
             model.load(weights)
@@ -1394,7 +1416,7 @@ class DetectionSystemTrainer(DetectionTrainer):
     def save_model(self):
         """Save model training checkpoints with additional metadata."""
         import io
-        from copy import deepcopy
+        # from copy import deepcopy
 
         self.model.remove_hooks()
 

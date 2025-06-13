@@ -60,20 +60,16 @@ class TrainingManager:
         args: TrainingConfig,
         herdnet_loss: list = None,
         herdnet_training_backend: str = "original",
-        classifier_training_backend: str = "pl",
-        model_type: str = "ultralytics",
     ):
         self.args = args
         self.herdnet_loss = herdnet_loss
-        self.model_type = model_type
         self.herdnet_training_backend = herdnet_training_backend
-        self.classifier_training_backend = classifier_training_backend
 
-        assert model_type in ["ultralytics", "herdnet", "classifier"], (
-            f"this model_type ``{model_type}`` is not supported."
+        assert args.model_type in ["detector", "herdnet", "classifier"], (
+            f"this model_type ``{args.model_type}`` is not supported."
         )
 
-        assert classifier_training_backend in ["pl", "ultralytics", "sk"]
+        assert args.cls_training_backend in ["pl", "ultralytics", "sk"]
 
         assert herdnet_training_backend in ["original", "pl"], (
             "the provided backend is not supported."
@@ -94,13 +90,13 @@ class TrainingManager:
             self.args.path_weights = model.detection_model.model.ckpt_path
             logger.info(f"Loading model registered with alias: {alias}")
 
-        if self.model_type == "ultralytics":
+        if self.args.model_type == "detector":
             return self._load_ultralytics_model()
 
-        elif self.model_type == "herdnet":
+        elif self.args.model_type == "herdnet":
             return self._load_herdnet()
 
-        elif self.model_type == "classifier":
+        elif self.args.model_type == "classifier":
             return self._load_classifier_model()
 
         else:
@@ -127,10 +123,10 @@ class TrainingManager:
     def _load_classifier_model(
         self,
     ):
-        if self.classifier_training_backend == "ultralytics":
+        if self.args.cls_training_backend == "ultralytics":
             return self._load_ultralytics_model()
 
-        elif self.classifier_training_backend == "sk":
+        elif self.args.cls_training_backend == "sk":
             # pipe = make_pipeline(StandardScaler(),SGDClassifier(loss='hinge',n_jobs=4))
             return SGDClassifier(loss="hinge", n_jobs=4)
 
@@ -221,16 +217,16 @@ class TrainingManager:
         return self.model.to(self.args.device)
 
     def run(self):
-        if self.model_type == "ultralytics":
+        if self.args.model_type == "detector":
             self._run_ultralytics()
 
-        elif self.model_type == "herdnet":
+        elif self.args.model_type == "herdnet":
             if self.herdnet_training_backend == "original":
                 self._run_herdnet_original()
             else:
                 self._run_herdnet_pl()
 
-        elif self.model_type == "classifier":
+        elif self.args.model_type == "classifier":
             self._run_classifier()
 
         else:
@@ -263,10 +259,10 @@ class TrainingManager:
     def _run_classifier(
         self,
     ):
-        if self.classifier_training_backend == "ultralytics":
+        if self.args.cls_training_backend == "ultralytics":
             self._train_ultralytics(data_cfg=self.args.cls_data_dir)
 
-        elif self.classifier_training_backend == "sk":
+        elif self.args.cls_training_backend == "sk":
             mlflow.sklearn.autolog(
                 log_models=True, log_datasets=False, log_model_signatures=True
             )
@@ -372,7 +368,7 @@ class TrainingManager:
             tr_batch_size=self.args.batchsize,
             val_batch_size=self.args.herdnet_val_batchsize,
             down_ratio=self.args.herdnet_down_ratio,
-            train_empty_ratio=self.args.herndet_empty_ratio,
+            train_empty_ratio=self.args.herdnet_empty_ratio,
         )
         datamodule.setup("fit")
         num_classes = datamodule.num_classes
@@ -446,7 +442,7 @@ class TrainingManager:
             tr_batch_size=self.args.batchsize,
             val_batch_size=self.args.herdnet_val_batchsize,
             down_ratio=self.args.herdnet_down_ratio,
-            train_empty_ratio=self.args.herndet_empty_ratio,
+            train_empty_ratio=self.args.herdnet_empty_ratio,
         )
         datamodule.setup("fit")
 
@@ -694,7 +690,12 @@ class TrainingManager:
             split="train",
             pattern_glob=img_glob_pattern,
         )
-        hn_cfg_path = get_data_cfg_paths_for_HN(args=args, data_config_yaml=cfg_path)
+        hn_cfg_path = get_data_cfg_paths_for_HN(
+            args=args,
+            data_config_yaml=cfg_path,
+            model=self.model,
+            split="train",
+        )
         args.lr0 = args.hn_lr0
         args.lrf = args.hn_lrf
         args.freeze = args.hn_freeze
