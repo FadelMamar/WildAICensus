@@ -100,6 +100,10 @@ class Detection:
 
                 det_objects.append(det)
 
+        # if empty, add empty detection
+        if len(det_objects) == 0:
+            det_objects.append(Detection.empty(parent_image=image_path))
+
         return det_objects
 
     def to_absolute_coords(self, x_offset: int, y_offset: int) -> None:
@@ -111,7 +115,8 @@ class Detection:
 
     @property
     def is_empty(self):
-        return any([self.x is None, self.y is None, self.w is None, self.h is None])
+        vals = [self.x, self.y, self.w, self.h]
+        return any([(np.isnan(v) or v is None) for v in vals])
 
     def to_dict(
         self,
@@ -331,6 +336,9 @@ class Tile:
             array = array + self.predictions
 
         for det in array:
+            if det.is_empty:
+                continue
+
             det.image_gps_loc = self.tile_gps_loc
 
             if det.image_gps_loc is not None:

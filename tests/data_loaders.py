@@ -9,7 +9,13 @@ Created on Thu Apr 24 19:29:12 2025
 
 from tqdm import tqdm
 import os
-from datalabeling.common.config import TilingConfig, EvaluationConfig, PredictionConfig
+from datalabeling.common.config import (
+    TilingConfig,
+    EvaluationConfig,
+    PredictionConfig,
+    DataConfig,
+    LabelConfig,
+)
 from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
 from datalabeling.ml.workers import ObjectDetectionSystem
 from datalabeling.ml.interface import InferenceEngine
@@ -148,7 +154,10 @@ def load_classification_features_data():
 
 
 def load_dataset_from_ls(
-    untiled_data_dir: str, project_id=4, top_n=0, load_existing_metadata=True
+    untiled_data_dir: str,
+    project_id=4,
+    top_n=0,
+    load_existing_metadata=True,
 ):
     from label_studio_sdk.client import LabelStudio
 
@@ -159,11 +168,6 @@ def load_dataset_from_ls(
     LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
     API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
     labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
-
-    # project = labelstudio_client.projects.get(id=project_id)
-
-    # if data_dir is None:
-    #     data_dir = labelstudio_client.import_storage.local.get(project_id).path
 
     # collect tile metadata: gps coords
     config = TilingConfig(
@@ -184,8 +188,6 @@ def load_dataset_from_ls(
         load_existing_metadata=True, max_workers=2
     )
 
-    # print(config)
-
     dataset = LabelingDataset.from_ls(
         labelstudio_client,
         project_id=project_id,
@@ -196,36 +198,30 @@ def load_dataset_from_ls(
         load_existing_metadata=load_existing_metadata,
     )
 
-    # add predictions
-    pred_config = PredictionConfig(
-        imgsz=800,
-        tilesize=800,
-        overlap_ratio=0.2,
-        confidence_threshold=0.2,
-        # min_area=100,
-        # max_area=None,
-        cls_imgsz=98,
-        # device="cpu",
-    )
-    engine, feature_extractor = InferenceEngine.load_engine(
-        pred_config,
-        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
-        roi_cls_label_map={0: "gt", 1: "tn"},
-        roi_cls_is_features=True,
-        roi_keep_classes=["gt"],
-        feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=YOLO(model=r"..\base_models_weights\best.pt"),
-        detection_label_map={0: "wildlife"},
-    )
-    # dataset.add_predictions(engine)
-    # dataset.update_detection_gps(
-    #     sensor_height=config.sensor_height,
-    #     flight_height=config.flight_height,
-    #     gsd=config.gsd,
-    # )
-    # dataset.build()
-
     return tile_metadata, dataset
+
+
+def slice_and_save_as_yolo(dataset: LabelingDataset):
+    data_config = DataConfig(
+        is_single_cls=True,
+        root_dir="D:\\",
+        yolo_data_config_yaml="../configs/yolo_configs/data/data_config.yaml",
+        dotenv_path="../.env",
+        tilesize=640,
+        overlap_ratio=0.2,
+        save_all=False,
+        save_only_empty=False,
+        load_coco_annotations=False,
+        parse_ls_config=False,
+        empty_ratio=1.0,
+    )
+    label_config = LabelConfig(
+        keep=["wildlife"], label_map="../exported_annotations/label_mapping.json"
+    )
+
+    dataset.slice_and_save_as_yolo(data_config, label_config)
+
+    return None
 
 
 def load_dataset_from_dirs():
@@ -273,6 +269,8 @@ if __name__ == "__main__":
         load_existing_metadata=True,
         untiled_data_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
     )
+
+    slice_and_save_as_yolo(dataset=dataset)
 
     # data = dataset.data
     # gps_data = dataset.export_detections_gps()

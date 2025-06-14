@@ -20,6 +20,9 @@ from multiprocessing.pool import ThreadPool
 from functools import partial
 import fiftyone as fo
 from random import shuffle
+import tempfile
+from copy import copy
+
 from .annotation_utils import (
     ImageProcessor,
     GPSUtils,
@@ -493,9 +496,7 @@ class LabelingDataset:
                 tile_gps_loc = None
                 x1 = y1 = None
                 if value is None:
-                    logger.warning(
-                        f" No GPS coordinates was found when reading metadata of {img_url}. -> skipping"
-                    )
+                    logger.warning(f"No metadata found for {img_url}. -> skipping")
                     return None
 
                 tile_gps_loc = value["gps"]
@@ -613,6 +614,126 @@ class LabelingDataset:
 
         return None
 
+    def slice_and_save_as_yolo(
+        self, data_config: DataConfig, label_config: LabelConfig, max_workers: int = 1
+    ):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # tmp_dir = ".tmp-images"
+            Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+            img_dir, coco_json = self.to_coco(
+                output_dir=tmp_dir,
+                copy_images=True,
+                clear_existing_data=True,
+            )
+
+            label_handler = LabelHandler(label_config)
+            builder = YOLODatasetBuilder(data_config)
+
+            builder.build(
+                {img_dir: coco_json},
+                label_handler=label_handler,
+                max_workers=max_workers,
+            )
+
+        # shutil.rmtree(tmp_dir)
+
+        return None
+
+    def to_coco(
+        self,
+        output_dir: str,
+        copy_images: bool = False,
+        clear_existing_data: bool = True,
+    ) -> str:
+        label_class_map = self.data.dropna()[["label", "class_name"]]
+        label_class_map = dict(
+            zip(label_class_map.iloc[:, 0], label_class_map.iloc[:, 1])
+        )
+
+        # Define the categories for the COCO dataset
+        categories = [{"id": k, "name": v} for k, v in label_class_map.items()]
+
+        # Define the COCO dataset dictionary
+        coco_dataset = {
+            "info": {},
+            "licenses": [],
+            "categories": categories,
+            "images": [],
+            "annotations": [],
+        }
+
+        # mkdir
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        annot_dir = output_dir / "annotations"
+        annot_dir.mkdir(exist_ok=True, parents=False)
+        img_dir = output_dir / "raw"
+        img_dir.mkdir(exist_ok=True, parents=False)
+        annot_save_path = annot_dir / "annotations_raw.json"
+
+        if clear_existing_data:
+            try:
+                if os.path.exists(img_dir):
+                    shutil.rmtree(img_dir)
+                    logger.info(f"Deleting images @ {img_dir}")
+                img_dir.mkdir(exist_ok=True, parents=False)
+                if os.path.exists(annot_save_path):
+                    os.remove(annot_save_path)
+                    logger.info(f"Deleting annotation file @ {annot_save_path} ")
+            except Exception as e:
+                logger.info(e)
+
+        common_prefix = os.path.commonprefix(self.data["file_name"].unique())
+
+        # Loop through the images in the input directory
+        idx = -1
+        for image_path, df in tqdm(
+            self.data.groupby("file_name"), desc="Converting to coco"
+        ):
+            idx += 1
+            if copy_images:
+                image_file = os.path.relpath(image_path, common_prefix)
+                image_file = "#".join([p.name for p in Path(image_file).parents])
+                image_file = image_file + os.path.basename(image_path)
+                shutil.copyfile(image_path, img_dir / image_file)
+            else:
+                image_file = str(image_path)
+
+            # Add the image to the COCO dataset
+            image_id = idx
+            image_dict = {
+                "id": image_id,
+                "width": int(df["image_width"].iat[0]),
+                "height": int(df["image_height"].iat[0]),
+                "file_name": os.path.basename(image_file),
+            }
+            coco_dataset["images"].append(image_dict)
+
+            df_detections = df.dropna()
+            # Loop through the annotations and add them to the COCO dataset
+            for i in range(len(df_detections)):
+                x_min, y_min, x_max, y_max = df_detections[
+                    ["x_min", "y_min", "x_max", "y_max"]
+                ].iloc[i, :]
+                ann_dict = {
+                    "id": len(coco_dataset["annotations"]),
+                    "image_id": image_id,
+                    "category_id": int(df_detections["label"].iat[i]),
+                    "bbox": [x_min, y_min, x_max - x_min, y_max - y_min],
+                    "segmentation": [
+                        [x_min, y_min, x_max, y_min, x_max, y_max, x_min, y_max]
+                    ],
+                    "area": (x_max - x_min) * (y_max - y_min),
+                    "iscrowd": 0,
+                }
+                coco_dataset["annotations"].append(ann_dict)
+
+        # Save the COCO dataset to a JSON file
+        with open(annot_save_path, "w") as f:
+            json.dump(coco_dataset, f, indent=2)
+
+        return str(img_dir), str(annot_save_path)
+
     def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
         try:
             # Try to load existing dataset
@@ -687,6 +808,7 @@ class LabelHandler:
             assert len(intersec) == 0, (
                 f"{intersec} are required to be discarded and kept. Error..."
             )
+        assert self.config.label_map is not None, "Provide label_map json file"
 
     def load_map(
         self,
@@ -714,6 +836,7 @@ class LabelHandler:
 
         # load yaml
         yolo_config = load_yaml(yaml_path)
+        yolo_config = copy(yolo_config)
 
         # updaate yaml and save
         yolo_config.update({"names": self._label_map, "nc": len(self._label_map)})
@@ -730,7 +853,7 @@ class YOLODatasetBuilder:
 
     def _validate_config(self):
         """Ensure configuration parameters are valid"""
-        if self.config.slice_width <= 0 or self.config.slice_height <= 0:
+        if self.config.tilesize <= 0:
             raise ValueError("Slice dimensions must be positive")
 
         #  Checking inconsistency in arguments
@@ -886,6 +1009,8 @@ class YOLODatasetBuilder:
             df[cols].drop_duplicates().to_csv(
                 os.path.join(output_dir, txt_file), sep=" ", index=False, header=False
             )
+
+        return None
 
 
 class ClassificationDatasetBuilder:
