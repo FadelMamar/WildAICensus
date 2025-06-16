@@ -9,19 +9,23 @@ import torch
 from torchmetrics.detection import MeanAveragePrecision
 from torchmetrics.functional.detection import complete_intersection_over_union
 from tqdm import tqdm
-from itertools import chain
 from multiprocessing.pool import ThreadPool
-from ..ml.models import Detector
+from ultralytics import YOLO
+from ultralytics.models.yolo.detect import DetectionValidator
+from ultralytics.utils.metrics import ConfusionMatrix
+from ultralytics.data import converter
+import seaborn as sns
+import matplotlib.pyplot as plt
+
 from ..ml.interface import InferenceEngine
-from .config import DataConfig, EvaluationConfig
-from .io import DataHandler, get_images_paths
+from .config import EvaluationConfig, PredictionConfig
 from .dataset_loader import LabelingDataset
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("Evaluation")
 
 
 class Metrics:
-    def __init__(self, config: EvaluationConfig):
+    def __init__(self, tp_iou_threshold: float = 0.5):
         self.mean_ap = MeanAveragePrecision(
             box_format="xyxy",
             iou_type="bbox",
@@ -29,12 +33,10 @@ class Metrics:
             iou_thresholds=[0.15, 0.25, 0.35, 0.5, 0.75, 0.85, 0.95],
         )
 
-        self.config = config
-
         self.bbox_cols = ["x_min", "y_min", "x_max", "y_max"]
+        self.tp_iou_threshold = tp_iou_threshold
 
-    # TODO: add ThreadPool
-    def run(self, dataset: LabelingDataset) -> pd.DataFrame:
+    def run(self, dataset: LabelingDataset, max_workers: int = 1) -> pd.DataFrame:
         logger.info("Computing evaluation metrics per image...")
 
         def iterator(df_pred, df_gt):
@@ -61,17 +63,14 @@ class Metrics:
         # partition rows
         df_pred = (
             data.loc[data["is_annot"] == False, :]
-            .dropna(subset="is_annot", axis=0)
+            .dropna(subset="is_annot", axis=0)  # dropping unlabeled
             .drop(columns="is_annot")
         )
         df_gt = (
             data.loc[data["is_annot"] == True, :]
-            .dropna(subset="is_annot", axis=0)
+            .dropna(subset="is_annot", axis=0)  # dropping unlabeled
             .drop(columns="is_annot")
         )
-
-        if df_pred.empty:
-            raise ValueError("There are no predictions.")
 
         # drop NaNs
         df_gt = df_gt.dropna(
@@ -80,22 +79,44 @@ class Metrics:
             how="any",
         )
 
+        df_pred = df_pred.dropna(
+            axis=0,
+            subset=["label", "x_min", "y_min", "x_max", "y_max"],
+            how="any",
+        )
+
         df_results = []
 
-        for df_gt_i, df_pred_i in tqdm(
-            iterator(df_pred=df_pred, df_gt=df_gt), desc="computing..."
-        ):
-            df_eval = self._run_per_image(df_gt_i=df_gt_i, df_pred_i=df_pred_i)
-            if not df_eval.empty:
-                df_results.append(df_eval)
+        def func(x):
+            return self._run_per_image(df_gt_i=x[0], df_pred_i=x[1])
+
+        loader = iterator(df_pred=df_pred, df_gt=df_gt)
+
+        with ThreadPool(max_workers) as executor:
+            for df_eval in tqdm(executor.map(func, loader), desc="computing..."):
+                if not df_eval.empty:
+                    df_results.append(df_eval)
 
         if len(df_results) > 0:
             df_results = pd.concat(
                 df_results, ignore_index=True, sort=False
             ).reset_index(drop=True)
         else:
-            df_results = pd.DataFrame()
-            logger.warning("There are 0 positives samples and 0 Detections were found.")
+            df_results = pd.DataFrame(columns=data.columns)
+            logger.info("There are 0 positives samples and 0 Detections were found.")
+
+        # adding True Negatives
+        missing = set(data.file_name.to_list()) - set(df_results.file_name.to_list())
+        missing = list(missing)
+        df_results["pred_TN"] = 0
+        for path in missing:
+            i = len(df_results)
+            df_results.at[i, "file_name"] = path
+            df_results.at[i, "pred_TN"] = 1
+            df_results.at[i, "pred_TP"] = 0
+            df_results.at[i, "pred_FP"] = 0
+            df_results.at[i, "map50"] = np.nan
+            df_results.at[i, "map75"] = np.nan
 
         return df_results
 
@@ -185,8 +206,8 @@ class Metrics:
         df_pred_i["pred_label"] = "None"
 
         for i in range(len(df_pred_i)):
-            df_pred_i.loc[i, "TP"] = best_iou[i].item() >= self.config.tp_iou_threshold
-            df_pred_i.loc[i, "FP"] = best_iou[i].item() < self.config.tp_iou_threshold
+            df_pred_i.loc[i, "TP"] = best_iou[i].item() >= self.tp_iou_threshold
+            df_pred_i.loc[i, "FP"] = best_iou[i].item() < self.tp_iou_threshold
             df_pred_i.loc[i, "best_ciou"] = best_iou[i].item()
             df_pred_i.loc[i, "matching_gt"] = (
                 json.dumps(gt[best_gt_idx[i]].numpy().tolist())
@@ -197,9 +218,7 @@ class Metrics:
         # For each ground-truth: mark FN if never matched
         worst_pred_iou, _ = box_ious.max(dim=0)
         for i in range(len(df_gt_i)):
-            df_gt_i.loc[i, "FN"] = (
-                worst_pred_iou[i].item() < self.config.tp_iou_threshold
-            )
+            df_gt_i.loc[i, "FN"] = worst_pred_iou[i].item() < self.tp_iou_threshold
 
         # rename columns
         df_pred_i.rename(
@@ -214,7 +233,7 @@ class Metrics:
             inplace=True,
         )
 
-        # merge dfs
+        # merge pred and gt dfs
         df_eval = []
         if not df_gt_i.empty:
             df_eval.append(df_gt_i)
@@ -239,19 +258,20 @@ class Metrics:
 # Performance Evaluation
 # =====================
 class PerformanceEvaluator:
-    def __init__(self, config: EvaluationConfig):
-        self.config = config
-        self.label_format = None
-        self.metrics: Metrics = Metrics(config=config)
+    def __init__(self):
+        pass
 
     def run(
         self,
         dataset: LabelingDataset,
         pred_results_dir: str,
+        tp_iou_threshold: float = 0.5,
         load_results: bool = False,
         save_tag: str = "",
     ) -> pd.DataFrame | None:
         """Calculate performance metrics"""
+
+        metrics = Metrics(tp_iou_threshold=tp_iou_threshold)
 
         # when providing a list of images
         stem = (
@@ -273,9 +293,312 @@ class PerformanceEvaluator:
             dataset.save_data_csv(save_path=save_path)
 
         # compute metrics per image
-        df_metrics_per_image = self.metrics.run(dataset)
+        df_metrics_per_image = metrics.run(dataset)
 
         return df_metrics_per_image
+
+
+# TODO: debug
+class CustomValidator(DetectionValidator):
+    """From https://github.com/ultralytics/ultralytics/blob/main/ultralytics/models/yolo/detect/val.py
+    Adapted to compute confusion matrix for a given iou threshold
+    """
+
+    def init_metrics(self, model):
+        """
+        Initialize evaluation metrics for YOLO detection validation.
+
+        Args:
+            model (torch.nn.Module): Model to validate.
+        """
+        val = self.data.get(self.args.split, "")  # validation path
+        self.is_coco = (
+            isinstance(val, str)
+            and "coco" in val
+            and (
+                val.endswith(f"{os.sep}val2017.txt")
+                or val.endswith(f"{os.sep}test-dev2017.txt")
+            )
+        )  # is COCO
+        self.is_lvis = (
+            isinstance(val, str) and "lvis" in val and not self.is_coco
+        )  # is LVIS
+        self.class_map = (
+            converter.coco80_to_coco91_class()
+            if self.is_coco
+            else list(range(1, len(model.names) + 1))
+        )
+        self.args.save_json |= (
+            self.args.val and (self.is_coco or self.is_lvis) and not self.training
+        )  # run final val
+        self.names = model.names
+        self.nc = len(model.names)
+        self.end2end = getattr(model, "end2end", False)
+        self.metrics.names = self.names
+        self.metrics.plot = self.args.plots
+        self.confusion_matrix = ConfusionMatrix(
+            nc=self.nc, conf=self.args.conf, iou_thres=self.args.iou, task="detect"
+        )
+        self.seen = 0
+        self.jdict = []
+        self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+
+
+# TODO: debug
+def ultralytics_val(args: EvaluationConfig):
+    # remove label.cache files
+    # from ..ml.utils import remove_label_cache
+    # remove_label_cache(data_config_yaml=args.data_config)
+
+    for split in args.splits:
+        print("-" * 20, split, "-" * 20)
+
+        val_args = dict(model=args.weights, data=args.data_config)
+
+        run_name = (
+            args.name
+            + "#"
+            + split
+            + f"#{round(args.conf_threshold * 100)}#{round(args.iou_threshold * 100)}#{args.augment}#{args.max_det}-"
+        )
+
+        validator = CustomValidator(
+            args=val_args, save_dir=Path(args.project_name) / run_name
+        )
+
+        # set args
+        validator.args.conf = args.conf_threshold
+        validator.args.iou = args.iou_threshold
+        validator.args.mode = "val"
+        validator.args.imgsz = args.imgsz
+        validator.args.batch = args.batch_size
+        validator.args.device = args.device
+        validator.args.augment = args.augment
+        validator.args.split = split
+        validator.args.name = run_name
+        validator.args.project = args.project_name
+        validator.args.max_det = args.max_det
+        validator.args.save_crop = False
+        validator.args.save_json = False
+        validator.args.plots = args.plots
+        validator.args.save_hybridd = args.save_hybrid
+        validator.args.save_txt = args.save_txt
+        validator.args.save_conf = args.save_txt
+
+        # run evaluation
+        results = validator()
+
+        cf_matrix = validator.confusion_matrix.matrix
+        labels = list(validator.names.values()) + ["background"]
+
+        for i, label in enumerate(labels + ["background"]):
+            if label == "background":
+                break
+
+            tp = cf_matrix[i, i]
+            actual_positive = cf_matrix[:, i].sum()
+            predicted_positive = cf_matrix[i, :].sum()
+            # fp = predicted_positive - tp
+            # fn = actual_positive - tp
+
+            precision = tp / (predicted_positive + 1e-8)
+            recall = tp / (actual_positive + 1e-8)
+            f1score = 2 * precision * recall / (precision + recall + 1e-8)
+
+            results = dict(
+                precision=round(precision, 4),
+                recall=round(recall, 4),
+                f1score=round(f1score, 4),
+            )
+
+            print(f"results for {label} : ", results, end="\n")
+
+        return results
+
+
+class Calibrator:
+    def __init__(
+        self,
+        pred_results_dir: str,
+        batch_size: int = 8,
+        inference_service_url: str | None = None,  # "http://localhost:4141/predict",
+        feature_extractor_path: str | None = "facebook/dinov2-with-registers-small",
+        roi_weights: str = r"..\base_models_weights\roi_classifier.ckpt",
+        detection_label_map: dict = {0: "wildlife"},
+        roi_cls_label_map: dict = {0: "gt", 1: "tn"},
+        roi_keep_classes: list = ["gt"],
+        roi_cls_is_features: bool = True,
+        detection_model: YOLO = None,
+        mlflow_model_alias: str = "demo",
+        mlflow_model_name: str = "labeler",
+    ):
+        self.dataset: LabelingDataset = None
+
+        self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
+
+        self.pred_results_dir = pred_results_dir
+        self.inference_service_url = inference_service_url
+        self.detection_label_map = detection_label_map
+        self.roi_cls_label_map = roi_cls_label_map
+        self.roi_keep_classes = roi_keep_classes
+        self.roi_cls_is_features = roi_cls_is_features
+        self.detection_model = detection_model
+        self.mlflow_model_alias = mlflow_model_alias
+        self.mlflow_model_name = mlflow_model_name
+        self.roi_weights = roi_weights
+        self.feature_extractor_path = feature_extractor_path
+        self.batch_size = batch_size
+
+        self.count = 0
+
+        assert (inference_service_url is None and detection_model is None) == False
+
+    def _run_once(self, params: dict, save_tag: str = ""):
+        config = PredictionConfig(
+            imgsz=params.get("imgsz"),
+            tilesize=params.get("tilesize"),
+            batch_size=self.batch_size,
+            overlap_ratio=params.get("overlap_ratio"),
+            confidence_threshold=params.get("confidence_threshold"),
+            inference_service_url=self.inference_service_url,
+            flight_height=params.get("flight_height", 180),
+            sensor_height=params.get("sensor_height", 24),
+            gsd=None,
+            nms_iou=params.get("nms_iou"),
+            verbose=False,
+            min_area=params.get("min_area"),
+            max_area=params.get("max_area"),
+            cls_imgsz=params.get("cls_imgsz"),
+            device=self.device,
+        )
+
+        engine, _ = InferenceEngine.load_engine(
+            pred_config=config,
+            roi_classifier_path=self.roi_weights,
+            roi_cls_is_features=self.roi_cls_is_features,
+            roi_cls_label_map=self.roi_cls_label_map,
+            roi_keep_classes=self.roi_keep_classes,
+            detection_label_map=self.detection_label_map,
+            feature_extractor_path=self.feature_extractor_path,
+            detection_model=self.detection_model,
+            mlflow_model_alias=self.mlflow_model_alias,
+            mlflow_model_name=self.mlflow_model_name,
+        )
+
+        self.dataset.add_predictions(engine=engine, build=True)
+
+        perf_eval = PerformanceEvaluator()
+
+        df_metrics_per_img = perf_eval.run(
+            dataset=self.dataset,
+            tp_iou_threshold=params.get("tp_iou_threshold"),
+            pred_results_dir=self.pred_results_dir,
+            load_results=False,
+            save_tag=save_tag,
+        )
+
+        # report generation
+        reporter = ReportGenerator()
+        stats, _ = reporter.run(df_metrics_per_img)
+        if np.isnan(stats["map50"]).all():
+            map50 = 1.0
+        else:
+            map50 = np.nansum(stats["map50"])
+
+        if np.isnan(stats["map75"]).all():
+            map75 = 1.0
+        else:
+            map75 = np.nansum(stats["map75"])
+
+        results = [stats["FP"]] + [stats[k] for k in ["TP", "TN"]] + [map50, map75]
+
+        return results
+
+    def __call__(self, trial):
+        hyperparameters = dict(
+            overlap_ratio=[
+                0.2,
+            ],  # np.linspace(0.1,0.4,5).round(3).tolist(),
+            tilesize=[
+                800,
+            ],  # [800,960,992,1024]
+            imgsz=[
+                800,
+            ],
+            cls_imgsz=[
+                98,
+            ],
+            confidence_threshold=np.linspace(0.1, 0.7, 5).round(3).tolist(),
+            # min_area=(np.arange(5,25,5)**2).tolist(),
+            # max_area=(np.arange(25,100,5)**2).tolist(),
+            nms_iou=np.linspace(0.2, 0.7, 5).round(3).tolist(),
+            tp_iou_threshold=np.linspace(0.2, 0.7, 5).round(3).tolist(),
+        )
+
+        sampled = {
+            k: trial.suggest_categorical(f"{k}", v) for k, v in hyperparameters.items()
+        }
+
+        scores = self._run_once(sampled, save_tag=f"trial-{self.count}")
+
+        self.count += 1
+
+        return scores
+
+    def run(
+        self,
+        dataset: LabelingDataset,
+        n_trials=20,
+        study_name="demo-muti",
+        load_study_if_exists=True,
+        mlflow_exp_name="calibrating",
+        storage="sqlite:///hypsearch.sql",
+    ):
+        import optuna
+        from optuna.samplers import TPESampler
+        from optuna.integration.mlflow import MLflowCallback
+        import mlflow
+
+        self.dataset = dataset
+
+        mlflow.set_tracking_uri(uri="http://localhost:5000")
+
+        mlflow_metric_name = "fitness"
+
+        try:
+            exp_id = mlflow.get_experiment_by_name(mlflow_exp_name).experiment_id
+        except:
+            exp_id = mlflow.create_experiment(name=mlflow_exp_name)
+
+        mlflow.set_experiment(experiment_id=exp_id)
+        mlflc = MLflowCallback(
+            metric_name=mlflow_metric_name,
+            create_experiment=False,
+        )
+
+        opt_direction = dict()
+        opt_direction["directions"] = ["minimize"] + ["maximize"] * 4
+        # opt_direction['direction'] = "maximize"
+
+        study = optuna.create_study(
+            sampler=TPESampler(multivariate=True, group=True),
+            study_name=study_name,
+            pruner=optuna.pruners.HyperbandPruner(),
+            load_if_exists=load_study_if_exists,
+            storage=storage,
+            **opt_direction,
+        )
+
+        study.optimize(
+            self,
+            n_trials=n_trials,
+            n_jobs=1,
+            show_progress_bar=True,
+            timeout=60 * 60 * 3,
+            callbacks=[mlflc],
+        )
+
+        return
 
 
 # =====================
@@ -287,13 +610,48 @@ class ReportGenerator:
     ):
         pass
 
-    def generate_performance_report(self, df_results_per_img: pd.DataFrame) -> None:
+    def run(self, df_results_per_img: pd.DataFrame, plot: bool = False) -> None:
         """Generate comprehensive performance report"""
-        pass
 
-    def generate_hard_samples_report(self, df_hard_negatives: pd.DataFrame) -> None:
-        """Generate report on challenging samples"""
-        pass
+        tp_fp_tn = (
+            df_results_per_img
+            # .dropna()
+            .groupby("file_name")[["pred_TP", "pred_FP", "pred_TN"]]
+            .sum()
+            .rename(columns={"pred_TP": "TP", "pred_FP": "FP", "pred_TN": "TN"})
+        )
+        tp_fp_tn_sum = tp_fp_tn.sum().to_dict()
+        map50 = df_results_per_img["map50"].to_numpy()
+        map75 = df_results_per_img["map75"].to_numpy()
+
+        stats = dict(
+            map50=map50,
+            map75=map75,
+        )
+        stats.update(tp_fp_tn_sum)
+
+        fig = None
+        if plot:
+            fig, axs = plt.subplots(ncols=1, nrows=4, figsize=(10, 5))
+            # plot tp_fp_tn distribution
+            tp_fp_tn.plot(kind="box", ax=axs[0])
+
+            # plot map50 distribution
+            df_results_per_img[["map50", "map75"]].plot(kind="box", ax=axs[1])
+
+            df_results_per_img[
+                [
+                    "pred_area",
+                ]
+            ].plot(kind="box", ax=axs[2])
+
+            df_results_per_img[
+                [
+                    "all_scores",
+                ]
+            ].plot(kind="box", ax=axs[4])
+
+        return stats, fig
 
 
 # =====================

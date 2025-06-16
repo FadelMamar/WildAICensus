@@ -1,7 +1,4 @@
 import mlflow
-import torch
-
-from ..ml import Detector
 
 
 def load_registered_model(
@@ -21,7 +18,7 @@ def load_registered_model(
 
     model = mlflow.pyfunc.load_model(modelURI)
 
-    metadata = dict(version=modelversion)
+    metadata = dict(version=modelversion, modeluri=modelURI)
     metadata.update(model.metadata.metadata)
 
     if load_unwrapped:

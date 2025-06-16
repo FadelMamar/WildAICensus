@@ -94,20 +94,20 @@ conda_env = {
 }
 
 
-class RegisterDetector(object):
-    def __init__(
+class Register(object):
+    def register_detector(
         self,
-        weights: str,
+        weights_path: str,
         name: str = "labeler",
         export_format: str = "torchscript",
         imgsz: int = 800,
-        batch=8,
-        device="cpu",
+        batch: int = 8,
+        device: str = "cpu",
         mlflow_tracking_uri: str = "http://localhost:5000",
-        dynamic=False,
-        task="detect",
+        dynamic: bool = False,
+        task: str = "detect",
     ):
-        model_path = Path(weights).resolve()
+        model_path = Path(weights_path).resolve()
         export_path = model_path
         if export_format != "pt":
             YOLO(model_path, task=task).export(
@@ -144,15 +144,13 @@ class RegisterDetector(object):
                 metadata=metadata,
             )
 
-
-class RegisterRoiClassifier(object):
-    def __init__(
+    def register_classifier(
         self,
-        weights: str = r"D:\datalabeling\base_models_weights\roi_classifier.ckpt",
+        weights_path,
         num_classes: int = 2,
         cls_is_features: bool = True,
-        cls_imgsz: int = 128,
         batch: int = 8,
+        cls_imgsz: int = 128,
         cls_embed_dim: int = 384,
         name: str = "classifier",
         mlflow_tracking_uri: str = "http://localhost:5000",
@@ -161,7 +159,7 @@ class RegisterRoiClassifier(object):
 
         mlflow.set_tracking_uri(mlflow_tracking_uri)
 
-        model_path = Path(weights).resolve()
+        model_path = Path(weights_path).resolve()
         model = ImageClassifier.load_from_checkpoint(
             model_path, num_classes=num_classes, cls_is_features=cls_is_features
         ).model
@@ -199,54 +197,6 @@ class RegisterRoiClassifier(object):
                 registered_model_name=name,
                 metadata=metadata,
             )
-
-
-class Register(object):
-    def register_detector(
-        self,
-        weights_path: str,
-        name: str = "labeler",
-        export_format: str = "torchscript",
-        imgsz: int = 800,
-        batch=8,
-        device="cpu",
-        mlflow_tracking_uri: str = "http://localhost:5000",
-        dynamic=False,
-        task: str = "detect",
-    ):
-        RegisterDetector(
-            weights=weights_path,
-            name=name,
-            imgsz=imgsz,
-            batch=batch,
-            device=device,
-            export_format=export_format,
-            mlflow_tracking_uri=mlflow_tracking_uri,
-            dynamic=dynamic,
-            task=task,
-        )
-
-    def register_classifier(
-        self,
-        weights_path,
-        num_classes: int = 2,
-        cls_is_features: bool = True,
-        batch: int = 8,
-        cls_imgsz: int = 128,
-        cls_embed_dim: int = 384,
-        name: str = "classifier",
-        mlflow_tracking_uri: str = "http://localhost:5000",
-    ):
-        RegisterRoiClassifier(
-            weights=weights_path,
-            num_classes=num_classes,
-            cls_is_features=cls_is_features,
-            cls_imgsz=cls_imgsz,
-            batch=batch,
-            cls_embed_dim=cls_embed_dim,
-            name=name,
-            mlflow_tracking_uri=mlflow_tracking_uri,
-        )
 
 
 if __name__ == "__main__":

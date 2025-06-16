@@ -11,23 +11,8 @@ from datalabeling.common.pipeline import (
     ObbToYoloStep,
 )
 
-from datalabeling.common.io import load_yaml
+from datalabeling.common.io import load_yaml, load_datasets
 import os, traceback
-
-def load_datasets(data_config_yaml: str) -> list[str]:
-    data_config = load_yaml(data_config_yaml)
-    paths = list()
-    root = data_config["path"]
-    for split in ["train", "val", "test"]:
-        try:
-            for p in data_config[split]:
-                path = os.path.join(root, p)
-                paths.append(path)
-        except Exception as e:
-            print(f"Failed to load datasets for conversion {split} --> ", e)
-
-    return paths
-
 
 
 def ls_to_yolo():
@@ -87,22 +72,18 @@ def ls_to_yolo():
 
 def yolo_to_obb_dota():
     label_handler = LabelHandler(config=LabelConfig())
-    label_handler.config.label_map = (
-        r"..\exported_annotations\label_mapping.json"
-    )
+    label_handler.config.label_map = r"..\exported_annotations\label_mapping.json"
     label_handler.load_map()
-    
-    
-    data_config_yaml = r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
-    
+
+    data_config_yaml = (
+        r"..\configs\yolo_configs\data\dataset_identification-detection.yaml"
+    )
+
     paths = load_datasets(data_config_yaml)
-    
+
     for p in paths:
-        
         try:
-            
             p = p.replace("images", "labels")
-            
 
             steps = [
                 # YoloToObbStep(
@@ -110,7 +91,6 @@ def yolo_to_obb_dota():
                 #     obb_labels_dir=r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\labels",
                 #     skip=True,
                 # ),
-                
                 ObbToYoloStep(
                     obb_labels_dir=p,
                     yolo_labels_dir=p,
@@ -129,7 +109,7 @@ def yolo_to_obb_dota():
 
             pipeline = Pipeline(steps)
             result_ctx = pipeline.run()
-    
+
         except Exception:
             traceback.print_exc()
 

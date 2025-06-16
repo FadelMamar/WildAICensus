@@ -74,79 +74,29 @@ if __name__ == "__main__":
     # (a,(b,c)) = detector(torch.rand(5,3,256,256))
 
     model = CustomYOLO(
-        count_regressor_layers=18,
-        area_regressor_layers=18,
-        roi_classifier_layers={"p3": 21, "p4": 21},
-        fp_tp_loss_weight=3.0,
+        count_regressor_layers=27,
+        area_regressor_layers=None,
         mask_p3_layer_indx=21,
-        mask_loss_weight = 1.0,
+        pos_weight=None,
+        roi_classifier_layers={"p3": 21, "p4": 24},
+        fp_tp_loss_weight=3.0,
+        mask_loss_weight=0.0,
         count_loss_weight=0.0,
         area_loss_weight=0.0,
         roi_scale_factor=[
             2.0,
         ],
-        model= r"..\configs\yolo_configs\models\yolov8-p2.yaml",
-    ) #.load(r"..\base_models_weights\best.pt")
+        # model=r"D:\datalabeling\runs\detect\train6\weights\best.pt",
+        model = r"..\configs\yolo_configs\models\yolov8-p2.yaml",
+    )  # .load(r"..\base_models_weights\best.pt")
 
-    model.train(
-        data=r"..\configs\yolo_configs\data\dataset_identification-detection.yaml",
-        epochs=5,
-        batch=64,
-        freeze=10,
-        imgsz=800,
-        workers=0,
-    )
-    
-    # activations_tr = model.activations
-    
-    # model.eval()
-    
-    # with torch.no_grad():
-    #     model(
-    #         torch.rand
-    # (1, 3, 800, 800),
-    #     )
-    
-    # activations_te = model.activations
-    
     # model.train(
-    #     data=r"..\configs\yolo_configs\data\dataset_identification-detection.yaml",
+    #     data=r"..\configs\yolo_configs\data\data_config.yaml",
     #     epochs=5,
-    #     batch=16,
-    #     freeze=11,
+    #     batch=8,
+    #     freeze=10,
     #     imgsz=800,
     #     workers=0,
     # )
-    
+
     # model.val(data=r"..\configs\yolo_configs\data\dataset_identification-detection.yaml",batch=16)
-
-    # # hook
-    # activation = {}
-    # def get_activation(name):
-    #     def hook(module, args, output):
-    #         activation[name] = output #.detach()
-    #         return None
-    #     return hook
-
-    # # register forward hook
-    # layer_number = 5
-    # base_model[layer_number].register_forward_hook(get_activation(layer_number))
-
-    # out = detector(torch.rand(1,3,512,512),verbose=False)
-
-    # activation[layer_number]
-
-    # ]
-    # exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
-
-    # image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
-
-    # image_paths = list(Path(image_dir).glob("*.jpg"))[:1]
-    # len(image_paths)
-
-    # results = handler.predict_directory(
-    #     path_to_dir=None,
-    #     images_paths=image_paths,
-    #     as_dataframe=True,
-    #     save_path=None,
-    # )

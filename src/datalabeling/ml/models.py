@@ -279,18 +279,17 @@ class ImageClassifier(L.LightningModule):
     ):
         super().__init__()
 
-        self.save_hyperparameters(ignore=["model", "threshold"])
+        self.save_hyperparameters(ignore=["threshold"])
 
         # use a pretrained ResNet backbone
         self.model = get_image_classifier_module(
             cls_is_features=cls_is_features, num_classes=num_classes
         )
-        # replace final layer
-        # in_features = self.model.fc.in_features
-        # self.model.fc = nn.Linear(in_features, num_classes)
+
+        self.label_to_class_map = dict()
 
         # metrics
-        cfg = dict(task="multiclass", num_classes=num_classes, average="macro")
+        cfg = dict(task="multiclass", num_classes=num_classes, average=None)
         self.accuracy = Accuracy(**cfg)
         self.precision = Precision(threshold=threshold, **cfg)
         self.recall = Recall(threshold=threshold, **cfg)
@@ -306,6 +305,10 @@ class ImageClassifier(L.LightningModule):
 
         self.label_smoothing = label_smoothing
         self.num_classes = num_classes
+
+    def set_label_class_map(self, class_to_label_map: dict):
+        assert isinstance(class_to_label_map, dict), "Provide a dict[str,int]"
+        self.label_to_class_map = {v: k for k, v in class_to_label_map.items()}
 
     def forward(self, x) -> torch.Tensor:
         out = self.model(x)
@@ -347,9 +350,19 @@ class ImageClassifier(L.LightningModule):
 
         for name, metric in self.metrics.items():
             metric.update(logits, y)
-            self.log(f"val_{name}", metric, prog_bar=True, on_epoch=True)
+            # self.log(f"val_{name}_{i}", metric, prog_bar=True, on_epoch=True)
 
         self.log("val_loss", loss, on_epoch=True, prog_bar=True)
+
+    def on_validation_epoch_end(self):
+        # print(self.label_to_class_map)
+
+        for name, metric in self.metrics.items():
+            score = metric.compute().cpu()
+            self.log(f"val_{name}", score.mean())
+            for i, score in enumerate(score):
+                cls_name = self.label_to_class_map.get(i, i)
+                self.log(f"val_{name}_class_{cls_name}", score)
 
     def predict_step(self, x):
         with torch.no_grad():

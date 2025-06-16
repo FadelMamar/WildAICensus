@@ -1,9 +1,10 @@
-import logging
+import logging, os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 from ultralytics import SAM
+from ultralytics.data.dataset import YOLOConcatDataset, YOLODataset
 
 from ..ml.train import TrainingManager
 from ..ml.models import Detector
@@ -13,8 +14,19 @@ from .annotation_utils import convert_obb_to_yolo as o2y
 from .annotation_utils import convert_yolo_to_coco as y2coco
 from .annotation_utils import convert_yolo_to_obb as y2o
 from .annotation_utils import create_yolo_seg_directory as yolo2seg
-from .config import DataConfig, LabelConfig, TrainingConfig, EvaluationConfig
-from .dataset_loader import DataPreparation, ClassificationDatasetBuilder
+from .config import (
+    DataConfig,
+    LabelConfig,
+    TrainingConfig,
+    EvaluationConfig,
+    TilingConfig,
+)
+from .dataset_loader import (
+    DataPreparation,
+    ClassificationDatasetBuilder,
+    LabelingDataset,
+)
+from .io import load_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -100,11 +112,13 @@ class YoloToSegStep(PipelineStep):
         model_sam: SAM,
         device: str = "cuda",
         copy_images_dir: bool = True,
+        clear: bool = True,
     ):
         self.data_config_yaml = data_config_yaml
         self.model_sam = model_sam
         self.device = device
         self.copy_images_dir = copy_images_dir
+        self.clear = clear
 
     def run(self, context: Dict[str, Any] = None) -> None:
         yolo2seg(
@@ -112,24 +126,40 @@ class YoloToSegStep(PipelineStep):
             model_sam=self.model_sam,
             device=self.device,
             copy_images_dir=self.copy_images_dir,
+            clear=self.clear,
         )
-        # context["yolo_seg_path"] = self.out_path
 
 
 class YoloToCocoStep(PipelineStep):
     def __init__(
         self,
-        dataset: Any,
         coco_dir: str,
+        # imgsz:int,
         data_config: Dict[str, Any],
         split: str = "val",
         clear: bool = False,
     ):
-        self.dataset = dataset
+        self.dataset = None
         self.coco_dir = coco_dir
         self.data_config = data_config
         self.split = split
         self.clear = clear
+
+        # load dataset
+        datasets = []
+        for path in self.data_config[split]:
+            img_dir = os.path.join(self.data_config["path"], path)
+            d = YOLODataset(
+                img_path=img_dir,
+                task="detect",
+                data={"names": self.data_config["names"]},
+                augment=False,
+                # imgsz=imgsz,
+                classes=None,
+            )
+            datasets.append(d)
+
+        self.dataset = YOLOConcatDataset(datasets)
 
     def run(self, context: Dict[str, Any]) -> None:
         y2coco(
@@ -148,20 +178,47 @@ class LabelstudioToYolo(PipelineStep):
         dataset_config: DataConfig,
         label_config: LabelConfig,
         image_dir,
+        max_workers: int = 1,
         ls_client=None,
         ls_xml_config: str = None,
+        project_id: int = None,
+        tiling_config: TilingConfig = None,
     ):
         self.ls_to_yolo = DataPreparation(dataset_config, label_config)
         self.image_dir = image_dir
         self.ls_client = ls_client
+        self.max_workers = max_workers
         self.ls_xml_config = ls_xml_config
+        self.project_id = project_id
+        self.labelstudio_client = None
+
+        self.tiling_config = tiling_config
+        self.dataset_config = dataset_config
+        self.label_config = label_config
+
+        if self.project_id is not None:
+            assert self.ls_client is not None, "Provide labelstudio client"
 
     def run(self, context: Dict[str, Any] = None) -> None:
-        self.ls_to_yolo.run(
-            ls_xml_config=self.ls_xml_config,
-            image_dir=self.image_dir,
-            ls_client=self.ls_client,
-        )
+        if self.project_id is not None:
+            dataset = LabelingDataset.from_ls(
+                self.ls_client,
+                project_id=self.project_id,
+                config=self.tiling_config,
+                top_n=0,
+                max_workers=self.max_workers,
+                load_existing_metadata=False,
+            )
+            dataset.slice_and_save_as_yolo(
+                self.dataset_config, self.label_config, max_workers=self.max_workers
+            )
+
+        else:
+            self.ls_to_yolo.run(
+                ls_xml_config=self.ls_xml_config,
+                image_dir=self.image_dir,
+                ls_client=self.ls_client,
+            )
 
 
 class ClassificationDataExport(PipelineStep):

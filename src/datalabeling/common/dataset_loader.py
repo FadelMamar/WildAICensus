@@ -9,15 +9,22 @@ from PIL import Image
 import cv2
 import numpy as np
 import pandas as pd
+from urllib.parse import quote, unquote
+
 from tqdm import tqdm
 from itertools import chain, product
 import math
 import geopy
 from urllib.parse import unquote
 from label_studio_tools.core.utils.io import get_local_path
+from label_studio_sdk.client import LabelStudio
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.pool import ThreadPool
 from functools import partial
+import fiftyone as fo
+from random import shuffle
+import tempfile
+from copy import copy
 
 from .annotation_utils import (
     ImageProcessor,
@@ -36,7 +43,7 @@ from ..ml.workers import ObjectDetectionSystem
 from ..ml.interface import InferenceEngine
 
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("DatasetLoaders")
 
 
 class TileBuilder:
@@ -297,10 +304,15 @@ class TileBuilder:
 
 
 class LabelingDataset:
-    def __init__(self, tiles: list[Tile], data: pd.DataFrame = None):
+    def __init__(
+        self,
+        tiles: list[Tile],
+        data: pd.DataFrame = None,
+    ):
         self.tiles: list[Tile] = tiles
         self.data: pd.DataFrame = data
         self._is_built: bool = data is not None
+        self.labelstudio_client: LabelStudio = None
 
         if self.data is not None:
             self.data = self.data.convert_dtypes()
@@ -310,13 +322,19 @@ class LabelingDataset:
     def add_tile(self, tile: Tile) -> None:
         self.tiles.append(tile)
 
-    def add_predictions(self, engine: InferenceEngine, build: bool = False) -> None:
+    def add_predictions(self, engine: InferenceEngine, build: bool = True) -> None:
         self.tiles = engine.inference(
             tiles=self.tiles, images_paths=None, return_tiles=True
         )
         if build:
             self.build(force_rebuild=True)
         return None
+
+    def set_labelstudio_client(self, client):
+        assert isinstance(client, LabelStudio), (
+            "Expected type 'LabelStudio' but received {type(client)}"
+        )
+        self.labelstudio_client = client
 
     def import_data(self, path: str) -> None:
         self.data = pd.read_csv(
@@ -432,6 +450,10 @@ class LabelingDataset:
         else:
             assert isinstance(paths, Sequence)
 
+        paths = list(paths)
+        assert len(paths) > 0, "No image has been provided."
+        assert all([Path(p).exists() for p in paths]), "Some paths do not exist."
+
         # load groundtruth
         df_labels, label_format = DataHandler.load_yolo_groundtruth(
             images_dir=None,
@@ -451,24 +473,27 @@ class LabelingDataset:
     @classmethod
     def from_ls(
         cls,
-        labelstudio_client,
         project_id: int,
-        config: TilingConfig,
         top_n=0,
+        config: TilingConfig = None,
+        labelstudio_client: LabelStudio = None,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,
         max_workers: int = 1,
         ls_download_resources: bool = False,
     ):
-        project = labelstudio_client.projects.get(id=project_id)
-
-        assert config.root is not None, "Provide path to untiled directory."
+        assert isinstance(labelstudio_client, LabelStudio), (
+            "Provide an instance of LabelStudio"
+        )
         # data_dir = labelstudio_client.import_storage.local.get(project_id).path
         # logger.info(f"Using root directory: {data_dir}")
 
-        if tile_metadata is None:
+        project = labelstudio_client.projects.get(id=project_id)
+
+        if config is not None:
+            assert config.root is not None, "Provide path to untiled directory."
             tile_metadata = TileBuilder(config=config).run(
-                load_existing_metadata=load_existing_metadata
+                load_existing_metadata=load_existing_metadata, max_workers=max_workers
             )
 
         def load_unique_task(task) -> Tile | None:
@@ -481,19 +506,24 @@ class LabelingDataset:
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
 
-                # get tile gps_coords and offsets
-                value = tile_metadata.get(Path(image_path).stem, None)
-                tile_gps_loc = None
-                x1 = y1 = None
-                if value is None:
-                    logger.warning(
-                        f" No GPS coordinates was found when reading metadata of {img_url}. -> skipping"
-                    )
-                    return None
+                # get tile gps_coords and offsets if given
+                if tile_metadata is not None:
+                    value = tile_metadata.get(
+                        Path(img_url).stem, None
+                    ) or tile_metadata.get(Path(image_path).stem, None)
+                    tile_gps_loc = None
+                    x1 = y1 = None
+                    if value is None:
+                        logger.warning(f"No metadata found for {img_url}. -> skipping")
+                        return None
 
-                tile_gps_loc = value["gps"]
-                (x1, x2), (y1, y2) = value["coordinates"]
-                parent_image = value["parent_image"]
+                    tile_gps_loc = value["gps"]
+                    (x1, x2), (y1, y2) = value["coordinates"]
+                    parent_image = value["parent_image"]
+                else:
+                    tile_gps_loc = None
+                    x1 = y1 = None
+                    parent_image = None
 
                 # build tile
                 detection_objects = Detection.from_ls(task.annotations, image_path)
@@ -509,11 +539,12 @@ class LabelingDataset:
                 )
 
                 # update detections (annotations or predictions) gps loc using tile_gps_loc
-                tile.update_detection_gps(
-                    sensor_height=config.sensor_height,
-                    flight_height=config.flight_height,
-                    gsd=config.gsd,
-                )
+                if tile_gps_loc is not None:
+                    tile.update_detection_gps(
+                        sensor_height=config.sensor_height,
+                        flight_height=config.flight_height,
+                        gsd=config.gsd,
+                    )
                 return tile
 
             except Exception:
@@ -534,10 +565,9 @@ class LabelingDataset:
 
         # Single thread
         if max_workers < 2:
-            for i, task in enumerate(tasks):
+            for i, tile in enumerate(map(load_unique_task, tasks)):
                 if top_n > 0 and i >= top_n:
                     break
-                tile = load_unique_task(task)
                 if tile is not None:
                     tiles.append(tile)
 
@@ -548,14 +578,361 @@ class LabelingDataset:
 
         # Multi threads
         with ThreadPool(max_workers) as executor:
-            for i, task in enumerate(executor.map(load_unique_task, tasks)):
-                tile = load_unique_task(task)
+            for i, tile in enumerate(executor.map(load_unique_task, tasks)):
                 if tile is not None:
                     tiles.append(tile)
 
         # build dataset
         dataset = cls(tiles=tiles)
         dataset.build()
+        dataset.set_labelstudio_client(labelstudio_client)
+
+        return dataset
+
+    # TODO: debug
+    def _create_single_task(
+        self, parsed_label_config: dict, project_id: int, tile: Tile
+    ):
+        raise NotImplementedError("TODO")
+        from_name = list(parsed_label_config.keys())[0]
+        to_name = parsed_label_config[from_name]["to_name"][0]  # "image"
+        label_type = parsed_label_config[from_name]["type"]
+
+        image_url = quote(Path(tile.image_path).resolve().as_posix())
+
+        image_url = "/data/upload/8/" + image_url
+
+        task = self.labelstudio_client.tasks.create(
+            project=project_id, data={to_name: image_url}
+        )
+
+        img_height = tile.width
+        img_width = tile.height
+        task_id = task.id
+
+        # Send predictions
+        try:
+            formatted_pred = [
+                pred.to_ls(
+                    from_name=from_name,
+                    to_name=to_name,
+                    label_type=label_type,
+                    img_height=img_height,
+                    img_width=img_width,
+                )
+                for pred in tile.predictions
+            ]
+            conf_scores = [pred["score"] for pred in formatted_pred]
+            max_score = 0.0
+            if len(conf_scores) > 0:
+                max_score = max(conf_scores)
+
+            self.labelstudio_client.predictions.create(
+                task=task_id,
+                score=max_score,
+                result=formatted_pred,
+                model_version=self.model_tag,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            logger.warning(
+                f"Failed to push predictions in task.id={task.id}. Skipping..."
+            )
+
+        # annotations
+        try:
+            formatted_pred = [
+                pred.to_ls(
+                    from_name=from_name,
+                    to_name=to_name,
+                    label_type=label_type,
+                    img_height=img_height,
+                    img_width=img_width,
+                )
+                for pred in tile.annotations
+            ]
+
+            self.labelstudio_client.annotations.create(
+                task.id,
+                result=formatted_pred,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            logger.warning(
+                f"Failed to push annotations in task.id={task.id}. Skipping..."
+            )
+
+        return None
+
+    # TODO: debug
+    def to_ls(
+        self,
+        project_title: str,
+        reference_project_id: int,
+        top_n: int = 0,
+        tag: str = "",
+    ) -> None:
+        """Uploads predictions using label studio API.
+        Make sure to set the API key and url inside .env
+
+        Args:
+            project_id (int): project id from Label studio
+            top_n (int): top n tasks to be uploaded in descending order of task_id. Default 0 which disables the feature.
+        """
+        # Select project
+        if self.labelstudio_client is None:
+            raise ValueError(
+                "Provide label studio client using method 'set_labelstudio_client'"
+            )
+
+        reference_project = self.labelstudio_client.projects.get(reference_project_id)
+
+        project = self.labelstudio_client.projects.create(
+            title=project_title,
+            label_config=reference_project.label_config,
+        )
+        parsed_label_config = reference_project.parsed_label_config
+
+        for i, tile in enumerate(self.tiles):
+            if top_n > 0:
+                if i > top_n:
+                    break
+
+            self._create_single_task(
+                tile=tile,
+                project_id=project.id,
+                parsed_label_config=parsed_label_config,
+            )
+
+    def to_yolo(self, dir_path: str):
+        save_dir = Path(dir_path)
+        labels_dir = save_dir / "labels"
+        images_dir = save_dir / "images"
+
+        cols = ["label", "x", "y", "box_w", "box_h"]
+        if not save_dir.exists():
+            logger.info(f"dir_path={dir_path} does not exist. Creating...")
+            save_dir.mkdir(parents=True, exist_ok=True)
+
+        labels_dir.mkdir(parents=True, exist_ok=True)
+        images_dir.mkdir(parents=True, exist_ok=True)
+
+        # get positive samples
+        data = self.data.copy().dropna()
+        if data.empty:
+            logger.info("Dataset to be saved in YOLO format has 0 positive samples.")
+        else:
+            data["x"] = (data["x_min"] + data["x_max"]) / (data["width"] * 2.0)
+            data["y"] = (data["y_min"] + data["y_max"]) / (data["height"] * 2.0)
+            data["box_w"] = (data["x_max"] - data["x_min"]) / (data["width"] * 2.0)
+            data["box_h"] = (data["y_max"] + data["y_min"]) / (data["height"] * 2.0)
+
+        for image_path, df in tqdm(
+            data.groupby("file_name"), desc="Saving yolo labels"
+        ):
+            try:
+                txt_file = labels_dir / Path(image_path).with_suffix(".txt").name
+                df[cols].drop_duplicates().to_csv(
+                    txt_file, sep=" ", index=False, header=False
+                )
+            except Exception as e:
+                logger.error(
+                    f"Failed to saved yolo labels for {image_path} {e}\nSkipping"
+                )
+                continue
+
+        for image_path in tqdm(
+            self.data["file_name"].unique(), desc="Saving yolo images"
+        ):
+            dst = images_dir / Path(image_path).name
+            try:
+                shutil.copyfile(src=image_path, dst=dst)
+            except Exception as e:
+                logger.error(f"Failed to copy {image_path} -> {dst}.{e}\nSkipping")
+                continue
+
+        return None
+
+    def slice_and_save_as_yolo(
+        self, data_config: DataConfig, label_config: LabelConfig, max_workers: int = 1
+    ):
+        assert data_config.dest_dir is not None, "Provide data_config.dest_dir"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(data_config.dest_dir).mkdir(parents=True, exist_ok=True)
+            img_dir, coco_json = self.to_coco(
+                output_dir=tmp,
+                copy_images=True,
+                clear_existing_data=True,
+            )
+
+            label_handler = LabelHandler(label_config)
+            builder = YOLODatasetBuilder(data_config)
+
+            builder.build(
+                {img_dir: coco_json},
+                label_handler=label_handler,
+                max_workers=max_workers,
+            )
+
+        return None
+
+    def to_coco(
+        self,
+        output_dir: str,
+        copy_images: bool = False,
+        clear_existing_data: bool = True,
+    ) -> str:
+        label_class_map = self.data.dropna()[["label", "class_name"]]
+        label_class_map = dict(
+            zip(label_class_map.iloc[:, 0], label_class_map.iloc[:, 1])
+        )
+
+        # Define the categories for the COCO dataset
+        categories = [{"id": k, "name": v} for k, v in label_class_map.items()]
+
+        # Define the COCO dataset dictionary
+        coco_dataset = {
+            "info": {},
+            "licenses": [],
+            "categories": categories,
+            "images": [],
+            "annotations": [],
+        }
+
+        # mkdir
+        output_dir = Path(output_dir)
+        output_dir.mkdir(exist_ok=True, parents=True)
+        annot_dir = output_dir / "annotations"
+        annot_dir.mkdir(exist_ok=True, parents=False)
+        img_dir = output_dir / "raw"
+        img_dir.mkdir(exist_ok=True, parents=False)
+        annot_save_path = annot_dir / "annotations_raw.json"
+
+        if clear_existing_data:
+            try:
+                if os.path.exists(img_dir):
+                    shutil.rmtree(img_dir)
+                    logger.info(f"Deleting images @ {img_dir}")
+                img_dir.mkdir(exist_ok=True, parents=False)
+                if os.path.exists(annot_save_path):
+                    os.remove(annot_save_path)
+                    logger.info(f"Deleting annotation file @ {annot_save_path} ")
+            except Exception as e:
+                logger.info(e)
+
+        common_prefix = os.path.commonprefix(self.data["file_name"].unique())
+
+        # Loop through the images in the input directory
+        idx = -1
+        for image_path, df in tqdm(
+            self.data.groupby("file_name"), desc="Converting to coco"
+        ):
+            idx += 1
+            if copy_images:
+                image_file = os.path.relpath(image_path, common_prefix)
+                image_file = "#".join([p.name for p in Path(image_file).parents])
+                image_file = image_file + os.path.basename(image_path)
+                shutil.copyfile(image_path, img_dir / image_file)
+            else:
+                image_file = str(image_path)
+
+            # Add the image to the COCO dataset
+            image_id = idx
+            image_dict = {
+                "id": image_id,
+                "width": int(df["image_width"].iat[0]),
+                "height": int(df["image_height"].iat[0]),
+                "file_name": os.path.basename(image_file),
+            }
+            coco_dataset["images"].append(image_dict)
+
+            df_detections = df.dropna()
+            # Loop through the annotations and add them to the COCO dataset
+            for i in range(len(df_detections)):
+                x_min, y_min, x_max, y_max = df_detections[
+                    ["x_min", "y_min", "x_max", "y_max"]
+                ].iloc[i, :]
+                ann_dict = {
+                    "id": len(coco_dataset["annotations"]),
+                    "image_id": image_id,
+                    "category_id": int(df_detections["label"].iat[i]),
+                    "bbox": [x_min, y_min, x_max - x_min, y_max - y_min],
+                    "segmentation": [
+                        [x_min, y_min, x_max, y_min, x_max, y_max, x_min, y_max]
+                    ],
+                    "area": (x_max - x_min) * (y_max - y_min),
+                    "iscrowd": 0,
+                }
+                coco_dataset["annotations"].append(ann_dict)
+
+        # Save the COCO dataset to a JSON file
+        with open(annot_save_path, "w") as f:
+            json.dump(coco_dataset, f, indent=2)
+
+        return str(img_dir), str(annot_save_path)
+
+    def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
+        try:
+            # Try to load existing dataset
+            dataset = fo.load_dataset(dataset_name)
+            logger.info(f"Loaded existing dataset: {dataset_name}")
+        except ValueError:
+            # Create new dataset if it doesn't exist
+            dataset = fo.Dataset(dataset_name, persistent=persistent)
+            logger.info(f"Created new dataset: {dataset_name}")
+
+        samples = []
+
+        for img_path, df_detections in tqdm(
+            self.data.groupby("file_name"), desc="Creating-fifytone-dataset"
+        ):
+            if not os.path.exists(img_path):
+                logger.warning(f"Warning: Image not found at {img_path}.Skipping")
+                continue
+
+            sample = fo.Sample(filepath=img_path)
+
+            if df_detections.dropna().empty:
+                logger.info(f"Image at {img_path} is a negative sample")
+                sample["is_positive"] = False
+                samples.append(sample)
+                continue
+
+            # conf = bboxes['scores']
+            class_name = df_detections["class"].tolist()
+
+            # get bbox [x, y, w, h] in normalized coords [0,1]
+            bboxes = df_detections[["x_min", "y_min"]].copy()
+            bboxes.loc[:, "x_min"] /= df_detections.loc[:, "width"]
+            bboxes.loc[:, "y_min"] /= df_detections.loc[:, "height"]
+            bboxes["w"] = 0.0
+            bboxes["h"] = 0.0
+            bboxes.loc[:, "w"] = (
+                df_detections.loc[:, "x_max"] - df_detections.loc[:, "x_min"]
+            ) / df_detections.loc[:, "width"]
+            bboxes.loc[:, "h"] = (
+                df_detections.loc[:, "y_max"] - df_detections.loc[:, "y_min"]
+            ) / df_detections.loc[:, "height"]
+            bboxes = bboxes[["x_min", "y_min", "w", "h"]].to_numpy().tolist()
+
+            # Convert detections to FiftyOne format
+            fo_detections = []
+            for i, box in enumerate(bboxes):
+                fo_detection = fo.Detection(
+                    label=class_name[i],
+                    bounding_box=box,
+                    # confidence=det.get('confidence', None)
+                )
+                fo_detections.append(fo_detection)
+
+            sample["gt"] = fo.Detections(detections=fo_detections)
+            sample["is_positive"] = True
+            samples.append(sample)
+
+        dataset.add_samples(samples)
 
         return dataset
 
@@ -571,6 +948,7 @@ class LabelHandler:
             assert len(intersec) == 0, (
                 f"{intersec} are required to be discarded and kept. Error..."
             )
+        assert self.config.label_map is not None, "Provide label_map json file"
 
     def load_map(
         self,
@@ -598,6 +976,7 @@ class LabelHandler:
 
         # load yaml
         yolo_config = load_yaml(yaml_path)
+        yolo_config = copy(yolo_config)
 
         # updaate yaml and save
         yolo_config.update({"names": self._label_map, "nc": len(self._label_map)})
@@ -614,7 +993,7 @@ class YOLODatasetBuilder:
 
     def _validate_config(self):
         """Ensure configuration parameters are valid"""
-        if self.config.slice_width <= 0 or self.config.slice_height <= 0:
+        if self.config.tilesize <= 0:
             raise ValueError("Slice dimensions must be positive")
 
         #  Checking inconsistency in arguments
@@ -771,6 +1150,8 @@ class YOLODatasetBuilder:
                 os.path.join(output_dir, txt_file), sep=" ", index=False, header=False
             )
 
+        return None
+
 
 class ClassificationDatasetBuilder:
     def __init__(
@@ -780,7 +1161,7 @@ class ClassificationDatasetBuilder:
         from .evaluation import PerformanceEvaluator
 
         self.config = eval_config
-        self.detector: InferenceEngine = None
+        # self.detector: InferenceEngine = None
         self.source_dirs = None
         self.output_dir = None
         self.perf_eval = PerformanceEvaluator(config=self.config)
@@ -808,8 +1189,8 @@ class ClassificationDatasetBuilder:
         bbox_resize_factor: int = 1,
         save_true_negatives: bool = False,
         tn_kwargs=dict(w=50, h=50, number=3),
-        tp_kwargs=dict(w=None, h=None),
-        fp_kwargs=dict(w=None, h=None),
+        tp_kwargs=dict(w=50, h=50),
+        fp_kwargs=dict(w=50, h=50),
         hn_kwargs=dict(w=50, h=50),
         max_workers: int = 1,
     ):
@@ -821,8 +1202,14 @@ class ClassificationDatasetBuilder:
         )
 
         self.bbox_resize_factor = bbox_resize_factor
-        self.detector = detector
         self.feature_extractor = feature_extractor
+
+        # load predictions
+        dataset = None
+        if "fp" in strategies or "hn" in strategies:
+            tiles = [Tile(image_path=p) for p in get_images_from_dirs(self.source_dirs)]
+            dataset = LabelingDataset(tiles=tiles)
+            dataset.add_predictions(engine=detector, build=True)
 
         for strategy in list(set(strategies)):
             if strategy == "gt":
@@ -840,12 +1227,14 @@ class ClassificationDatasetBuilder:
                 )
 
             elif strategy == "fp":
-                assert self.detector is not None, "Provide a detector"
-                self._save_fp(bbox_resize_factor=bbox_resize_factor, **fp_kwargs)
+                self._save_fp(
+                    dataset=dataset, bbox_resize_factor=bbox_resize_factor, **fp_kwargs
+                )
 
             elif strategy == "hn":
-                assert self.detector is not None, "Provide a detector"
-                self._save_hn(bbox_resize_factor=bbox_resize_factor, **hn_kwargs)
+                self._save_hn(
+                    dataset=dataset, bbox_resize_factor=bbox_resize_factor, **hn_kwargs
+                )
 
             else:
                 raise NotImplementedError(f"strategy:{strategy} is not defined.")
@@ -894,7 +1283,7 @@ class ClassificationDatasetBuilder:
     def _save_tn(
         self,
         file_name: str,
-        bbox_resize_factor: int,
+        bbox_resize_factor: int = 1,
         w: int = 50,
         h: int = 50,
         number: int = 2,
@@ -916,12 +1305,11 @@ class ClassificationDatasetBuilder:
             high=img_height - h * bbox_resize_factor,
             size=number,
         )
-        count = 0
         batch = []
-        for x, y in product(xs, ys):
-            if count == number:
-                break
+        pairs = list(product(xs, ys))
+        shuffle(pairs)
 
+        for x, y in pairs[:number]:
             # rescale w,h
             w_ = (np.random.rand() + 0.5) * w
             h_ = (np.random.rand() + 0.5) * h
@@ -943,7 +1331,6 @@ class ClassificationDatasetBuilder:
                 tag=f"#{y1}_{y2}_{x1}_{x2}",
             )
             batch.append(data)
-            count += 1
 
         # save data
         self._save_batch(batch)
@@ -954,7 +1341,7 @@ class ClassificationDatasetBuilder:
         self,
         df_gt: pd.DataFrame,
         file_name: str,
-        bbox_resize_factor: int,
+        bbox_resize_factor: int = 1,
         w: int = None,
         h: int = None,
     ):
@@ -1000,39 +1387,31 @@ class ClassificationDatasetBuilder:
 
     def _save_hn(
         self,
-        bbox_resize_factor: int,
+        dataset: LabelingDataset,
+        bbox_resize_factor: int = 1,
         w: int = None,
         h: int = None,
     ):
         logger.info("Computing Hard negatives...")
 
-        images_paths = get_images_from_dirs(images_dirs=self.source_dirs)
-
-        is_tn = (
-            lambda p: not Path(str(p).replace("images", "labels"))
+        is_tp = (
+            lambda p: Path(str(p).replace("images", "labels"))
             .with_suffix(".txt")
             .exists()
         )
-        images_paths = [p for p in images_paths if is_tn(p)]
-
-        logger.info(f"Running detector on {len(images_paths)} negative samples...")
-
-        predictions = self.detector.inference(
-            images_paths=images_paths, return_as_df=False
-        )
-        predictions = dict(zip(images_paths, predictions))
 
         count = 0
-        for file_name, detections in tqdm(
-            predictions.items(), desc="Saving Hard negatives"
-        ):
-            image = Image.open(file_name).convert("RGB")
+        for tile in tqdm(dataset.tiles, desc="Saving Hard negatives"):
+            if is_tp(tile.image_path):
+                continue  # skip true positives
+
+            image = Image.open(tile.image_path).convert("RGB")
             img_width, img_height = image.size
             image = np.asarray(image)
 
             batch = []
 
-            for det in detections:
+            for det in tile.predictions:
                 if det.is_empty:
                     continue
 
@@ -1057,7 +1436,7 @@ class ClassificationDatasetBuilder:
                 data = dict(
                     image=image[y1:y2, x1:x2],
                     label_name=self.tn_label,
-                    file_name=file_name,
+                    file_name=tile.image_path,
                     tag=f"#{y1}_{y2}_{x1}_{x2}",
                 )
                 batch.append(data)
@@ -1127,7 +1506,8 @@ class ClassificationDatasetBuilder:
 
     def _save_fp(
         self,
-        bbox_resize_factor,
+        dataset: LabelingDataset,
+        bbox_resize_factor: int = 1,
         w: int = None,
         h: int = None,
     ):
@@ -1136,11 +1516,6 @@ class ClassificationDatasetBuilder:
         logger.info("Computing False Positives...")
 
         # raise NotImplementedError("Debugging to do...")
-
-        # load predictions
-        tiles = [Tile(image_path=p) for p in get_images_from_dirs(self.source_dirs)]
-        dataset = LabelingDataset(tiles=tiles)
-        dataset.add_predictions(engine=self.detector, build=True)
 
         df_metrics = self.perf_eval.run(
             dataset=dataset,

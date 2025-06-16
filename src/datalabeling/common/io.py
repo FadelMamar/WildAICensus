@@ -49,7 +49,8 @@ def load_datasets(data_config_yaml: str) -> list[str]:
     data_config = load_yaml(data_config_yaml)
     paths = list()
     root = data_config["path"]
-    for split in ["train", "val", "test"]:
+    splits = ["train", "val", "test"]
+    for split in splits:
         try:
             for p in data_config[split]:
                 path = os.path.join(root, p)
@@ -69,7 +70,7 @@ def get_images_paths(
     return images_paths
 
 
-def get_images_from_dirs(images_dirs: Sequence[str]) -> list:
+def get_images_from_dirs(images_dirs: Sequence[str]) -> list[str]:
     c = chain.from_iterable([get_images_paths(d) for d in images_dirs])
     c = list(set(c))
 
@@ -384,6 +385,12 @@ class ClassifierFeaturesData(Dataset):
         self.tn_ratio = tn_ratio
         assert self.tn_ratio > 0.0, f"Found tn_ratio={self.tn_ratio} instead"
 
+        self.classes = None
+        self.class_to_idx = {
+            self.tn_label: 0,
+            self.tp_label: 1,
+        }
+
         self.get_data()
 
         # self.transform=transform # not used
@@ -393,10 +400,6 @@ class ClassifierFeaturesData(Dataset):
     ):
         class_names = [p.stem for p in Path(self.data_dir).glob("*") if p.is_dir()]
         self.classes = list(range(len(class_names)))
-        self.class_to_idx = {
-            self.tn_label: 0,
-            self.tp_label: 1,
-        }  # dict(zip(class_names, self.classes))
 
         assert (self.tp_label in class_names) and (self.tn_label in class_names), (
             f"Received class_names={class_names}, tn_label={self.tn_label},tp_label={self.tp_label}"
@@ -405,20 +408,17 @@ class ClassifierFeaturesData(Dataset):
         samples = []
 
         # get true positives
-        # num_positive = 0
-        # if self.tp_label in class_names:
         tp_data = list((self.data_dir / self.tp_label).glob("*"))
         num_positive = len(tp_data)
         samples.append(list(tp_data))
         logger.info(f"Sampling {num_positive} {self.tp_label} from {self.data_dir}")
 
         # sample true negatives
-        # if self.tn_label in class_names:
         tn_data = list((self.data_dir / self.tn_label).glob("*"))
         num_tn = int(num_positive * self.tn_ratio)
         num_tn = min(num_tn, len(tn_data))
         random.seed(41)
-        random.shuffle(tn_data)  # shuffle
+        random.shuffle(tn_data)
         samples.append(tn_data[:num_tn])
         logger.info(f"Sampling {num_tn} {self.tn_label} from {self.data_dir}")
 
@@ -434,7 +434,7 @@ class ClassifierFeaturesData(Dataset):
 
         self.samples = list(chain.from_iterable(samples))
 
-        print(self.class_to_idx)
+        logger.info(f"class_mapping:{self.class_to_idx}")
 
     def __len__(
         self,
@@ -473,6 +473,7 @@ class ClassifierDataModule(L.LightningDataModule):
         self.num_workers = num_workers
         self.img_size = img_size
         self.tn_ratio = tn_ratio
+        self.class_to_idx = None
 
         self.loader = ImageFolder
         if is_features:
@@ -519,9 +520,17 @@ class ClassifierDataModule(L.LightningDataModule):
             self.val_dataset = self.loader(self.val_dir, transform=self.val_tfms)
             self.num_classes = len(self.train_dataset.classes)
 
+            for k in self.val_dataset.class_to_idx.keys():
+                assert (
+                    self.val_dataset.class_to_idx[k]
+                    == self.train_dataset.class_to_idx[k]
+                ), "class idx mapping do not match"
+            self.class_to_idx = self.val_dataset.class_to_idx
+
         if stage == "validate":
             self.val_dataset = self.loader(self.val_dir, transform=self.val_tfms)
             self.num_classes = len(self.train_dataset.classes)
+            self.class_to_idx = self.val_dataset.class_to_idx
 
     def train_dataloader(self):
         return DataLoader(

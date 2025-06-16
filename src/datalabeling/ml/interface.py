@@ -34,6 +34,12 @@ class InferenceEngine(object):
         self.detection_processor = None
         self.model_tag = "None"
 
+        # LS label config
+        self.labelstudio_client: LabelStudio = None
+        self.from_name = "label"
+        self.to_name = "image"
+        self.label_type = "rectanglelabels"
+
     def set_detector(self, detector: ObjectDetectionSystem, model_tag: str):
         assert isinstance(detector, ObjectDetectionSystem), (
             "Received {type(detector)} instead of ObjectDetectionSystem"
@@ -47,6 +53,30 @@ class InferenceEngine(object):
     ):
         self.detector.set_processor(roi_processor=detection_processor)
 
+    def set_ls_client(self, dotenv_path: str):
+        # # Load environment variables
+        if dotenv_path is not None:
+            load_dotenv(dotenv_path=dotenv_path)
+        else:
+            logging.warning(
+                msg="Pass argument `dotenv_path` to access label studio API"
+            )
+
+        # # label studio client
+        LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+        API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+
+        if LABEL_STUDIO_URL is None:
+            raise ValueError("env variable LABEL_STUDIO_URL is not set.")
+        if API_KEY is None:
+            raise ValueError("env variable API_KEY is not set.")
+
+        self.labelstudio_client = LabelStudio(
+            base_url=LABEL_STUDIO_URL, api_key=API_KEY
+        )
+
+        return None
+
     def inference(
         self,
         images_paths: Sequence[str],
@@ -57,19 +87,23 @@ class InferenceEngine(object):
         """Multithreaded detector"""
 
         paths = images_paths
-        if paths is None:
+        if images_paths is None:
             paths = [t.image_path for t in tiles]
+        else:
+            paths = list(images_paths)
+
+        logger.info(f"Running inference on {len(paths)} images.")
 
         detections = self.detector.run(images_paths=paths)
 
         if tiles is not None:
             # if tiles are provided,
             for i, tile in enumerate(tiles):
-                tile.predictions = detections[i]
+                tile.set_predictions(detections[i])
 
         if return_tiles:
             assert tiles is not None, (
-                "This is likely an errro. tiles have not been set."
+                "This is likely an error. tiles have not been set."
             )
             return tiles
 
@@ -110,82 +144,24 @@ class InferenceEngine(object):
 
         return dfs
 
+    def _upload_single_task(self, task, tag: str = ""):
+        task_id = task.id
+        img_url = task.data["image"]
 
-class Annotator(InferenceEngine):
-    def __init__(
-        self,
-        config: PredictionConfig,
-        dotenv_path: str = None,
-    ):
-        super().__init__(config)
-
-        # # Load environment variables
-        if dotenv_path is not None:
-            load_dotenv(dotenv_path=dotenv_path)
-        else:
-            logging.warning(
-                msg="Pass argument `dotenv_path` to access label studio API"
+        try:
+            # using unquote to deal with special characters
+            img_path = get_local_path(
+                unquote(img_url),
+                download_resources=False,
+                hostname=os.getenv("LABEL_STUDIO_URL"),
             )
 
-        # # label studio client
-        LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
-        API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
-        self.labelstudio_client = LabelStudio(
-            base_url=LABEL_STUDIO_URL, api_key=API_KEY
-        )
-
-        # LS label config
-        self.from_name = "label"
-        self.to_name = "image"
-        self.label_type = "rectanglelabels"
-
-    def upload_predictions(
-        self,
-        project_id: int,
-        top_n: int = 0,  # download_resources: bool = True,
-        tag: str = "",
-    ) -> None:
-        """Uploads predictions using label studio API.
-        Make sure to set the API key and url inside .env
-
-        Args:
-            project_id (int): project id from Label studio
-            top_n (int): top n tasks to be uploaded in descending order of task_id. Default 0 which disables the feature.
-        """
-        # Select project
-        project = self.labelstudio_client.projects.get(id=project_id)
-
-        # Upload predictions for each task
-        tasks = self.labelstudio_client.tasks.list(
-            project=project.id,
-        )
-        for i, task in enumerate(tasks):
-            if top_n > 0:
-                if i > top_n:
-                    break
-
-            task_id = task.id
-            img_url = task.data["image"]
-
-            try:
-                # using unquote to deal with special characters
+            if not Path(img_path).exists():
                 img_path = get_local_path(
                     unquote(img_url),
-                    download_resources=False,
+                    download_resources=True,
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
-
-                if not Path(img_path).exists():
-                    img_path = get_local_path(
-                        unquote(img_url),
-                        download_resources=True,
-                        hostname=os.getenv("LABEL_STUDIO_URL"),
-                    )
-
-            except Exception:
-                traceback.print_exc()
-                logger.warn(f"Failed to load {img_path}. Skipping...")
-                continue
 
             logger.info(f"Uploading predictions for: {img_path}")
 
@@ -220,58 +196,109 @@ class Annotator(InferenceEngine):
                 model_version=self.model_tag + tag,
             )
 
+        except Exception:
+            traceback.print_exc()
+            logger.warning(f"Failed to load {img_path}. Skipping...")
 
-def load_engine(
-    pred_config: PredictionConfig,
-    roi_classifier_path: str = r"..\base_models_weights\roi_classifier.ckpt",
-    roi_cls_is_features: bool = True,
-    roi_cls_label_map: dict = {0: "gt", 1: "tn"},
-    roi_keep_classes: list = ["gt"],
-    detection_label_map: dict = None,  # {0: "wildlife"},
-    feature_extractor_path: str = "facebook/dinov2-with-registers-small",
-    detection_model: YOLO = None,
-    mlflow_model_alias: str = "demo",
-    mlflow_model_name: str = "labeler",
-):
-    if detection_model is None:
-        detection_model, metadata = load_registered_model(
-            alias=mlflow_model_alias,
-            name=mlflow_model_name,
-            mlflow_tracking_url="http://localhost:5000",
-            load_unwrapped=True,
+        return None
+
+    def upload_predictions(
+        self,
+        project_id: int,
+        top_n: int = 0,  # download_resources: bool = True,
+        tag: str = "",
+    ) -> None:
+        """Uploads predictions using label studio API.
+        Make sure to set the API key and url inside .env
+
+        Args:
+            project_id (int): project id from Label studio
+            top_n (int): top n tasks to be uploaded in descending order of task_id. Default 0 which disables the feature.
+        """
+        # Select project
+        project = self.labelstudio_client.projects.get(id=project_id)
+
+        # Upload predictions for each task
+        tasks = self.labelstudio_client.tasks.list(
+            project=project.id,
         )
 
-    # build roi postprocessor
-    feature_extractor = get_processor("feature_extractor")(
-        hf_model_path=feature_extractor_path
-    )
+        for i, task in enumerate(tasks):
+            if top_n > 0:
+                if i > top_n:
+                    break
 
-    path = roi_classifier_path
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=roi_cls_is_features, map_location=pred_config.device
-    )
+            self._upload_single_task(task=task, tag=tag)
 
-    roi_classifier = get_processor("classifier")(
-        model,
-        label_map=roi_cls_label_map,
-        device=pred_config.device,
-        feature_extractor=feature_extractor,
-        imgsz=pred_config.cls_imgsz,
-    )
-    roi_processor = DetectionsPostprocessor(
-        keep_classes=roi_keep_classes,
-    )
-    roi_processor.set_classifier(roi_classifier)
+    @classmethod
+    def load_engine(
+        cls,
+        pred_config: PredictionConfig,
+        roi_classifier_path: str = None,
+        roi_cls_is_features: bool = True,
+        roi_cls_label_map: dict = {0: "gt", 1: "tn"},
+        roi_keep_classes: list = ["gt"],
+        detection_label_map: dict = {0: "wildlife"},
+        feature_extractor_path: str = "facebook/dinov2-with-registers-small",
+        detection_model: YOLO = None,
+        mlflow_model_alias: str = "demo",
+        mlflow_model_name: str = "labeler",
+        set_ls_client: bool = False,
+        dot_env_path: str = None,
+    ) -> tuple:
+        if (detection_model is None) and (pred_config.inference_service_url is None):
+            logger.info(
+                f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
+            )
+            detection_model, metadata = load_registered_model(
+                alias=mlflow_model_alias,
+                name=mlflow_model_name,
+                mlflow_tracking_url="http://localhost:5000",
+                load_unwrapped=True,
+            )
+            logger.info(f"model's metadata={metadata}")
 
-    # build object detection system
-    detection_label_map = getattr(detection_model, "names", None) or {0: "wildlife"}
-    detector = ObjectDetectionSystem(
-        config=pred_config, detection_label_map=detection_label_map
-    )
-    detector.set_model(model=detection_model, task="detect", path_weights=None)
-    detector.set_processor(roi_processor=roi_processor)
+        # build roi postprocessor
+        feature_extractor = get_processor("feature_extractor")(
+            hf_model_path=feature_extractor_path
+        )
 
-    engine = InferenceEngine(config=pred_config)
-    engine.set_detector(detector=detector, model_tag=mlflow_model_alias)
+        roi_processor = None
+        if roi_classifier_path is not None:
+            model = ImageClassifier.load_from_checkpoint(
+                roi_classifier_path,
+                cls_is_features=roi_cls_is_features,
+                map_location=pred_config.device,
+            )
 
-    return engine, feature_extractor
+            roi_classifier = get_processor("classifier")(
+                model,
+                label_map=roi_cls_label_map,
+                device=pred_config.device,
+                feature_extractor=feature_extractor,
+                imgsz=pred_config.cls_imgsz,
+            )
+            roi_processor = DetectionsPostprocessor(
+                keep_classes=roi_keep_classes,
+            )
+            roi_processor.set_classifier(roi_classifier)
+
+        # build object detection system
+        detection_label_map = (
+            getattr(detection_model, "names", None)
+            or detection_label_map
+            or {0: "wildlife"}
+        )
+        detector = ObjectDetectionSystem(
+            config=pred_config, detection_label_map=detection_label_map
+        )
+        detector.set_model(model=detection_model, task="detect", path_weights=None)
+        detector.set_processor(roi_processor=roi_processor)
+
+        engine = cls(config=pred_config)
+        engine.set_detector(detector=detector, model_tag=mlflow_model_alias)
+
+        if set_ls_client:
+            engine.set_ls_client(dotenv_path=dot_env_path)
+
+        return engine, feature_extractor

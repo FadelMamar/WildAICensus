@@ -4,8 +4,8 @@ import torch
 import albumentations as A
 from abc import ABC, abstractmethod
 from typing import Sequence
-
-
+import logging
+from tqdm import tqdm
 from ..common.base import Detection
 
 
@@ -131,6 +131,7 @@ class DetectionsPostprocessor(Processor):
     def __init__(self, keep_classes: list[str] = ["groundtruth"]):
         self.classifier: Classifier = None
         self.keep = keep_classes
+        self.logger = logging.getLogger("DetectionsPostprocessor")
 
     def set_classifier(self, classifier: Classifier):
         self.classifier = classifier
@@ -140,9 +141,12 @@ class DetectionsPostprocessor(Processor):
         detections: list[Detection],
         image: Image.Image,
         box_size: int = 96,
+        verbose: bool = True,
     ) -> list[Detection]:
         assert isinstance(image, Image.Image)
         assert self.classifier, "Provide a handler using self.set_classifier"
+
+        self.logger.debug("Filtering detections...")
 
         image = image.convert("RGB")
 
@@ -153,7 +157,9 @@ class DetectionsPostprocessor(Processor):
 
         img_width, img_height = image.size
 
-        for det in detections:
+        loader = tqdm(detections, desc="ROI based filtering") if verbose else detections
+
+        for det in loader:
             x_center = det.x
             y_center = det.y
 

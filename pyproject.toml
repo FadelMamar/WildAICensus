@@ -48,6 +48,8 @@ dependencies = [
     "accelerate>=1.7.0",
     "fire>=0.7.0",
     "fiftyone==1.2.0",
+    "optuna>=4.3.0",
+    "optuna-integration[mlflow]>=4.3.0",
 ]
 
 [project.optional-dependencies]

@@ -3,4 +3,4 @@
 @REM call conda activate label-backend
 call "C:\Users\Machine Learning\Desktop\workspace-wildAI\datalabeling\.venv\Scripts\activate"
 
-@REM call "D:\datalabeling\.venv\Scripts\activate"
+call "D:\datalabeling\.venv\Scripts\activate"

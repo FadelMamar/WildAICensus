@@ -1,45 +1,14 @@
-from datalabeling.common.evaluation import PerformanceEvaluator, HardSampleSelector
+from datalabeling.common.evaluation import (
+    PerformanceEvaluator,
+    HardSampleSelector,
+    ReportGenerator,
+    Calibrator,
+)
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
-from datalabeling.ml.models import Detector, ImageClassifier
 from datalabeling.ml.interface import InferenceEngine
 from datalabeling.common.dataset_loader import LabelingDataset
-from datalabeling.common.processor import get_processor, DetectionsPostprocessor
-
-
-def load_engine(config: PredictionConfig):
-    # get image classifier
-    path = r"..\base_models_weights\roi_classifier.ckpt"
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=True, map_location=config.device
-    )
-    handler = get_processor("classifier")(
-        model,
-        label_map={0: "gt", 1: "tn"},
-        device=config.device,
-        feature_extractor=get_processor("feature_extractor")(),
-        imgsz=config.cls_imgsz,
-    )
-
-    # build postprocessor
-    processor = DetectionsPostprocessor(
-        keep_classes=["gt"],
-    )
-    processor.set_handler(handler)
-
-    # load detector
-    detector = Detector(config=config, detection_model=None)
-    detector.set_detection_model(
-        detection_model=None,
-        path_to_weights=r"D:\datalabeling\base_models_weights\best.pt",
-        yolo_model=None,
-    )
-
-    # load engine
-    engine = InferenceEngine(config=config)
-    engine.set_detector(detector, model_tag="demo")
-    engine.set_processor(image_processor=None, detection_processor=processor)
-
-    return engine
+from ultralytics import YOLO
+from pathlib import Path
 
 
 def run_perf_evaluator():
@@ -49,6 +18,7 @@ def run_perf_evaluator():
     eval_config.uncertainty_method = "entropy"
     eval_config.uncertainty_threshold = 4
     eval_config.score_col = "max_scores"
+    eval_config.tp_iou_threshold = 0.5
 
     config = PredictionConfig(
         imgsz=800,
@@ -62,40 +32,92 @@ def run_perf_evaluator():
         # device="cuda:0",
     )
 
-    engine = load_engine(config=config)
+    engine, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=None,  # r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map={0: "wildlife"},
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=YOLO(r"..\base_models_weights\best.pt"),
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+    )
 
-    perf_eval = PerformanceEvaluator(config=eval_config)
+    perf_eval = PerformanceEvaluator()
 
     images_dirs = [
-        r"D:\savmap_dataset_v2\images_tmp",
+        r"D:\workspace\data\savmap_dataset_v2\images_tmp",
     ]
 
-    load_results = True
+    load_results = False
 
     # creating dataset and adding predictions
     dataset = LabelingDataset.from_dirs(images_dirs)
     if not load_results:
-        dataset.add_predictions(engine=engine)
-        dataset.build(force_rebuild=True)
+        dataset.add_predictions(engine=engine, build=True)
 
     # run evaluator
     df_metrics_per_img = perf_eval.run(
         dataset=dataset,
-        pred_results_dir=r"D:\savmap_dataset_v2\images_tmp",
+        tp_iou_threshold=eval_config.tp_iou_threshold,
+        pred_results_dir=r"D:\workspace\data\savmap_dataset_v2\images_tmp",
         load_results=load_results,
     )
 
     # print("results: ", df_metrics_per_img)
 
     # mining hard sampels
-    sample_selector = HardSampleSelector(config=eval_config)
+    # sample_selector = HardSampleSelector(config=eval_config)
+    # df_hard_negatives = sample_selector.run(df_metrics_per_img)
 
-    df_hard_negatives = sample_selector.run(df_metrics_per_img)
+    # report generation
+    reporter = ReportGenerator()
+    stats, fig = reporter.run(df_metrics_per_img, plot=True)
 
-    return df_metrics_per_img, df_hard_negatives
+    return df_metrics_per_img  # , df_hard_negatives
+
+
+def calibration():
+    # import optuna
+    # from optuna.samplers import TPESampler
+    # from optuna.integration.mlflow import MLflowCallback
+    # import mlflow
+    from ultralytics import YOLO
+
+    images_dirs = [
+        r"D:\workspace\data\savmap_dataset_v2\images_tmp",
+    ]
+
+    save_dir = ".tmp/calibration"
+
+    Path(save_dir).mkdir(exist_ok=True, parents=True)
+
+    dataset = LabelingDataset.from_dirs(images_dirs)
+
+    calibrator = Calibrator(
+        pred_results_dir=save_dir,
+        inference_service_url="http://localhost:4141/predict",
+        # detection_model=YOLO("../base_models_weights/best.pt"),
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        roi_weights=r"..\base_models_weights\roi_classifier.ckpt",
+        detection_label_map={0: "wildlife"},
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        roi_cls_is_features=True,
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+    )
+
+    calibrator.run(dataset=dataset)
+
+    return
 
 
 if __name__ == "__main__":
-    df_metrics_per_img, df_hard_negatives = run_perf_evaluator()
+    # df_metrics_per_img = run_perf_evaluator()
+
+    calibration()
 
     pass

@@ -34,85 +34,18 @@ class FiftyOneVisualizer:
         self.dataset_name = dataset_name
         self.dataset = None
 
-        self._data: pd.DataFrame = dataset.data
         self._labeled_dataset = dataset
 
         self.persistent = persistent
 
-        self._setup_dataset()
-
-    def _setup_dataset(self):
-        """Setup or load the FiftyOne dataset."""
-        try:
-            # Try to load existing dataset
-            self.dataset = fo.load_dataset(self.dataset_name)
-            self.logger.info(f"Loaded existing dataset: {self.dataset_name}")
-        except ValueError:
-            # Create new dataset if it doesn't exist
-            self.dataset = fo.Dataset(self.dataset_name, persistent=self.persistent)
-            self.logger.info(f"Created new dataset: {self.dataset_name}")
-
-    def add_images(
+    def load_dataset(
         self,
     ):
-        """
-        Add images with object detection annotations.
-        """
-        samples = []
+        self.dataset = self._labeled_dataset.to_fiftyone(
+            dataset_name=self.dataset_name, persistent=self.persistent
+        )
 
-        # df_annotations = self._data[self._data['is_annot'] == True]
-
-        with fo.ProgressBar() as pb:
-            for img_path, df_detections in pb(self._data.groupby("file_name")):
-                if not os.path.exists(img_path):
-                    self.logger.warning(
-                        f"Warning: Image not found at {img_path}.Skipping"
-                    )
-                    continue
-
-                sample = fo.Sample(filepath=img_path)
-
-                if df_detections.dropna().empty:
-                    self.logger.info(f"Image at {img_path} is a negative sample")
-                    sample["is_positive"] = False
-                    samples.append(sample)
-                    continue
-
-                # conf = bboxes['scores']
-                class_name = df_detections["class"].tolist()
-
-                # get bbox [x, y, w, h] in normalized coords [0,1]
-                bboxes = df_detections[["x_min", "y_min"]].copy()
-                bboxes.loc[:, "x_min"] /= df_detections.loc[:, "width"]
-                bboxes.loc[:, "y_min"] /= df_detections.loc[:, "height"]
-                bboxes["w"] = 0.0
-                bboxes["h"] = 0.0
-                bboxes.loc[:, "w"] = (
-                    df_detections.loc[:, "x_max"] - df_detections.loc[:, "x_min"]
-                ) / df_detections.loc[:, "width"]
-                bboxes.loc[:, "h"] = (
-                    df_detections.loc[:, "y_max"] - df_detections.loc[:, "y_min"]
-                ) / df_detections.loc[:, "height"]
-                bboxes = bboxes[["x_min", "y_min", "w", "h"]].to_numpy().tolist()
-
-                # Convert detections to FiftyOne format
-                fo_detections = []
-                for i, box in enumerate(bboxes):
-                    fo_detection = fo.Detection(
-                        label=class_name[i],
-                        bounding_box=box,
-                        # confidence=det.get('confidence', None)
-                    )
-                    fo_detections.append(fo_detection)
-
-                sample["gt"] = fo.Detections(detections=fo_detections)
-                sample["is_positive"] = True
-                samples.append(sample)
-
-            self.dataset.add_samples(samples)
-        self.logger.info(f"Added {len(samples)} samples.")
-
-    def _run(
+    def run(
         self,
         port: int = 5151,
         auto_launch: bool = True,
@@ -135,3 +68,130 @@ class FiftyOneVisualizer:
         session = fo.launch_app(self.dataset, port=port, auto=auto_launch)
 
         session.wait()
+
+
+# TODO debug
+class FiftyOneLabelStudioIntegration:
+    """
+    A complete integration class for FiftyOne and Label Studio workflows.
+    """
+
+    def __init__(self, dataset_name: str):
+        """
+        Initialize the integration with a FiftyOne dataset.
+
+        Args:
+            dataset_name: Name of the FiftyOne dataset
+        """
+        self.dataset_name = dataset_name
+        self.dataset = None
+        self._load_or_create_dataset()
+
+    def _load_or_create_dataset(self):
+        """Load existing or create new dataset."""
+        try:
+            self.dataset = fo.load_dataset(self.dataset_name)
+            print(f"Loaded existing dataset: {self.dataset_name}")
+        except ValueError:
+            print(f"Dataset {self.dataset_name} not found. Please create it first.")
+
+    def setup_label_studio_connection(
+        self, api_key: str = None, server_url: str = "http://localhost:8080"
+    ):
+        """
+        Setup Label Studio connection parameters.
+
+        Args:
+            api_key: Label Studio API key (can also use environment variable)
+            server_url: Label Studio server URL
+        """
+        if api_key:
+            os.environ["FIFTYONE_LABELSTUDIO_API_KEY"] = api_key
+
+        if server_url:
+            os.environ["FIFTYONE_LABELSTUDIO_URL"] = server_url
+
+        print(f"Label Studio configured for: {server_url}")
+        print(
+            "API key configured via environment variable"
+            if api_key
+            else "Using existing API key from environment"
+        )
+
+    def create_annotation_project(
+        self,
+        anno_key: str,
+        label_schema: dict,
+        view: fo.DatasetView = None,
+        project_name: str = None,
+        launch_editor: bool = True,
+    ):
+        """
+        Create annotation project in Label Studio.
+
+        Args:
+            anno_key: Unique identifier for this annotation run
+            label_schema: Dictionary defining the labeling schema
+            view: Specific view of dataset to annotate (if None, uses full dataset)
+            project_name: Name for the Label Studio project
+            launch_editor: Whether to automatically launch Label Studio editor
+        """
+        target_view = view if view is not None else self.dataset
+
+        try:
+            target_view.annotate(
+                anno_key,
+                backend="labelstudio",
+                label_schema=label_schema,
+                project_name=project_name,
+                launch_editor=launch_editor,
+            )
+
+            print(f"✅ Annotation project created with key: {anno_key}")
+            print(f"📊 Annotation info:")
+            print(self.dataset.get_annotation_info(anno_key))
+
+        except Exception as e:
+            print(f"❌ Error creating annotation project: {e}")
+            raise
+
+    def load_annotations_from_labelstudio(
+        self, anno_key: str, dest_field: str = None, cleanup: bool = False
+    ):
+        """
+        Load completed annotations from Label Studio back into FiftyOne.
+
+        Args:
+            anno_key: Unique identifier for the annotation run
+            dest_field: Optional destination field name (overrides schema)
+            cleanup: Whether to clean up Label Studio tasks after loading
+        """
+        try:
+            self.dataset.load_annotations(
+                anno_key, dest_field=dest_field, cleanup=cleanup
+            )
+
+            print(f"✅ Annotations loaded successfully for run: {anno_key}")
+
+            if cleanup:
+                print("🧹 Label Studio tasks cleaned up")
+
+        except Exception as e:
+            print(f"❌ Error loading annotations: {e}")
+            raise
+
+    def get_annotation_status(self, anno_key: str):
+        """Get status information about an annotation run."""
+        try:
+            info = self.dataset.get_annotation_info(anno_key)
+            results = self.dataset.load_annotation_results(anno_key)
+
+            print(f"📊 Annotation Run Status: {anno_key}")
+            print(f"Backend: {info.get('backend', 'N/A')}")
+            print(f"Label Schema: {info.get('label_schema', {})}")
+
+            return {"info": info, "results": results}
+
+        except Exception as e:
+            print(f"❌ Error getting annotation status: {e}")
+            return None

@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
 import torch
+import logging
+
+logger = logging.getLogger("Config")
 
 
 @dataclass
@@ -37,8 +40,7 @@ class DataConfig:
     dotenv_path: str = ""
 
     # slicing cfg
-    slice_width: int = 640
-    slice_height: int = 640
+    tilesize: int = 640
     overlap_ratio: float = 0.2
     min_area_ratio: float = 0.8
     empty_ratio: float = 1.0
@@ -49,17 +51,28 @@ class DataConfig:
 
     parse_ls_config: bool = False
 
-    dest_path_labels: str = ""
-    dest_path_images: str = ""
+    dest_path_labels: str = None
+    dest_path_images: str = None
+    dest_dir: str = None
 
-    coco_json_dir: str = ""
-    ls_json_dir: str = ""
+    coco_json_dir: str = None
+    ls_json_dir: str = None
 
-    yolo_data_config_yaml: str = ""
+    yolo_data_config_yaml: str = None
 
     is_single_cls: bool = False
 
     verbose: bool = False
+
+    def __post_init__(
+        self,
+    ):
+        if self.dest_dir is not None:
+            self.dest_path_labels = str(Path(self.dest_dir) / "labels")
+            self.dest_path_images = str(Path(self.dest_dir) / "images")
+            logger.info("setting attributes values")
+            logger.info(f"self.dest_path_labels={self.dest_path_labels}")
+            logger.info(f"self.dest_path_images={self.dest_path_images}")
 
 
 @dataclass
@@ -80,6 +93,8 @@ class PredictionConfig:
 
     batch_size: int = 8
 
+    roi_weights: str = None
+
     # Image classifier imgsz
     cls_imgsz: int = 96
 
@@ -88,6 +103,18 @@ class PredictionConfig:
     # inference service
     inference_service_url: str = None
 
+    def __post_init__(self):
+        for a in [
+            self.batch_size,
+            self.nms_iou,
+            self.cls_imgsz,
+            self.imgsz,
+            self.tilesize,
+            self.confidence_threshold,
+            self.overlap_ratio,
+        ]:
+            assert a is not None
+
 
 @dataclass
 class TrainingConfig:
@@ -95,11 +122,12 @@ class TrainingConfig:
     is_single_cls: bool = False
     is_rtdetr: bool = False
     task: str = "detect"  # "detect" "obb" "segment"
-    model_type: str = "ultralytics"  # "ultralytics", "herdnet", "classifier"
+    model_type: str = "detector"  # "detector", "herdnet", "classifier"
 
     # active learning flags
     mlflow_tracking_uri: str = "http://localhost:5000"
     mlflow_model_alias: str = None
+    mlflow_model_name: str = None
 
     # training data
     yolo_yaml: str = None  # os.path.join(CUR_DIR,'../../../data/data_config.yaml')
@@ -151,7 +179,7 @@ class TrainingConfig:
     herdnet_ce_weight = None
     herdnet_down_ratio: int = 2
     herdnet_ptr_model_classes: int = 4
-    herndet_empty_ratio: float = 0.0
+    herdnet_empty_ratio: float = 0.0
     herdnet_valid_freq: int = 4
     herdnet_work_dir: str = "./runs-herndet"
     herdnet_lr_milestones: Sequence[int] = (20,)
@@ -249,7 +277,7 @@ class EvaluationConfig:
     tp_iou_threshold: float = 0.4
     fp_tp_ratio_threshold: float = 0.2
     fn_tp_ratio_threshold: float = 0.2
-    is_yolo_obb: bool = False
+    # is_yolo_obb: bool = False
     score_col: str = "max_scores"
     load_results: bool = False
 

@@ -1,12 +1,12 @@
-path: D:\ # dataset root dir
+path: D:\workspace\data # dataset root dir
 
 train:
   - savmap_dataset_v2\annotated_py_paul\yolo_format\images
   - general_dataset\tiled-data\val\images
 
 val:
-  - general_dataset\tiled-data\test\images
   # - savmap_dataset_v2\annotated_py_paul\yolo_format\images
+  - general_dataset\tiled-data\test\images
 
 # test:  # test images (optional)
 #   - test\images

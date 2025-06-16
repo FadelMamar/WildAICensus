@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-from typing import List
-import requests
+from typing import List, Sequence
+import requests, base64
 from dotenv import load_dotenv
 from pathlib import Path
 import os
@@ -15,26 +15,21 @@ from itertools import chain
 import folium
 from folium.plugins import MarkerCluster
 from streamlit_folium import folium_static
-from datalabeling.ml.train import ImageClassifier
 
-from datalabeling.common.processor import get_processor, DetectionsPostprocessor
-from datalabeling.common.config import TilingConfig
+from datalabeling.common.config import (
+    TilingConfig,
+    TrainingConfig,
+    DataConfig,
+    LabelConfig,
+)
 from datalabeling.common.dataset_loader import LabelingDataset
 from datalabeling.common.config import PredictionConfig
-from datalabeling.ml.interface import Annotator
+from datalabeling.common.io import get_images_from_dirs
+from datalabeling.ml.interface import InferenceEngine
 
 
 DOT_ENV = Path(__file__) / "../.env"
 load_dotenv(DOT_ENV)
-
-# LABEL_STUDIO_URL = os.environ.get("LABEL_STUDIO_URL",'http://localhost:8080')
-# LABEL_STUDIO_API_KEY = os.environ.get("LABEL_STUDIO_API_KEY")
-
-# LABEL_STUDIO_CLIENT = LabelStudio(
-#     base_url=LABEL_STUDIO_URL, api_key=LABEL_STUDIO_API_KEY
-# )
-
-# TRAINING_API_URL = ...
 
 
 class StreamlitLogHandler(logging.Handler):
@@ -75,6 +70,12 @@ def main():
             project_id = st.number_input("Project ID", min_value=0, step=1)
             model_alias = st.text_input("Model Alias", value="demo").strip()
             detector_name = st.text_input("Detector name", value="labeler").strip()
+            roi_classifier_path = st.text_input(
+                "roi_classifier_path", value="base_models_weights/roi_classifier.ckpt"
+            ).strip()
+            roi_cls_is_features = st.number_input(
+                "roi_cls_is_features", min_value=0, max_value=1, step=1
+            )
             confidence_threshold = st.text_input(
                 "Confidence threshold", value=0.2
             ).strip()
@@ -93,6 +94,8 @@ def main():
                 "overlapratio": 0.1,
                 "use_sliding_window": True,
                 "confidence_threshold": 0.1,
+                "roi_classifier_path": roi_classifier_path,
+                "roi_cls_is_features": bool(roi_cls_is_features),
             }
 
             log_widget = st.empty().code
@@ -170,14 +173,227 @@ def main():
                 )
 
     with tab3:
-        st.header("Train Object Detector")
+        st.header("Training and Registering")
+
+        st.subheader("Training")
         with st.form("model_training"):
-            training_projects = st.text_input("Project IDs (comma-separated)")
-            epochs = st.slider("Training Epochs", 1, 100, 10)
-            batch_size = st.selectbox("Batch Size", [8, 16, 32, 64])
+            training_project_id = st.number_input("Project ID", min_value=0, step=1)
+            service_url = st.text_input(
+                "service_url", value="http://localhost:5500/train"
+            ).strip()
+            root_dir = st.text_input("data_root_drive", value="D:\\").strip()
+            epochs = st.slider("Training Epochs", 1, 50, 5)
+            batch_size = st.selectbox("Batch Size", [16, 32, 64])
+            lr0 = st.selectbox("lr0", [1e-4, 1e-3, 5e-5, 1e-5])
+            lrf = st.selectbox(
+                "lrf",
+                [
+                    1e-2,
+                    1e-1,
+                ],
+            )
+            patience = st.number_input(
+                "patience",
+                min_value=3,
+            )
+            yolo_yaml = st.text_input(
+                "validation data_config_yaml",
+                value="configs\yolo_configs\data\data_config.yaml",
+            ).strip()
+            yolo_arch_yaml = st.text_input(
+                "yolo_arch_yaml", value="configs\yolo_configs\models\yolov8-p2.yaml"
+            ).strip()
+            path_weights = st.text_input(
+                "path_weights",
+            ).strip()
+
+            mlflow_model_alias = st.text_input(
+                "mlflow_model_alias", value="demo"
+            ).strip()
+            mlflow_model_name = st.text_input(
+                "mlflow_model_name", value="labeler"
+            ).strip()
+
+            cls_num_classes = st.number_input("cls_num_classes", min_value=2, step=1)
+            cls_label_smoothing = st.number_input("cls_label_smoothing", min_value=0)
+            cls_data_dir = st.text_input(
+                "cls_data_dir",
+            ).strip()
+            cls_training_backend = st.selectbox(
+                "cls_training_backend",
+                [
+                    "pl",
+                ],
+            )
+
+            imgsz = st.number_input("empty_ratio", min_value=128, step=32, value=800)
+            object_detector_arch = st.selectbox(
+                "object_detector_arch", ["yolo", "rtdetr"]
+            )  # "yolo", "rtdetr",  # not included for now"custom_yolo"
+            ultralytics_pos_weight = st.slider("ultralytics_pos_weight", 1, 10, 1)
+            weight_decay = st.number_input(
+                "weight_decay",
+                min_value=0,
+            )
+
+            cl_freeze = st.slider("freeze", 1, 25, 1)
+            cl_save_dir = st.text_input("save_dir_results", value=".tmp").strip()
+            cl_ratios = st.number_input(
+                "empty_ratio",
+                min_value=0,
+            )
+
+            model_type = st.selectbox(
+                "model_type",
+                [
+                    "detector",
+                ],
+            )  # detector, classifier, herdnet
+            project_name = st.text_input("project_name", value="demo").strip()
+            run_name = st.text_input("run_name", value="demo").strip()
+            device = st.selectbox("computing_device", ["cpu", "cuda:0"])
 
             if st.form_submit_button("Start Training"):
-                raise NotImplementedError
+                training_cfg = TrainingConfig()
+
+                training_cfg.yolo_arch_yaml = yolo_arch_yaml
+                training_cfg.path_weights = path_weights
+
+                training_cfg.mlflow_model_alias = mlflow_model_alias
+                training_cfg.mlflow_model_name = mlflow_model_name
+
+                training_cfg.cls_label_smoothing = cls_label_smoothing
+                training_cfg.cls_num_classes = cls_num_classes
+                training_cfg.cls_is_features = True
+                training_cfg.cls_data_dir = cls_data_dir
+                training_cfg.cls_training_backend = cls_training_backend
+
+                training_cfg.imgsz = imgsz
+
+                training_cfg.model_type = model_type
+
+                training_cfg.batchsize = batch_size
+                training_cfg.epochs = epochs
+
+                training_cfg.task = "detect"  # ultralytics
+                training_cfg.project_name = project_name
+                training_cfg.run_name = run_name
+
+                training_cfg.lr0 = lr0
+                training_cfg.lrf = lrf
+                training_cfg.patience = patience
+
+                training_cfg.object_detector_arch = object_detector_arch
+                training_cfg.custom_yolo_kwargs = dict(
+                    count_regressor_layers=22,  # p5
+                    area_regressor_layers=16,
+                    mask_p3_layer_indx=16,
+                    mask_loss_weight=0.0,
+                    roi_classifier_layers={"p3": 16, "p4": 19},
+                    fp_tp_loss_weight=3.0,
+                    count_loss_weight=0.0,
+                    area_loss_weight=0.0,
+                    roi_scale_factor=[
+                        2.0,
+                    ],
+                )
+
+                training_cfg.ultralytics_pos_weight = ultralytics_pos_weight
+                training_cfg.weight_decay = weight_decay
+
+                training_cfg.warmup_epochs = 0
+                training_cfg.dfl = 1.5  # 1.5
+                training_cfg.cls = 0.5  # 0.5
+                training_cfg.box = 7.5  # 7.5
+
+                training_cfg.cl_batch_size = (training_cfg.batchsize,)
+                training_cfg.use_continual_learning = False
+                training_cfg.cl_ratios = (cl_ratios,)  # ratio = num_empty/num_non_empty
+                training_cfg.cl_epochs = (training_cfg.epochs,)
+                training_cfg.cl_freeze = (cl_freeze,)
+                training_cfg.cl_lr0s = (training_cfg.lr0,)
+                training_cfg.cl_save_dir = cl_save_dir
+
+                training_cfg.device = device
+
+                # data set creation config
+                data_config = DataConfig(
+                    is_single_cls=True,
+                    root_dir=root_dir,
+                    yolo_data_config_yaml=training_cfg.yolo_yaml,
+                    dotenv_path=DOT_ENV,
+                    tilesize=training_cfg.imgsz,
+                    overlap_ratio=0.2,
+                    save_all=False,
+                    dest_dir=cl_save_dir,  # folder holding images and labels in yolo format
+                    save_only_empty=False,
+                    load_coco_annotations=False,
+                    parse_ls_config=True,
+                    empty_ratio=training_cfg.cl_ratios[0],
+                )
+
+                label_map = (
+                    Path(__file__) / "../exported_annotations/label_mapping.json"
+                )
+                label_config = LabelConfig(
+                    discard=[
+                        "other",
+                        "rocks",
+                        "vegetation",
+                        "detection",
+                        "termite mound",
+                        "label",
+                    ],
+                    label_map=label_map,
+                )
+
+                ref_data_config = load_yaml(yolo_yaml)
+                if isinstance(ref_data_config["val"], Sequence):
+                    vals = [
+                        os.path.join(ref_data_config["path"], v)
+                        for v in ref_data_config["val"]
+                    ]
+                else:
+                    vals = [
+                        os.path.join(ref_data_config["path"], ref_data_config["val"]),
+                    ]
+
+                training_cfg.yolo_yaml = dict(
+                    path=root_dir,
+                    train=[
+                        data_config.dest_path_images,
+                    ],
+                    val=[os.path.relpath(v, start=data_config.root_dir) for v in vals],
+                    nc=ref_data_config["nc"],
+                    names=ref_data_config["names"],
+                )
+                # training_cfg.cl_data_config_yaml = training_cfg.yolo_yaml
+
+                with st.spinner("Running training job...", show_time=True):
+                    start_training(
+                        args=training_cfg,
+                        data_config=data_config,
+                        label_config=label_config,
+                        service_url=service_url,
+                        slice_data=False,
+                        project_id=training_project_id,
+                    )
+
+        st.subheader("Registering")
+        with st.form("model_registeration"):
+            pass
+
+            if st.form_submit_button("Register"):
+                register_model(
+                    weights_path=f"D:/datalabeling/base_models_weights/best.pt",
+                    name="labeler",
+                    export_format="pt",
+                    imgsz=800,
+                    device="cpu",
+                    mlflow_tracking_uri="http://localhost:5000",
+                )
+
+                pass
 
     with tab4:
         st.header("Visualizations")
@@ -257,7 +473,7 @@ def main():
             project_id = st.number_input("Project ID", min_value=0, step=1)
             top_n = st.number_input("top_n", min_value=0, step=1, value=0)
             overlapfactor = st.number_input(
-                "overlapfactor", min_value=0.0, max_value=0.9,value=0.1
+                "overlapfactor", min_value=0.0, max_value=0.9, value=0.1
             )
             ratiowidth = st.number_input(
                 "ratiowidth", min_value=0.0, max_value=1.0, value=0.5
@@ -275,9 +491,7 @@ def main():
                 "flight_height in [m]", min_value=10.0, value=180.0
             )
             sensor_height = st.number_input(
-                "sensor_height in [mm]",
-                min_value=0.0,
-                value=24.0
+                "sensor_height in [mm]", min_value=0.0, value=24.0
             )
             gsd = st.number_input("gsd in [cm/px]", min_value=0.0, value=2.26)
             dest = st.text_input(
@@ -390,51 +604,32 @@ def main():
                 folium_static(get_map_with_detections(locations=df_results_px))
 
 
-def get_annotator(annotator_kwargs: dict):
+def get_inference_engine(annotator_kwargs: dict) -> InferenceEngine:
     config = PredictionConfig(
         imgsz=annotator_kwargs.get("tilesize", 800),
         tilesize=annotator_kwargs.get("tilesize", 800),
         overlap_ratio=annotator_kwargs.get("overlap_ratio", 0.2),
         confidence_threshold=annotator_kwargs.get("confidence_threshold", 0.2),
+        inference_service_url=annotator_kwargs.get("inference_service_url", None),
         # min_area=100,
         # max_area=None,
-        cls_imgsz=96,
+        cls_imgsz=98,
         # device='cuda'
     )
 
-    # get image classifier
-    path = r"D:\datalabeling\src\tests\runs-classifier\best-v6.ckpt"
-    model = ImageClassifier.load_from_checkpoint(
-        path, cls_is_features=True, map_location="cpu"
+    annotator, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=annotator_kwargs.get("roi_classifier_path", None),
+        roi_cls_is_features=annotator_kwargs.get("roi_cls_is_features", True),
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map=None,  # {0: "wildlife"},
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=None,
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+        set_ls_client=True,
     )
-    handler = get_processor("classifier")(
-        model,
-        label_map={0: "gt", 1: "tn"},
-        device=config.device,
-        feature_extractor=get_processor("feature_extractor")(),
-        imgsz=config.cls_imgsz,
-    )
-
-    # build postprocessor
-    processor = DetectionsPostprocessor(
-        keep_classes=["gt"],
-    )
-    processor.set_handler(handler)
-
-    # get annotator
-    # path_to_weights = annotator_kwargs.get('path_to_weights')
-    # if not Path(path_to_weights).exists():
-    path_to_weights = None
-
-    annotator = Annotator(
-        config=config,
-        dotenv_path=DOT_ENV,
-        path_to_weights=path_to_weights,
-        mlflow_model_alias=annotator_kwargs.get("mlflow_model_alias"),
-        mlflow_model_name=annotator_kwargs.get("mlflow_model_name"),
-    )
-
-    annotator.set_processor(image_processor=None, detection_processor=processor)
 
     return annotator
 
@@ -445,26 +640,14 @@ def run_inference(
     annotator_kwargs: dict,
     save_path: str = None,
     image_paths: list[None] = None,
-    exts: list[str] = [
-        "*.jpg",
-        "*.jpeg",
-        "*.png",
-    ],
 ) -> None:
-    raise NotImplementedError
-    handler = get_annotator(annotator_kwargs=annotator_kwargs)
-
-    exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
+    engine = get_inference_engine(annotator_kwargs=annotator_kwargs)
 
     if image_paths is None:
-        image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
+        assert image_dir is not None
+        image_paths = get_images_from_dirs([image_dir])
 
-    results = handler.batch_inference(
-        images_paths=image_paths,
-        save_path=save_path,
-        as_dataframe=True,
-        inference_service_url=annotator_kwargs.get("inference_service_url", None),
-    )
+    results = engine.inference(images_paths=image_paths, return_as_df=True)
 
     if save_path:
         results[["Latitude", "Longitude", "Elevation"]].to_csv(save_path, index=False)
@@ -476,16 +659,10 @@ def run_inference(
 def get_gps_coords(
     image_dir: str,
     image_paths: list[str] = None,
-    exts: list[str] = [
-        "*.jpg",
-        "*.jpeg",
-        "*.png",
-    ],
 ):
-    exts = [e.lower() for e in exts] + [e.capitalize() for e in exts]
-
     if image_paths is None:
-        image_paths = chain.from_iterable([Path(image_dir).glob(ext) for ext in exts])
+        assert image_dir is None
+        image_paths = get_images_from_dirs([image_dir])
 
     gps_coords = [
         GPSUtils.get_gps_coord(file_name=path, return_as_decimal=True)[0]
@@ -561,13 +738,31 @@ def get_map_with_detections(
     return m
 
 
-# Mock API client functions (implement according to your API specs)
+# TODO: debug
 def upload_to_label_studio(project_id: int, annotator_kwargs: dict, top_n: int = 0):
-    annotator = get_annotator(annotator_kwargs=annotator_kwargs)
+    # import subprocess
 
+    annotator = get_inference_engine(annotator_kwargs=annotator_kwargs)
     annotator.upload_predictions(
-        project_id=project_id, top_n=top_n, download_resources=False
+        project_id=project_id,
+        top_n=top_n,
     )
+
+    # script_path = "tools/upload_predictions.py"
+    # args = ...
+    # kwargs = {}
+    # cwd = Path(__file__).parent.parent
+
+    # cmd = ["uv run", script_path] + list(args)
+
+    # result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=True)
+
+    # return {
+    #     "success": True,
+    #     "stdout": result.stdout,
+    #     "stderr": result.stderr,
+    #     "returncode": result.returncode,
+    # }
 
 
 @st.cache_data
@@ -581,8 +776,9 @@ def get_project_statistics(
     load_dotenv(DOT_ENV)
     LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
     API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    assert API_KEY is not None, "Set 'LABEL_STUDIO_API_KEY' env variable"
     labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
-    project = labelstudio_client.get_project(id=project_id)
+    project = labelstudio_client.projects.get(id=project_id)
 
     images_count = dict()
     # Iterating
@@ -675,11 +871,112 @@ def visualize_splits_distribution(
     return stats
 
 
-def start_training(project_ids: List[int], epochs: int, batch_size: int, token: str):
-    """Mock function for training initialization"""
-    headers = {"Authorization": f"Bearer {token}"}
-    payload = {"project_ids": project_ids, "epochs": epochs, "batch_size": batch_size}
-    return requests.post(f"{TRAINING_API_URL}/train", headers=headers, json=payload)
+def start_training(
+    project_id: int,
+    service_url: str,
+    data_config: DataConfig,
+    args: TrainingConfig,
+    label_config: LabelConfig = None,
+    slice_data: bool = True,
+):
+    # ls client
+    load_dotenv(DOT_ENV)
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    if LABEL_STUDIO_URL is None:
+        raise ValueError("env variable LABEL_STUDIO_URL is not set.")
+    if API_KEY is None:
+        raise ValueError("env variable API_KEY is not set.")
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+
+    # create dataset
+    dataset = LabelingDataset.from_ls(
+        project_id=project_id, max_workers=2, labelstudio_client=labelstudio_client
+    )
+
+    if slice_data:
+        dataset.slice_and_save_as_yolo(data_config, label_config, max_workers=2)
+    else:
+        dataset.to_yolo(dir_path=data_config.dest_dir)
+
+    train_config = {k: v for k, v in vars(args).items() if "herdnet" not in k}
+
+    assert isinstance(args.yolo_yaml, dict), "Provide data config as dict"
+    train_config["yolo_yaml"] = (train_config["yolo_yaml"], "data_config.yaml")
+    # train_config["cl_data_config_yaml"] = train_config["yolo_yaml"]
+
+    for key in [
+        "yolo_arch_yaml",
+    ]:
+        if train_config[key]:
+            p = train_config[key]
+            file_name = Path(p).name
+            # if key == "yolo_arch_yaml":
+            #     file_name = yolo_arch_yaml
+            train_config[key] = (load_yaml(p), file_name)
+
+    if train_config["path_weights"]:
+        with open(train_config["path_weights"], "rb") as file:
+            weight_data = base64.b64encode(file.read()).decode("utf-8")
+        train_config["path_weights"] = weight_data
+
+    payload = dict(train_config=train_config)
+
+    # print(json.dumps(train_config,indent=2))
+
+    res = requests.post(url=service_url, json=payload).json()
+
+    st.write(res)
+
+    # print(res)
+    return None
+
+
+# TODO: debug
+def register_model(
+    weights_path: str,
+    name: str = "labeler",
+    export_format: str = "pt",
+    imgsz: int = 800,
+    batch=8,
+    device: str = "cpu",
+    mlflow_tracking_uri: str = "http://localhost:5000",
+    dynamic: bool = False,
+    task: str = "detect",
+):
+    import subprocess
+
+    script_path = "tools/register_model.py"
+    args = [
+        "register_detector",
+        name,
+        export_format,
+        imgsz,
+        batch,
+        device,
+        mlflow_tracking_uri,
+        dynamic,
+        task,
+    ]
+
+    args = [str(a) for a in args]
+
+    cwd = Path(__file__).parent.parent
+
+    cmd = ["uv", "run", script_path] + list(args)
+
+    result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=True)
+
+    print(result.stderr)
+
+    return {
+        "success": True,
+        "stdout": result.stdout,
+        "stderr": result.stderr,
+        "returncode": result.returncode,
+    }
+
+    pass
 
 
 if __name__ == "__main__":
