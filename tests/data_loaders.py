@@ -293,7 +293,7 @@ if __name__ == "__main__":
 
     # slice_and_save_as_yolo(dataset=dataset)
 
-    push_dataset_to_ls()
+    # push_dataset_to_ls()
 
     # data = dataset.data
     # gps_data = dataset.export_detections_gps()

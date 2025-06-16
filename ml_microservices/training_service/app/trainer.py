@@ -250,7 +250,7 @@ class TrainingManager:
             logger.info(f"Loading {modeluri}")
             return model
 
-        if not (self.args.path_weights or self.args.yolo_arch_yaml):
+        elif not (self.args.path_weights or self.args.yolo_arch_yaml):
             raise ValueError("Provide 'path_weights' or 'yolo_arch_yaml'.")
 
         if self.args.model_type == "detector":

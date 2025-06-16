@@ -997,11 +997,16 @@ class ImageProcessor:
         non_empty_num = df_non_empty["images"].unique().shape[0]
         empty_num = math.floor(non_empty_num * empty_ratio)
         empty_num = min(empty_num, len(df_empty))
-        frac = 1.0 if save_all else empty_num / len(df_empty)
+
+        if len(df_empty) > 0:
+            frac = empty_num / len(df_empty)
+        else:
+            frac = 0
+        frac = 1.0 if save_all else frac
 
         # get empty df and tiles
         if sample_only_empty:
-            df = df_empty.sample(frac=empty_num / len(df_empty))
+            df = df_empty.sample(frac=frac)
             df.reset_index(inplace=True)
             # create x_center and y_center
             df["x"] = np.nan

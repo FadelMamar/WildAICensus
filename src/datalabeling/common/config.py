@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Sequence
 import torch
+import logging
+
+logger = logging.getLogger("Config")
 
 
 @dataclass
@@ -48,17 +51,28 @@ class DataConfig:
 
     parse_ls_config: bool = False
 
-    dest_path_labels: str = ""
-    dest_path_images: str = ""
+    dest_path_labels: str = None
+    dest_path_images: str = None
+    dest_dir: str = None
 
-    coco_json_dir: str = ""
-    ls_json_dir: str = ""
+    coco_json_dir: str = None
+    ls_json_dir: str = None
 
-    yolo_data_config_yaml: str = ""
+    yolo_data_config_yaml: str = None
 
     is_single_cls: bool = False
 
     verbose: bool = False
+
+    def __post_init__(
+        self,
+    ):
+        if self.dest_dir is not None:
+            self.dest_path_labels = str(Path(self.dest_dir) / "labels")
+            self.dest_path_images = str(Path(self.dest_dir) / "images")
+            logger.info("setting attributes values")
+            logger.info(f"self.dest_path_labels={self.dest_path_labels}")
+            logger.info(f"self.dest_path_images={self.dest_path_images}")
 
 
 @dataclass

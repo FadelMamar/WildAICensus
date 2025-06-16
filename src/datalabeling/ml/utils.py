@@ -48,17 +48,20 @@ def remove_label_cache(data_config_yaml: str):
         yolo_config = yaml.load(file, Loader=yaml.FullLoader)
     root = yolo_config["path"]
     for split in ["train", "val", "test"]:
-        try:
+        # try:
+        if split in yolo_config.keys():
             for p in yolo_config[split]:
                 path = os.path.join(root, p, "../labels.cache")
                 if os.path.exists(path):
                     os.remove(path)
                     logger.info(f"Removing: {os.path.join(root, p, '../labels.cache')}")
-                # else:
-                #     logger.info(path, "does not exist.")
-        except Exception:
-            # logger.info(e)
-            traceback.print_exc()
+        else:
+            logger.info(f"split={split} does not exist.")
+            # else:
+            #     logger.info(path, "does not exist.")
+        # except Exception:
+        #     # logger.info(e)
+        #     traceback.print_exc()
 
 
 def sample_pos_neg(images_paths: list, ratio: float, seed: int = 41):

@@ -474,21 +474,24 @@ class LabelingDataset:
     def from_ls(
         cls,
         project_id: int,
-        config: TilingConfig,
         top_n=0,
+        config: TilingConfig = None,
         labelstudio_client: LabelStudio = None,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,
         max_workers: int = 1,
         ls_download_resources: bool = False,
     ):
-        project = labelstudio_client.projects.get(id=project_id)
-
-        assert config.root is not None, "Provide path to untiled directory."
+        assert isinstance(labelstudio_client, LabelStudio), (
+            "Provide an instance of LabelStudio"
+        )
         # data_dir = labelstudio_client.import_storage.local.get(project_id).path
         # logger.info(f"Using root directory: {data_dir}")
 
-        if tile_metadata is None:
+        project = labelstudio_client.projects.get(id=project_id)
+
+        if config is not None:
+            assert config.root is not None, "Provide path to untiled directory."
             tile_metadata = TileBuilder(config=config).run(
                 load_existing_metadata=load_existing_metadata, max_workers=max_workers
             )
@@ -503,19 +506,24 @@ class LabelingDataset:
                     hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
 
-                # get tile gps_coords and offsets
-                value = tile_metadata.get(
-                    Path(img_url).stem, None
-                ) or tile_metadata.get(Path(image_path).stem, None)
-                tile_gps_loc = None
-                x1 = y1 = None
-                if value is None:
-                    logger.warning(f"No metadata found for {img_url}. -> skipping")
-                    return None
+                # get tile gps_coords and offsets if given
+                if tile_metadata is not None:
+                    value = tile_metadata.get(
+                        Path(img_url).stem, None
+                    ) or tile_metadata.get(Path(image_path).stem, None)
+                    tile_gps_loc = None
+                    x1 = y1 = None
+                    if value is None:
+                        logger.warning(f"No metadata found for {img_url}. -> skipping")
+                        return None
 
-                tile_gps_loc = value["gps"]
-                (x1, x2), (y1, y2) = value["coordinates"]
-                parent_image = value["parent_image"]
+                    tile_gps_loc = value["gps"]
+                    (x1, x2), (y1, y2) = value["coordinates"]
+                    parent_image = value["parent_image"]
+                else:
+                    tile_gps_loc = None
+                    x1 = y1 = None
+                    parent_image = None
 
                 # build tile
                 detection_objects = Detection.from_ls(task.annotations, image_path)
@@ -531,11 +539,12 @@ class LabelingDataset:
                 )
 
                 # update detections (annotations or predictions) gps loc using tile_gps_loc
-                tile.update_detection_gps(
-                    sensor_height=config.sensor_height,
-                    flight_height=config.flight_height,
-                    gsd=config.gsd,
-                )
+                if tile_gps_loc is not None:
+                    tile.update_detection_gps(
+                        sensor_height=config.sensor_height,
+                        flight_height=config.flight_height,
+                        gsd=config.gsd,
+                    )
                 return tile
 
             except Exception:
@@ -749,11 +758,12 @@ class LabelingDataset:
     def slice_and_save_as_yolo(
         self, data_config: DataConfig, label_config: LabelConfig, max_workers: int = 1
     ):
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            # tmp_dir = ".tmp-images"
-            Path(tmp_dir).mkdir(parents=True, exist_ok=True)
+        assert data_config.dest_dir is not None, "Provide data_config.dest_dir"
+
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(data_config.dest_dir).mkdir(parents=True, exist_ok=True)
             img_dir, coco_json = self.to_coco(
-                output_dir=tmp_dir,
+                output_dir=tmp,
                 copy_images=True,
                 clear_existing_data=True,
             )
@@ -766,8 +776,6 @@ class LabelingDataset:
                 label_handler=label_handler,
                 max_workers=max_workers,
             )
-
-        # shutil.rmtree(tmp_dir)
 
         return None
 
