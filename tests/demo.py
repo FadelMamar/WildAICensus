@@ -76,14 +76,16 @@ if __name__ == "__main__":
     model = CustomYOLO(
         count_regressor_layers=18,
         area_regressor_layers=18,
-        roi_classifier_layers={"p3": 21, "p4": 24},
+        roi_classifier_layers={"p3": 21, "p4": 21},
         fp_tp_loss_weight=3.0,
+        mask_p3_layer_indx=21,
+        mask_loss_weight = 1.0,
         count_loss_weight=0.0,
         area_loss_weight=0.0,
         roi_scale_factor=[
             2.0,
         ],
-        model=r"..\configs\yolo_configs\models\yolov8-p2.yaml",
+        model= r"..\configs\yolo_configs\models\yolov8-p2.yaml",
     ) #.load(r"..\base_models_weights\best.pt")
 
     model.train(

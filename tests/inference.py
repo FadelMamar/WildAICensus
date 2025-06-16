@@ -180,8 +180,9 @@ if __name__ == "__main__":
     # tile = Tile(image_path=image_path, parent_image=image_path)
 
     images = Path(
-        r"D:\workspace\data\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images"
+        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
     ).glob("*.JPG")
+    images = list(images)[:20]
     results = run_detector(image_paths=images)
 
     # data = tile.detections_to_df()
