@@ -1,7 +1,7 @@
 import logging, os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
-from label_studio_sdk.client import LabelStudio
+
 import pandas as pd
 from ultralytics import SAM
 from ultralytics.data.dataset import YOLOConcatDataset, YOLODataset

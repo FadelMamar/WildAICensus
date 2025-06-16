@@ -3,7 +3,7 @@ from datalabeling.ml.interface import InferenceEngine
 from datalabeling.ml.workers import ObjectDetectionSystem
 from ultralytics import YOLO
 from datalabeling.common.mlflow_utils import load_registered_model
-
+import os
 import torch
 import numpy as np
 from PIL import Image
@@ -52,6 +52,71 @@ def run_inference_engine(image_paths: list[str]):
     detections = engine.inference(images_paths=image_paths)
 
     return detections
+
+
+def run_inference_on_dataset(
+    project_id=4,
+    top_n=0,
+    load_existing_metadata=True,
+    untiled_data_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
+):
+    from label_studio_sdk.client import LabelStudio
+    from datalabeling.common.config import TilingConfig
+    from datalabeling.common.dataset_loader import LabelingDataset, TileBuilder
+    from dotenv import load_dotenv
+
+    engine, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map={0: "wildlife"},
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        detection_model=YOLO(r"D:\datalabeling\base_models_weights\best.pt"),
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+    )
+
+    # # Load environment variables
+    load_dotenv(dotenv_path="../.env")
+
+    # # label studio client
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+
+    # collect tile metadata: gps coords
+    tiling_config = TilingConfig(
+        root=untiled_data_dir,
+        overlapfactor=0.1,
+        ratiowidth=0.5,
+        ratioheight=0.33,
+        rmheight=0.0,
+        rmwidth=0.0,
+        flight_height=180,
+        sensor_height=24,
+        gsd=2.26,
+        dest=r"..\.tmp",
+        save_coords_only=True,  # set to False to save tiles i.e. patches
+    )
+
+    tile_metadata = TileBuilder(config=tiling_config).run(
+        load_existing_metadata=True, max_workers=2
+    )
+
+    dataset = LabelingDataset.from_ls(
+        labelstudio_client,
+        project_id=project_id,
+        config=config,
+        top_n=top_n,
+        max_workers=1,
+        tile_metadata=tile_metadata,
+        load_existing_metadata=load_existing_metadata,
+    )
+
+    dataset.add_predictions(engine, build=True)
+    return dataset
 
 
 def run_detector(

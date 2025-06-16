@@ -9,12 +9,15 @@ from PIL import Image
 import cv2
 import numpy as np
 import pandas as pd
+from urllib.parse import quote, unquote
+
 from tqdm import tqdm
 from itertools import chain, product
 import math
 import geopy
 from urllib.parse import unquote
 from label_studio_tools.core.utils.io import get_local_path
+from label_studio_sdk.client import LabelStudio
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.pool import ThreadPool
 from functools import partial
@@ -301,10 +304,15 @@ class TileBuilder:
 
 
 class LabelingDataset:
-    def __init__(self, tiles: list[Tile], data: pd.DataFrame = None):
+    def __init__(
+        self,
+        tiles: list[Tile],
+        data: pd.DataFrame = None,
+    ):
         self.tiles: list[Tile] = tiles
         self.data: pd.DataFrame = data
         self._is_built: bool = data is not None
+        self.labelstudio_client: LabelStudio = None
 
         if self.data is not None:
             self.data = self.data.convert_dtypes()
@@ -321,6 +329,12 @@ class LabelingDataset:
         if build:
             self.build(force_rebuild=True)
         return None
+
+    def set_labelstudio_client(self, client):
+        assert isinstance(client, LabelStudio), (
+            "Expected type 'LabelStudio' but received {type(client)}"
+        )
+        self.labelstudio_client = client
 
     def import_data(self, path: str) -> None:
         self.data = pd.read_csv(
@@ -459,10 +473,10 @@ class LabelingDataset:
     @classmethod
     def from_ls(
         cls,
-        labelstudio_client,
         project_id: int,
         config: TilingConfig,
         top_n=0,
+        labelstudio_client: LabelStudio = None,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,
         max_workers: int = 1,
@@ -562,8 +576,126 @@ class LabelingDataset:
         # build dataset
         dataset = cls(tiles=tiles)
         dataset.build()
+        dataset.set_labelstudio_client(labelstudio_client)
 
         return dataset
+
+    # TODO: debug
+    def _create_single_task(
+        self, parsed_label_config: dict, project_id: int, tile: Tile
+    ):
+        raise NotImplementedError("TODO")
+        from_name = list(parsed_label_config.keys())[0]
+        to_name = parsed_label_config[from_name]["to_name"][0]  # "image"
+        label_type = parsed_label_config[from_name]["type"]
+
+        image_url = quote(Path(tile.image_path).resolve().as_posix())
+
+        image_url = "/data/upload/8/" + image_url
+
+        task = self.labelstudio_client.tasks.create(
+            project=project_id, data={to_name: image_url}
+        )
+
+        img_height = tile.width
+        img_width = tile.height
+        task_id = task.id
+
+        # Send predictions
+        try:
+            formatted_pred = [
+                pred.to_ls(
+                    from_name=from_name,
+                    to_name=to_name,
+                    label_type=label_type,
+                    img_height=img_height,
+                    img_width=img_width,
+                )
+                for pred in tile.predictions
+            ]
+            conf_scores = [pred["score"] for pred in formatted_pred]
+            max_score = 0.0
+            if len(conf_scores) > 0:
+                max_score = max(conf_scores)
+
+            self.labelstudio_client.predictions.create(
+                task=task_id,
+                score=max_score,
+                result=formatted_pred,
+                model_version=self.model_tag,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            logger.warning(
+                f"Failed to push predictions in task.id={task.id}. Skipping..."
+            )
+
+        # annotations
+        try:
+            formatted_pred = [
+                pred.to_ls(
+                    from_name=from_name,
+                    to_name=to_name,
+                    label_type=label_type,
+                    img_height=img_height,
+                    img_width=img_width,
+                )
+                for pred in tile.annotations
+            ]
+
+            self.labelstudio_client.annotations.create(
+                task.id,
+                result=formatted_pred,
+            )
+
+        except Exception:
+            traceback.print_exc()
+            logger.warning(
+                f"Failed to push annotations in task.id={task.id}. Skipping..."
+            )
+
+        return None
+
+    # TODO: debug
+    def to_ls(
+        self,
+        project_title: str,
+        reference_project_id: int,
+        top_n: int = 0,
+        tag: str = "",
+    ) -> None:
+        """Uploads predictions using label studio API.
+        Make sure to set the API key and url inside .env
+
+        Args:
+            project_id (int): project id from Label studio
+            top_n (int): top n tasks to be uploaded in descending order of task_id. Default 0 which disables the feature.
+        """
+        # Select project
+        if self.labelstudio_client is None:
+            raise ValueError(
+                "Provide label studio client using method 'set_labelstudio_client'"
+            )
+
+        reference_project = self.labelstudio_client.projects.get(reference_project_id)
+
+        project = self.labelstudio_client.projects.create(
+            title=project_title,
+            label_config=reference_project.label_config,
+        )
+        parsed_label_config = reference_project.parsed_label_config
+
+        for i, tile in enumerate(self.tiles):
+            if top_n > 0:
+                if i > top_n:
+                    break
+
+            self._create_single_task(
+                tile=tile,
+                project_id=project.id,
+                parsed_label_config=parsed_label_config,
+            )
 
     def to_yolo(self, dir_path: str):
         save_dir = Path(dir_path)

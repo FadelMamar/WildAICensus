@@ -24,6 +24,8 @@ from datalabeling.common.processor import get_processor, DetectionsPostprocessor
 from ultralytics import YOLO
 from dotenv import load_dotenv
 import os
+from sahi.utils.file import load_json
+from label_studio_sdk.client import LabelStudio
 
 
 def load_herd_net():
@@ -159,8 +161,6 @@ def load_dataset_from_ls(
     top_n=0,
     load_existing_metadata=True,
 ):
-    from label_studio_sdk.client import LabelStudio
-
     # # Load environment variables
     load_dotenv(dotenv_path="../.env")
 
@@ -199,6 +199,27 @@ def load_dataset_from_ls(
     )
 
     return tile_metadata, dataset
+
+
+def push_dataset_to_ls():
+    # # Load environment variables
+    load_dotenv(dotenv_path="../.env")
+
+    # # label studio client
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+
+    images_dirs = [
+        r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images"
+    ]
+
+    dataset = LabelingDataset.from_yolo(
+        images_dirs=images_dirs, load_empty=True, label_map=None
+    )
+    dataset.set_labelstudio_client(labelstudio_client)
+
+    dataset.to_ls(project_title="savmap_yolo", reference_project_id=4)
 
 
 def slice_and_save_as_yolo(dataset: LabelingDataset):
@@ -263,14 +284,16 @@ if __name__ == "__main__":
 
     # load_classification_features_data()
 
-    tile_metadata, dataset = load_dataset_from_ls(
-        project_id=4,
-        top_n=0,
-        load_existing_metadata=True,
-        untiled_data_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
-    )
+    # tile_metadata, dataset = load_dataset_from_ls(
+    #     project_id=4,
+    #     top_n=0,
+    #     load_existing_metadata=True,
+    #     untiled_data_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
+    # )
 
-    slice_and_save_as_yolo(dataset=dataset)
+    # slice_and_save_as_yolo(dataset=dataset)
+
+    push_dataset_to_ls()
 
     # data = dataset.data
     # gps_data = dataset.export_detections_gps()

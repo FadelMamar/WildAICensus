@@ -48,6 +48,17 @@ def test_training_service(
     print(res)
 
 
+def test_training_routine(
+    args: TrainingConfig,
+):
+    handler = TrainingManager(
+        args=training_cfg,
+        herdnet_loss=None,
+        herdnet_training_backend="pl",  # original or pl
+    )
+    handler.run()
+
+
 if __name__ == "__main__":
     ## Training configs
     training_cfg = TrainingConfig()
@@ -67,6 +78,9 @@ if __name__ == "__main__":
         r"D:\datalabeling\configs\yolo_configs\models\yolov8-p2.yaml"
     )
     training_cfg.path_weights = "../base_models_weights/best.pt"  # r"../runs/mlflow/140168774036374062/f5b7124be14c4c89b8edd26bcf7a9a76/artifacts/weights/best.pt"
+
+    # training_cfg.mlflow_model_alias = "pt"
+    # training_cfg.mlflow_model_name = "labeler"
 
     training_cfg.cls_label_smoothing = 0.0
     training_cfg.cls_num_classes = 3
@@ -129,14 +143,6 @@ if __name__ == "__main__":
 
     training_cfg.device = "cpu"  # "cuda:0"
 
-    # handler = TrainingManager(
-    #     args=training_cfg,
-    #     herdnet_loss=None,
-    #     herdnet_training_backend="pl",  # original or pl
-    # )
-    # handler.run()
+    # test_training_routine(training_cfg)
 
-    # training_cfg.mlflow_model_alias = "pt"
-    # training_cfg.mlflow_model_name = "labeler"
-
-    test_training_service(args=training_cfg)
+    # test_training_service(args=training_cfg)
