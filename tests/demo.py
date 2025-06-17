@@ -86,8 +86,8 @@ if __name__ == "__main__":
         roi_scale_factor=[
             2.0,
         ],
-        model=r"D:\datalabeling\runs\detect\train6\weights\best.pt",
-        # model = r"..\configs\yolo_configs\models\yolov8-p2.yaml",
+        # model=r"D:\datalabeling\runs\detect\train6\weights\best.pt",
+        model = r"..\configs\yolo_configs\models\yolov8-p2.yaml",
     )  # .load(r"..\base_models_weights\best.pt")
 
     # model.train(

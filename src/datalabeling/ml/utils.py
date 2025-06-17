@@ -315,7 +315,7 @@ class CustomLoss(v8DetectionLoss):
         self.bce = torch.nn.BCEWithLogitsLoss(reduction="none", pos_weight=pos_weight)
 
         logger.debug(
-            f"Instantiating BCE loss in custom V8Detection loss iwht pos_weight={pos_weight}"
+            f"Instantiating BCE loss in custom V8Detection loss with pos_weight={pos_weight}"
         )
 
     def compute_count_area_loss(self, target_bboxes: torch.Tensor, scale_tensor):
@@ -727,14 +727,13 @@ class CustomLoss(v8DetectionLoss):
 
             fp_tp_loss = self.compute_loss_from_fptp(
                 target_bboxes=target_bboxes / stride_tensor,
-                pred_bboxes=pred_bboxes,  # .detach(),  # disable detach to allow gradient flowing through detection head as well
+                pred_bboxes=pred_bboxes.detach(),  # disable detach to allow gradient flowing through detection head as well
                 pred_scores=pred_scores.detach(),
                 batch_images=batch["img"],
                 target_labels=target_labels,
-                # target_scores=target_scores,
                 image_idx=image_idx,
                 fg_mask=fg_mask,
-                max_num_tn=5,
+                max_num_tn=2,
                 box_area_thresh=2500,
                 scores_range=(0.1, 0.9),
             )
@@ -746,7 +745,7 @@ class CustomLoss(v8DetectionLoss):
                 fg_mask=fg_mask,
                 batch_images=batch["img"],
             )
-            loss[3] = loss[3] + mask_loss * self.mask_loss_weight / target_scores_sum
+            loss[3] = loss[3] + mask_loss * self.mask_loss_weight / batch_size
 
         # Cls loss -> Objectness
         loss[1] = (
@@ -846,7 +845,7 @@ class MaskHead(torch.nn.Module):
 
         self.upsampler = nn.Sequential(
             # nn.LazyConv2d(64, kernel_size=1, stride=1, padding=0),
-            nn.ConvTranspose2d(64, 32, 3, stride=2, padding=1, output_padding=1),  # *2
+            nn.ConvTranspose2d(256, 32, 3, stride=2, padding=1, output_padding=1),  # *2
             nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.ConvTranspose2d(32, 16, 3, stride=2, padding=1, output_padding=1),  # *4
@@ -948,7 +947,7 @@ class MaskHead(torch.nn.Module):
 
         logits = self.upsampler(p3)
         loss = nn.functional.binary_cross_entropy_with_logits(
-            logits, target_mask, reduction="sum", pos_weight=pos_weight
+            logits, target_mask, reduction="mean", pos_weight=pos_weight
         )
         return loss
 
@@ -966,15 +965,15 @@ class RoiClassifierHead(torch.nn.Module):
             nn.Linear(384, 128),
             nn.ReLU(),
             nn.Dropout(p=0.2),
-            nn.Linear(128, 128),
-            nn.ReLU(),
             nn.Linear(128, 1),
+            # nn.ReLU(),
+            # nn.Linear(128, 1),
         )
 
-        # self.loss = nn.SmoothL1Loss(
-        #     reduction="sum"
-        # )
-        self.loss = nn.BCEWithLogitsLoss(reduction="sum")
+        self.loss = nn.SmoothL1Loss(
+            reduction="sum"
+        )
+        # self.loss = nn.BCEWithLogitsLoss(reduction="sum")
 
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
 
@@ -1060,6 +1059,8 @@ class RoiClassifierHead(torch.nn.Module):
 
         logits = self.mlp(features)  # (M, nc)
         loss = self.loss(logits, fp_tp_target_label.unsqueeze(1))
+
+        # self.image_encoder = self.image_encoder.to("cpu") # save space
 
         return loss
 
@@ -1352,7 +1353,7 @@ class DetectionSystem(DetectionModel):
                 logger.debug("removing hook")
             self.hooks_handles = []
         except Exception as e:
-            print(e)
+            logger.error(e)
 
     def _forward_aux(
         self,
@@ -1395,6 +1396,7 @@ class DetectionSystem(DetectionModel):
             fp_tp_loss_weight=self.fp_tp_loss_weight,
             count_loss_weight=self.count_loss_weight,
             area_loss_weight=self.area_loss_weight,
+            mask_loss_weight=self.mask_loss_weight
         )
 
 
