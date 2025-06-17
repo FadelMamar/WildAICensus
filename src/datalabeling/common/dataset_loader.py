@@ -16,7 +16,6 @@ from itertools import chain, product
 import math
 import geopy
 from urllib.parse import unquote
-from label_studio_tools.core.utils.io import get_local_path
 from label_studio_sdk.client import LabelStudio
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.pool import ThreadPool
@@ -36,10 +35,8 @@ from .annotation_utils import (
 from .base import Tile, Detection
 
 from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
-from .io import load_yaml, DataHandler, get_images_from_dirs
+from .io import load_yaml, DataHandler, get_images_from_dirs, get_local_path_ls
 from .processor import FeatureExtractor
-from ..ml.models import Detector
-from ..ml.workers import ObjectDetectionSystem
 from ..ml.interface import InferenceEngine
 
 
@@ -481,6 +478,7 @@ class LabelingDataset:
         load_existing_metadata: bool = False,
         max_workers: int = 1,
         ls_download_resources: bool = False,
+        skip_broken: bool = True,
     ):
         assert isinstance(labelstudio_client, LabelStudio), (
             "Provide an instance of LabelStudio"
@@ -496,61 +494,64 @@ class LabelingDataset:
                 load_existing_metadata=load_existing_metadata, max_workers=max_workers
             )
 
-        def load_unique_task(task) -> Tile | None:
-            img_url = unquote(task.data["image"])
+        def load_unique_task(task, skip: bool = skip_broken) -> Tile | None:
+            image_url = unquote(task.data["image"])
 
-            try:
-                image_path = get_local_path(
-                    img_url,
-                    download_resources=ls_download_resources,
-                    hostname=os.getenv("LABEL_STUDIO_URL"),
+            # try:
+            image_path = get_local_path_ls(
+                image_url=image_url,
+                download_resources=ls_download_resources,
+            )
+            if image_path is None:
+                if skip:
+                    return None
+                raise FileNotFoundError()
+
+            # get tile gps_coords and offsets if given
+            if tile_metadata is not None:
+                value = tile_metadata.get(
+                    Path(image_url).stem, None
+                ) or tile_metadata.get(Path(image_path).stem, None)
+                tile_gps_loc = None
+                x1 = y1 = None
+                if value is None:
+                    logger.warning(f"No metadata found for {image_url}. -> skipping")
+                    return None
+
+                tile_gps_loc = value["gps"]
+                (x1, x2), (y1, y2) = value["coordinates"]
+                parent_image = value["parent_image"]
+            else:
+                tile_gps_loc = None
+                x1 = y1 = None
+                parent_image = None
+
+            # build tile
+            detection_objects = Detection.from_ls(task.annotations, image_path)
+
+            tile = Tile(
+                annotations=detection_objects,
+                image_data=None,
+                image_path=image_path,
+                x_offset=x1,
+                y_offset=y1,
+                parent_image=parent_image,
+                tile_gps_loc=tile_gps_loc,
+            )
+
+            # update detections (annotations or predictions) gps loc using tile_gps_loc
+            if tile_gps_loc is not None:
+                tile.update_detection_gps(
+                    sensor_height=config.sensor_height,
+                    flight_height=config.flight_height,
+                    gsd=config.gsd,
                 )
+            return tile
 
-                # get tile gps_coords and offsets if given
-                if tile_metadata is not None:
-                    value = tile_metadata.get(
-                        Path(img_url).stem, None
-                    ) or tile_metadata.get(Path(image_path).stem, None)
-                    tile_gps_loc = None
-                    x1 = y1 = None
-                    if value is None:
-                        logger.warning(f"No metadata found for {img_url}. -> skipping")
-                        return None
-
-                    tile_gps_loc = value["gps"]
-                    (x1, x2), (y1, y2) = value["coordinates"]
-                    parent_image = value["parent_image"]
-                else:
-                    tile_gps_loc = None
-                    x1 = y1 = None
-                    parent_image = None
-
-                # build tile
-                detection_objects = Detection.from_ls(task.annotations, image_path)
-
-                tile = Tile(
-                    annotations=detection_objects,
-                    image_data=None,
-                    image_path=image_path,
-                    x_offset=x1,
-                    y_offset=y1,
-                    parent_image=parent_image,
-                    tile_gps_loc=tile_gps_loc,
-                )
-
-                # update detections (annotations or predictions) gps loc using tile_gps_loc
-                if tile_gps_loc is not None:
-                    tile.update_detection_gps(
-                        sensor_height=config.sensor_height,
-                        flight_height=config.flight_height,
-                        gsd=config.gsd,
-                    )
-                return tile
-
-            except Exception:
-                logger.warning(f"Failed for: {img_url} -> skipping")
-                traceback.print_exc()
-                return None
+            # except Exception:
+            #     logger.warning(f"Failed for: {img_url} -> skipping")
+            #     traceback.print_exc()
+            #     return None
 
         # get tasks in project
         tasks = labelstudio_client.tasks.list(

@@ -70,6 +70,31 @@ def get_images_paths(
     return images_paths
 
 
+def get_local_path_ls(
+    image_url: str, download_resources: bool = False, **kwargs
+) -> str | None:
+    from label_studio_tools.core.utils.io import get_local_path
+    from urllib.parse import unquote
+
+    image_url = unquote(image_url)
+
+    image_path = get_local_path(
+        image_url, download_resources=download_resources, **kwargs
+    )
+    if not os.path.exists(image_path):
+        path = image_url.split("/data/local-files/?d=")[-1]
+        root = os.environ.get("LOCAL_FILES_DOCUMENT_ROOT") or os.environ.get(
+            "LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT"
+        )
+        image_path = os.path.join(root, path)
+
+    if not os.path.exists(image_path):
+        logger.warning(f"Local path not found for: {image_url}")
+        return None
+
+    return image_path
+
+
 def get_images_from_dirs(images_dirs: Sequence[str]) -> list[str]:
     c = chain.from_iterable([get_images_paths(d) for d in images_dirs])
     c = list(set(c))
