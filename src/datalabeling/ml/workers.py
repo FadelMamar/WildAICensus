@@ -27,6 +27,7 @@ from torchvision.ops import nms
 import asyncio
 import aiohttp
 
+from .models import Detector, UltralyticsDetector, GroundingDinoDetector
 from ..common.config import PredictionConfig
 from ..common.base import Tile, Detection
 from ..common.annotation_utils import GPSUtils, compute_detection_gps
@@ -396,75 +397,31 @@ class DetectionThread(threading.Thread):
         self,
         shared_buffers: SharedBuffers,
         config: PredictionConfig,
-        enable_async: bool = False,
     ):
         super().__init__(name="DetectionThread")
         self.shared_buffers = shared_buffers
-        self.model = None
+        self.model: Detector = None
         self.logger = logging.getLogger(self.name)
 
         self.session = None
         self.count = 0
         self.config = config
         self.max_wait_time = 0.1  # seconds for batch collection
-        self.enable_async = enable_async
 
-    def set_model(self, model: YOLO, path_weights: str, task="detect"):
+    def set_model(
+        self,
+        model: Detector,
+    ):
         if self.config.inference_service_url:
-            assert (model is None) and (path_weights is None)
+            assert model is None, "model should be None if using inference service"
             self.logger.info(f"Using deployment @ {self.config.inference_service_url}")
             return None
 
-        elif model:
-            self.model = model
-
-        elif path_weights:
-            self.model = YOLO(path_weights, task=task)
-            self.model.eval()
-
-        else:
-            raise ValueError(
-                f"provide self.config.inference_service_url or model:YOLO or path_weights:str"
-            )
+        assert isinstance(model, Detector), "Provide a valid Detector model"
+        self.model = model
+        self.model.warmup(imgsz=(self.config.tilesize, self.config.tilesize))
 
         self.logger.info("Model loaded successfully")
-
-        #  warmup
-        try:
-            self.logger.info("warming up...")
-            self.model(
-                torch.rand(
-                    self.config.batch_size,
-                    3,
-                    self.config.tilesize,
-                    self.config.tilesize,
-                ).to(self.model.device),
-                verbose=False,
-            )
-        except:
-            self.logger.info("Warm up failed")
-            traceback.print_exc()
-
-    def _trim_result(self, results: List[UltralyticsResults]) -> List[dict]:
-        trimmed = []
-        for res in results:
-            if isinstance(res, dict):
-                trimmed.append(res)
-                continue
-
-            if res.obb is not None:
-                boxes = res.obb
-            else:
-                boxes = res.boxes
-
-            o = dict(
-                bbox=boxes.xyxy.cpu().tolist(),
-                label=boxes.cls.cpu().flatten().tolist(),
-                score=boxes.conf.cpu().flatten().tolist(),
-            )
-            trimmed.append(o)
-
-        return trimmed
 
     def _pad_if_needed(self, batch: torch.Tensor, out_shape: tuple) -> torch.Tensor:
         # if batch size is less than expected, pad with zeros
@@ -487,110 +444,19 @@ class DetectionThread(threading.Thread):
         batch = self._pad_if_needed(
             batch, out_shape=(self.config.batch_size, *batch.shape[1:])
         )
-
         if self.config.inference_service_url:
-            as_bytes = batch.cpu().numpy().tobytes()
-            payload = {
-                "tensor": base64.b64encode(as_bytes).decode("utf-8"),
-                "shape": list(batch.shape),
-                "iou_nms": self.config.nms_iou,
-                "conf": self.config.confidence_threshold,
-            }
-
-            res = requests.post(
-                url=self.config.inference_service_url, json=payload
-            ).json()
-            res = res["detections"]
+            res = self.model.predict_url(
+                image=batch,
+            )
 
         else:
-            with torch.inference_mode():
-                res = self.model(
-                    batch,
-                    verbose=False,
-                    imgsz=self.config.tilesize,
-                    conf=self.config.confidence_threshold,
-                    iou=self.config.nms_iou,
-                    device=self.config.device,
-                )
+            res = self.model.predict(
+                batch,
+            )
 
         res = res[:num_images]
 
         return res
-
-    # TODO: debug
-    async def _async_predict(self, batch: torch.Tensor, index: torch.Tensor):
-        num_images = batch.shape[0]
-
-        batch = self._pad_if_needed(
-            batch, out_shape=(self.config.batch_size, *batch.shape[1:])
-        )
-
-        as_bytes = batch.cpu().numpy().tobytes()
-        payload = {
-            "tensor": base64.b64encode(as_bytes).decode("utf-8"),
-            "shape": list(batch.shape),
-            "iou_nms": self.config.nms_iou,
-            "conf": self.config.confidence_threshold,
-        }
-
-        async with self.session.post(
-            self.config.inference_service_url, json=payload
-        ) as response:
-            if response.status == 200:
-                result = await response.json()
-                res = result["detections"]
-            else:
-                raise ValueError(f"Request failed: {response.status}")
-
-        res = res[:num_images]
-        res = self._trim_result(res)
-        indices = index.cpu().flatten().tolist()
-
-        return res, indices
-
-    # TODO: debug
-    async def init_session(self):
-        self.session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=30),
-            connector=aiohttp.TCPConnector(limit=100),
-        )
-
-    # TODO: debug
-    async def async_run_detection(
-        self, data: LoadingDataset, max_concurrent: int = 10
-    ) -> dict:
-        """
-        Run object detection on input data
-        """
-
-        loader = DataLoader(data, batch_size=self.config.batch_size, shuffle=False)
-
-        if self.config.verbose:
-            loader = tqdm(loader, desc="sliced_inference")
-
-        tasks = [self._async_predict(batch, index) for batch, index in loader]
-        # res, indices = self._async_predict(batch,index)
-
-        # Limit concurrency to avoid overwhelming servers
-        semaphore = asyncio.Semaphore(max_concurrent)
-
-        async def bounded_request(task):
-            async with semaphore:
-                return await task
-
-        results = await asyncio.gather(*[bounded_request(task) for task in tasks])
-
-        indices = chain.from_iterable([task[1] for task in tasks])
-        results = chain.from_iterable([task[0] for task in tasks])
-        indices = list(indices)
-        results = list(results)
-
-        # collect results using image index
-        results = {
-            i: [res for j, res in enumerate(results) if i == indices[j]]
-            for i in list(set(indices))
-        }
-        return results
 
     def run_detection(
         self,
@@ -616,7 +482,7 @@ class DetectionThread(threading.Thread):
         with torch.no_grad():
             for batch, index in loader:
                 res = self._predict(batch)
-                results.extend(self._trim_result(res))
+                results.extend(res)
                 indices.extend(index.cpu().flatten().tolist())
 
         # collect results per image

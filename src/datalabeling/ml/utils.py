@@ -970,9 +970,7 @@ class RoiClassifierHead(torch.nn.Module):
             # nn.Linear(128, 1),
         )
 
-        self.loss = nn.SmoothL1Loss(
-            reduction="sum"
-        )
+        self.loss = nn.SmoothL1Loss(reduction="sum")
         # self.loss = nn.BCEWithLogitsLoss(reduction="sum")
 
         self.device = "cuda:0" if torch.cuda.is_available() else "cpu"
@@ -1396,7 +1394,7 @@ class DetectionSystem(DetectionModel):
             fp_tp_loss_weight=self.fp_tp_loss_weight,
             count_loss_weight=self.count_loss_weight,
             area_loss_weight=self.area_loss_weight,
-            mask_loss_weight=self.mask_loss_weight
+            mask_loss_weight=self.mask_loss_weight,
         )
 
 

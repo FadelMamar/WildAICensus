@@ -28,14 +28,6 @@ from datalabeling.common.dataset_loader import (
     ClassificationDatasetBuilder,
 )
 
-# import mlflow
-# os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
-# from ultralytics import settings
-# # Update a setting
-# settings.update({"mlflow": True})
-# mlflow.set_tracking_uri("file:///c:/Users/Machine Learning/Desktop/workspace-wildAI/datalabeling/runs/mlflow")
-# mlflow.set_tracking_uri("http://localhost:5000")
-
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +110,6 @@ def train(args: TrainingConfig):
     TrainingManager(
         args=args,
         herdnet_loss=None,
-        herdnet_training_backend=args.herdnet_training_backend,
-        classifier_training_backend=args.cls_training_backend,
-        model_type=args.model_type,
     ).run()
 
 

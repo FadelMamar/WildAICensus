@@ -1,5 +1,6 @@
 from datalabeling.common.config import PredictionConfig
 from datalabeling.ml.interface import InferenceEngine
+from datalabeling.ml.models import UltralyticsDetector, GroundingDinoDetector
 from datalabeling.ml.workers import ObjectDetectionSystem
 from ultralytics import YOLO
 from datalabeling.common.mlflow_utils import load_registered_model
@@ -119,6 +120,16 @@ def run_inference_on_dataset(
     return dataset
 
 
+def run_model(image_path: str):
+    # model = UltralyticsDetector(model_path="D:/datalabeling/base_models_weights/best.pt")
+
+    model = GroundingDinoDetector()
+
+    result = model.predict(image=Image.open(image_path))
+
+    return result
+
+
 def run_detector(
     image_paths: list,
 ):
@@ -186,17 +197,19 @@ def run_annotator(
 
 
 if __name__ == "__main__":
-    # image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
-    # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
+    # image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_512_640_1152.jpg"
     # image_path = r"D:\workspace\data\savmap_dataset_v2\raw\tmp\0a4a499660dc4e7c986779f8b6786f87.JPG"
+    image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_1024_640_1664.jpg"
+
+    results = run_model(image_path)
 
     # tile = Tile(image_path=image_path, parent_image=image_path)
 
-    images = Path(
-        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
-    ).glob("*.JPG")
-    images = list(images)[:20]
-    results = run_detector(image_paths=images)
+    # images = Path(
+    #     r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
+    # ).glob("*.JPG")
+    # images = list(images)[:20]
+    # results = run_detector(image_paths=images)
 
     # data = tile.detections_to_df()
 

@@ -1165,7 +1165,7 @@ class ClassificationDatasetBuilder:
         # self.detector: InferenceEngine = None
         self.source_dirs = None
         self.output_dir = None
-        self.perf_eval = PerformanceEvaluator(config=self.config)
+        self.perf_eval = PerformanceEvaluator()
         self.bbox_resize_factor = None
         self.feature_extractor = None
 

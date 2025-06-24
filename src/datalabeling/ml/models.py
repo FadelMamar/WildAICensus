@@ -1,23 +1,15 @@
 import logging
-import traceback
-from pathlib import Path
-
-import geopy
-import pandas as pd
+from abc import abstractmethod, ABC
 import torch
 import torch.nn.functional as F
 import torchvision.transforms as T
 from PIL import Image
-from sahi.models.ultralytics import UltralyticsDetectionModel
-from sahi.predict import get_prediction, get_sliced_prediction
-from torch.utils.data import DataLoader, TensorDataset, ConcatDataset, Dataset
+from torch.utils.data import DataLoader
 import requests, base64
 
-# from label_studio_ml.utils import (get_env, get_local_path)
-from tqdm import tqdm
 
 from ultralytics import YOLO
-
+from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 from ultralytics.engine.results import Results as UltralyticsResults
 from typing import Sequence
 import lightning as L
@@ -26,11 +18,9 @@ from animaloc.eval import HerdNetEvaluator, PointsMetrics
 from animaloc.eval.lmds import HerdNetLMDS
 from torchmetrics.classification import Accuracy, Precision, Recall, F1Score, AUROC
 from torchvision import models
-from torchvision.ops import nms
 
-from ..common.annotation_utils import GPSUtils, compute_detection_gps
+from ..common.base import Detection
 from ..common.config import PredictionConfig
-from ..common.base import Detection, Tile
 
 
 logger = logging.getLogger(__name__)
@@ -386,379 +376,328 @@ class ImageClassifier(L.LightningModule):
         return [optimizer], [lr_scheduler]
 
 
-class Detector(object):
-    def __init__(
-        self, detection_model: UltralyticsDetectionModel, config: PredictionConfig
-    ):
+class Detector(ABC):
+    def __init__(self, config: PredictionConfig = None):
+        self.config: PredictionConfig = config
+
+    def warmup(self, image_size=(640, 640), **kwargs):
+        try:
+            self.predict(Image.new("RGB", image_size), **kwargs)
+        except:
+            logger.info(
+                "Failed to warmup the model, please check the model and image size."
+            )
+
+    def set_prediction_config(self, config: PredictionConfig):
+        assert isinstance(config, PredictionConfig), (
+            "config must be an instance of PredictionConfig"
+        )
         self.config = config
-        self.detection_model = detection_model
-        self.yolo_model = None
-        if detection_model:
-            self.yolo_model = detection_model.model
 
-    def set_detection_model(
+    @abstractmethod
+    def preprocess(self, image: Image.Image) -> Image.Image:
+        """
+        Preprocesses the input image for prediction.
+
+        Args:
+            image (Image.Image): The input image to preprocess.
+
+        Returns:
+            Image.Image: The preprocessed image.
+        """
+        pass
+
+    @abstractmethod
+    def postprocess(self, detections: list[Detection]) -> list[Detection]:
+        """
+        Postprocesses the detections.
+
+        Args:
+            detections (list[Detection]): The raw detections to postprocess.
+
+        Returns:
+            list[Detection]: The postprocessed detections.
+        """
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+    @abstractmethod
+    def predict(self, image: Image.Image, **kwargs) -> list[Detection]:
+        """
+        Predicts detections in the given image.
+
+        Args:
+            image (Image.Image): The input image to predict on.
+
+        Returns:
+            list[Detection]: A list of detected objects.
+        """
+        raise NotImplementedError("This method should be implemented by subclasses.")
+
+    def predict_url(
         self,
-        detection_model: UltralyticsDetectionModel,
-        path_to_weights=None,
-        yolo_model: YOLO = None,
-    ):
-        if detection_model:
-            self.detection_model = detection_model
-            self.yolo_model = detection_model.model
+        image: torch.Tensor,
+        timeout: int = 360,
+    ) -> list[dict]:
+        assert isinstance(image, torch.Tensor), "Image must be a torch.Tensor"
+        assert len(image.shape) == 4, "Image tensor must be B,C,H,W"
 
-            # warmup
-            try:
-                logger.info("warming up...")
-                self.yolo_model(
-                    torch.rand(
-                        self.config.batch_size,
-                        3,
-                        self.config.tilesize,
-                        self.config.tilesize,
-                    ).to(yolo_model.device),
-                    verbose=False,
-                )
-            except Exception as e:
-                logger.info("Warm up failed")
+        as_bytes = image.cpu().numpy().tobytes()
+        payload = {
+            "tensor": base64.b64encode(as_bytes).decode("utf-8"),
+            "shape": list(image.shape),
+            "iou_nms": self.config.nms_iou,
+            "conf": self.config.confidence_threshold,
+        }
 
+        res = requests.post(
+            url=self.config.inference_service_url, json=payload, timeout=timeout
+        ).json()
+
+        res = res.get("detections", "FAILED")
+
+        if res == "FAILED":
+            logger.error("Failed to get predictions from the inference service.")
             return None
 
-        elif path_to_weights:
-            yolo_model = YOLO(path_to_weights, task="detect")
-            self.yolo_model = yolo_model
+        return res
 
-        self.detection_model = UltralyticsDetectionModel(
-            model=yolo_model,
-            confidence_threshold=self.config.confidence_threshold,
-            image_size=self.config.imgsz,
-            device=self.config.device,
+
+class UltralyticsDetector(Detector):
+    def __init__(self, model_path: str, config: PredictionConfig, task: str = "detect"):
+        """
+        Initializes the UltralyticsDetector with a YOLO model.
+
+        Args:
+            model_path (str): Path to the YOLO model file.
+            device (str): Device to run the model on (e.g., 'cpu', 'cuda').
+        """
+        super().__init__(config=config)
+        self.model = YOLO(
+            model_path, task=task
+        ).eval()  # Load the model in evaluation mode
+        self.device = config.device
+
+    def preprocess(
+        self, image: Image.Image, target_size: list[int] = 640
+    ) -> Image.Image:
+        """
+        Preprocesses the input image for prediction.
+        """
+        transform = T.Compose(
+            [
+                T.PILToTensor(),
+                T.Resize(target_size, interpolation=T.InterpolationMode.NEAREST),
+            ]
         )
 
-        logger.info(f"Computing device: {self.config.device}")
+        image_tensor = transform(image).unsqueeze(0).float() / 255.0
 
-        # warmup
-        try:
-            logger.info("warming up...")
-            self.yolo_model(
-                torch.rand(
-                    self.config.batch_size,
-                    3,
-                    self.config.tilesize,
-                    self.config.tilesize,
-                ).to(yolo_model.device),
-                verbose=False,
-            )
-        except Exception as e:
-            logger.info("Warm up failed")
+        return image_tensor
 
-    def postprocess(
-        self, results: list[UltralyticsResults], tile: Tile, offset_info: dict
-    ):
-        # ultralytics results to coco
-        detections = self._result_to_coco(
-            results,
-            offset_info=offset_info,
-            tile_width=tile.width,
-            tile_height=tile.height,
-        )
+    def postprocess(self, detections: list[UltralyticsResults]) -> list[Detection]:
+        """
+        Postprocesses the detections.
+        """
 
-        # TODO: debug batch predictions
-        if tile is None:
-            raise NotImplementedError()
+        out = []
 
-        # Get gps coordinates
-        gps_coords = tile.tile_gps_loc
-        if gps_coords is None:
-            # image gps coordinate
-            gps_info = GPSUtils.get_gps_coord(
-                file_name=tile.image_path, image=None, return_as_decimal=False
-            )
-            if isinstance(gps_info, tuple):
-                gps_coords = gps_info[0]
+        for result in detections:
+            if result.obb is not None:
+                boxes = result.obb
             else:
-                gps_coords = gps_info
+                boxes = result.boxes
 
-        # format detections
-        detections = [
-            Detection.from_coco(
-                pred,
-                parent_image=tile.image_path,
-                image_gps_loc=tile.tile_gps_loc,
-                gps_loc=None,
+            o = dict(
+                bbox=boxes.xyxy.cpu().tolist(),
+                label=boxes.cls.cpu().flatten().tolist(),
+                score=boxes.conf.cpu().flatten().tolist(),
             )
-            for pred in detections
-        ]
 
-        # add detections gps
-        for det in detections:
-            if det.image_gps_loc is None:
-                continue
-            with Image.open(tile.image_path) as image:
-                det.gps_loc = compute_detection_gps(
-                    x_center=det.x,
-                    y_center=det.y,
-                    image=image,
-                    image_gps_loc=det.image_gps_loc,
-                    flight_height=self.config.flight_height,
-                    sensor_height=self.config.sensor_height,
-                    gsd=self.config.gsd,
+            for i in range(len(o["bbox"])):
+                xmin, ymin, xmax, ymax = o["bbox"][i]
+                label = o["label"][i]
+                score = o["score"][i]
+                out.append(
+                    Detection(
+                        x_min=xmin,
+                        y_min=ymin,
+                        x_max=xmax,
+                        y_max=ymax,
+                        label=label,
+                        class_name=result.names.get(label),
+                        score=score,
+                        parent_image=result.path,
+                    )
                 )
-        return detections
 
-    def _result_to_coco(
-        self,
-        result: list,
-        tile_width: int,
-        tile_height: int,
-        offset_info: dict,
-    ) -> list[dict]:
-        bboxs = []
-        conf = []
-        label = []
-
-        for i, boxes in enumerate(result):
-            if boxes.xyxy.cpu().numel() == 0:
-                continue
-
-            # mapping to untiled coordinates
-            bbox = boxes.xyxy.cpu().clone()
-            bbox[:, [0, 2]] = bbox[:, [0, 2]] + offset_info["x_offset"][i]
-            bbox[:, [1, 3]] = bbox[:, [1, 3]] + offset_info["y_offset"][i]
-
-            bboxs.append(bbox)
-            conf.append(boxes.conf.cpu())
-            label.append(boxes.cls.cpu())
-
-        if len(bboxs) == 0:
-            return []
-
-        bboxs = torch.vstack(bboxs)
-        conf = torch.hstack(conf)
-        label = torch.hstack(label).long()
-
-        assert torch.max(bboxs[:, [0, 2]]) <= tile_width
-        assert torch.max(bboxs[:, [1, 3]]) <= tile_height
-
-        # Non-max suppression
-        indx = nms(boxes=bboxs, scores=conf, iou_threshold=self.config.nms_iou)
-
-        # xyxy -> coco xywh
-        bboxs[:, 2] = bboxs[:, 2] - bboxs[:, 0]
-        bboxs[:, 3] = bboxs[:, 3] - bboxs[:, 1]
-
-        # retaining selected boxes
-        bboxs = bboxs.tolist()
-        conf = conf.tolist()
-        label = label.tolist()
-
-        # to coco format
-        coco = [
-            dict(
-                bbox=bboxs[i],
-                category_id=label[i],
-                category_name=self.yolo_model.names[label[i]],
-                score=conf[i],
-                file_name=offset_info["file_name"][i],
-            )
-            for i in indx.tolist()
-        ]
-
-        return coco
-
-    @staticmethod
-    def predict_url(
-        image_path: str,
-        inference_service_url: str = "http://127.0.0.1:4141/predict",
-        timeout=3 * 60,
-    ):
-        with open(image_path, "rb") as f:
-            img_b64 = base64.b64encode(f.read()).decode("utf-8")
-
-            payload = {
-                "images": [img_b64],
-            }
-
-            resp = requests.post(
-                inference_service_url,
-                json=payload,
-                # timeout=timeout,
-            ).json()
-
-        detections = resp["detections"]
-
-        return detections
-
-    # TODO : debug
-    def batch_predict(self, tiles: Sequence[Tile], verbose: bool = False):
-        assert isinstance(tiles, Sequence)
-
-        datasets = []
-        offsets = dict()
-        for i, tile in enumerate(tiles):
-            dataset, offset_info = self._load_tile_as_patches(tile)
-            datasets.append(dataset)
-            if i == 0:
-                offsets.update(offset_info)
-            else:
-                for k, v in offset_info:
-                    offsets[k] = offsets[k] + v
-
-        self.predict(
-            tile=None,
-            dataset=ConcatDataset(datasets),
-            offset_info=offsets,
-            verbose=verbose,
-        )
-
-    def _load_tile_as_patches(self, tile: Tile):
-        stride = int((1 - self.config.overlap_ratio) * self.config.tilesize)
-        batch_of_patches, offset_info = tile.as_batch(
-            tile_size=self.config.tilesize, stride=stride
-        )
-
-        logger.debug(f"Tiled image shape: {batch_of_patches.shape}")
-
-        if batch_of_patches.max() > 1.0:
-            batch_of_patches = batch_of_patches / 255.0
-
-        dataset = TensorDataset(batch_of_patches)
-
-        return dataset, offset_info
+        return out
 
     def predict(
         self,
-        tile: Tile,
-        dataset: Dataset = None,
-        offset_info: dict = None,
-        verbose: bool = False,
-    ):
-        if dataset is None and offset_info is None:
-            assert tile is not None, "Either tile or dataset should be provided."
-            dataset, offset_info = self._load_tile_as_patches(tile)
-
-        loader = DataLoader(dataset, batch_size=self.config.batch_size, shuffle=False)
-
-        def trim_result(results: list[UltralyticsResults]) -> list:
-            trimmed = []
-            for res in results:
-                if res.obb is not None:
-                    boxes = res.obb
-                else:
-                    boxes = res.boxes
-                trimmed.append(boxes)
-            return trimmed
-
-        if verbose:
-            loader = tqdm(loader, desc="sliced_inference")
-
-        results = []
-        with torch.no_grad():
-            for (batch,) in loader:
-                num_images = batch.shape[0]
-                if num_images != self.config.batch_size:
-                    # if batch size is less than expected, pad with zeros
-                    padding = torch.zeros(
-                        (self.config.batch_size - batch.shape[0], *batch.shape[1:])
-                    )
-                    batch = torch.cat([batch, padding], dim=0)
-                res = self.yolo_model(
-                    batch,
-                    verbose=False,
-                    imgsz=self.config.tilesize,
-                    conf=self.config.confidence_threshold,
-                    iou=self.config.nms_iou,
-                )
-                res = res[:num_images]
-                results = results + trim_result(res)
-
-        detections = self.postprocess(
-            results=results, tile=tile, offset_info=offset_info
-        )
-
-        # set predictions
-        tile.set_predictions(detections)
-
-        return detections
-
-    def predict_directory(
-        self,
-        path_to_dir: str = None,
-        images_paths: list[str] = None,
-        as_dataframe: bool = True,
-        save_path: str = None,
-    ) -> dict[str, list[Detection]] | pd.DataFrame:
-        """Computes predictions on a directory
+        image: Image.Image | torch.Tensor,
+    ) -> list[Detection]:
+        """
+        Predicts detections in the given image.
 
         Args:
-            path_to_dir (str): path to directory with images. Defaults to None
-            images_list (list): paths of images to run the detection on
-            as_dataframe (bool): returns results as pd.DataFrame
-            save_path (str) : converts to dataframe and then save
+            image (Image.Image): The input image to predict on.
 
         Returns:
-            dict: a directory with the schema {image_path:prediction_coco_format}
+            list[Detection]: A list of detected objects.
         """
 
-        assert (path_to_dir is None) + (images_paths is None) < 2, (
-            "Both 'path_to_dir' and 'images_paths' should not be given."
+        assert isinstance(image, Image.Image) or isinstance(image, torch.Tensor), (
+            f"Received unexpected type:{type(image)}"
         )
-        results = {}
-        paths = images_paths
-        if paths is None:
-            paths = list(Path(path_to_dir).iterdir())
-        for image_path in tqdm(paths, desc="Computing predictions..."):
-            try:
-                pred = self.predict(
-                    tile=Tile(image_path=image_path),
+
+        if isinstance(image, Image.Image):
+            assert image.mode == "RGB", "Image must be in RGB mode"
+            image = self.preprocess(
+                image, target_size=[self.config.imgsz, self.config.imgsz]
+            )
+
+        results = self.model.predict(
+            image,
+            device=self.device,
+            imgsz=self.config.imgsz,
+            conf=self.config.conf,
+            verbose=self.config.verbose,
+            max_det=300,
+        )
+
+        return self.postprocess(results)
+
+
+class GroundingDinoDetector(Detector):
+    def __init__(
+        self,
+        config: PredictionConfig,
+        model_path: str = "IDEA-Research/grounding-dino-tiny",
+    ):
+        """
+        Initializes the GroundingDinoDetector with a YOLO model.
+        """
+
+        super().__init__(config=config)
+
+        self.device = config.device
+        self.transform = AutoProcessor.from_pretrained(model_path)
+        self.model = (
+            AutoModelForZeroShotObjectDetection.from_pretrained(model_path)
+            .eval()
+            .to(self.device)
+        )
+
+    def preprocess(self, image: Image.Image, text: list[str]) -> Image.Image:
+        """
+        Preprocesses the input image for prediction.
+        """
+        return self.transform(images=image, text=text, return_tensors="pt").to(
+            self.device
+        )
+
+    def postprocess(
+        self,
+        detections: list,
+        ids: torch.LongTensor,
+        target_sizes: list,
+        box_threshold: float = 0.4,
+        text_threshold: float = 0.25,
+    ) -> list[Detection]:
+        results = self.transform.post_process_grounded_object_detection(
+            detections,
+            ids,
+            box_threshold=box_threshold,
+            text_threshold=text_threshold,
+            target_sizes=target_sizes,
+        )
+
+        out = []
+
+        for result in results:
+            o = dict(
+                bbox=result["boxes"].cpu().tolist(),
+                label=result["labels"],
+                score=result["scores"],
+                class_name=result["text_labels"],
+            )
+
+            for i in range(len(o["bbox"])):
+                xmin, ymin, xmax, ymax = o["bbox"][i]
+                label = o["label"][i]
+                score = o["score"][i]
+                class_name = o["class_name"][i]
+                out.append(
+                    Detection(
+                        x_min=xmin,
+                        y_min=ymin,
+                        x_max=xmax,
+                        y_max=ymax,
+                        label=label,
+                        class_name=class_name,
+                        score=score,
+                        parent_image=None,
+                    )
                 )
-            except Exception as e:
-                logger.error(e)
-                logger.error(f"Failed for {image_path}")
-                continue
 
-            results.update({str(image_path): pred})
+        return out
 
-        if len(results) < 1:
-            logger.info("0 detections.")
-
-        # returns as df or save
-        if as_dataframe or save_path:
-            results = self._format_results_as_dataframe(results)
-
-            if save_path is not None:
-                try:
-                    results.to_json(save_path, orient="records", indent=2)
-                except Exception:
-                    logger.info("!!!Failed to save results as json!!!\n")
-                    traceback.print_exc()
-
-        return results
-
-    def _format_results_as_dataframe(
-        self, results: dict[str, list[Detection]]
-    ) -> pd.DataFrame:
-        if len(results) < 1:
-            return pd.DataFrame()
-
-        unravel_dict = []
-        for img_path, detections in results.items():
-            if len(detections) < 1:
-                continue
-
-            for det in detections:
-                unravel_dict.append(dict(file_name=img_path, **det.to_dict()))
-
-        dfs = pd.DataFrame.from_dict(unravel_dict)
-
-        dfs["bbox_w"] = dfs["x_max"] - dfs["x_min"]
-        dfs["bbox_h"] = dfs["y_max"] - dfs["y_min"]
-
-        # converting gps coords to decimal
-        dfs[["img_Latitude", "img_Longitude", "img_Elevation"]] = (
-            dfs["image_gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+    @torch.no_grad()
+    def predict(
+        self,
+        image: Image.Image,
+        text: list[str] = [
+            "detect wlidlife species",
+        ],
+        text_threshold: float = 0.25,
+    ) -> list[Detection]:
+        assert isinstance(image, Image.Image), (
+            f"Received type:{type(image)}. Expected Image.Image"
         )
-        dfs[["Latitude", "Longitude", "Elevation"]] = (
-            dfs["gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
+        inputs = self.preprocess(image, text)
+        results = self.model(**inputs)
+        target_sizes = [(image.height, image.width)]
+        return self.postprocess(
+            detections=results,
+            ids=inputs.input_ids,
+            target_sizes=target_sizes,
+            box_threshold=self.config.confidence_threshold,
+            text_threshold=text_threshold,
         )
 
-        return dfs
+
+# TODO: Implement MMDetectionDetector
+class MMDetectionDetector(Detector):
+    def __init__(self, model_path: str, config: PredictionConfig):
+        """
+        Initializes the MMDetectionDetector
+        """
+        super().__init__(config=config)
+
+        self.device = config.device
+
+        self.model = ...
+
+    def preprocess(self, image: Image.Image) -> Image.Image:
+        """
+        Preprocesses the input image for prediction.
+        """
+
+        raise NotImplementedError
+
+    def postprocess(self, detections: list) -> list[Detection]:
+        """
+        Postprocesses the detections.
+        """
+        raise NotImplementedError
+
+    @torch.no_grad()
+    def predict(
+        self,
+        image: Image.Image | torch.Tensor,
+    ) -> list[Detection]:
+        """
+        Predicts detections in the given image.
+        """
+
+        raise NotImplementedError

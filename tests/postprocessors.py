@@ -86,14 +86,11 @@ if __name__ == "__main__":
         imsave(str(i) + "_example.jpg", img)
 
         plt.show()
-        
-        
+
     # feature_extractor = get_processor("feature_extractor")()
-    
+
     # images = Path(r"D:\PhD\Data per camp\IdentificationDataset\train\images").glob('*')
     # images= list(images)[:10]
     # images = [imread(p) for p in images]
-    
+
     # features = feature_extractor.run(images)
-    
-    

@@ -695,7 +695,7 @@ def get_gps_coords_from_ls(
     assert config.root is not None, "Provide path to the original images directory"
 
     dataset = LabelingDataset.from_ls(
-        labelstudio_client,
+        labelstudio_client=labelstudio_client,
         project_id=project_id,
         config=config,
         top_n=top_n,

@@ -50,6 +50,7 @@ dependencies = [
     "optuna>=4.3.0",
     "optuna-integration[mlflow]>=4.3.0",
     "pyarrow>=15.0.2",
+    "spyder-kernels==3.0.*",
 ]
 
 [project.optional-dependencies]
