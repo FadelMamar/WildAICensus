@@ -236,9 +236,9 @@ def load_yolo_label(
         if (col == "label") and label_map:
             classes = list(map(label_map.get, df[col]))
     if classes:
-        df["class"] = classes
+        df["class_name"] = classes
     else:
-        df["class"] = [None] * len(df["label"])
+        df["class_name"] = [None] * len(df["label"])
 
     return df, _format
 

@@ -327,6 +327,48 @@ class LabelingDataset:
             self.build(force_rebuild=True)
         return None
 
+    def get_stats(
+        self,
+    ):
+        bbox_columns = ["file_name", "x_min", "y_min", "x_max", "y_max"]
+
+        stats = dict()
+        if "score" in self.data.columns:
+            data = self.data.loc[~self.data["score"].isna(), :]
+            stats["pred_instance_distribution"] = (
+                data["class_name"].value_counts().to_dict()
+            )
+            stats["pred_predicted_positive"] = (
+                data[bbox_columns].dropna(how="any")["file_name"].nunique()
+            )
+            stats["pred_predicted_negative"] = (
+                len(data) - stats["pred_predicted_positive"]
+            )
+
+        # gt
+        data = self.data.loc[self.data["is_annot"] == True, :]
+        stats["gt_number_labeled"] = data["is_annot"].sum()
+        stats["gt_number_unlabeled"] = len(data) - stats["gt_number_labeled"]
+        stats["gt_instance_distribution"] = data["class_name"].value_counts().to_dict()
+        stats["gt_number_positive"] = (
+            data[bbox_columns].dropna(how="any")["file_name"].nunique()
+        )
+        stats["gt_number_negative"] = len(data) - stats["gt_number_positive"]
+
+        return stats
+
+    def _add_flag_for_negative_samples(
+        self,
+    ):
+        bbox_columns = ["x_min", "y_min", "x_max", "y_max"]
+        try:
+            self.data["is_negative"] = self.data[bbox_columns].isna().any(axis=1)
+        except KeyError:
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            raise ValueError(f"{e}")
+
     def set_labelstudio_client(self, client):
         assert isinstance(client, LabelStudio), (
             "Expected type 'LabelStudio' but received {type(client)}"
@@ -353,6 +395,9 @@ class LabelingDataset:
             return None
 
         self.data = pd.concat(data, axis=0).reset_index(drop=True).convert_dtypes()
+
+        # self._add_flag_for_negative_samples()
+
         self._is_built = True
         return None
 
@@ -461,11 +506,29 @@ class LabelingDataset:
         )
 
         # load tiles
-        tiles = [Tile(image_path=p) for p in df_labels["file_name"].unique()]
+        tiles = []
+        bbox_columns = ["x_min", "y_min", "x_max", "y_max"]
+        for file_name, df_gt in df_labels.groupby("file_name"):
+            annotations = [
+                Detection(
+                    x_min=df_gt["x_min"].iat[i],
+                    x_max=df_gt["x_max"].iat[i],
+                    y_min=df_gt["y_min"].iat[i],
+                    y_max=df_gt["y_max"].iat[i],
+                    label=df_gt["label"].iat[i],
+                    class_name=df_gt["class_name"].iat[i],
+                )
+                for i in range(len(df_gt))
+            ]
+            tile = Tile(image_path=file_name, annotations=annotations)
+            tiles.append(tile)
 
         df_labels["is_annot"] = True
+        dataset = cls(data=df_labels, tiles=tiles)
 
-        return cls(data=df_labels, tiles=tiles)
+        # dataset._add_flag_for_negative_samples()
+
+        return dataset
 
     @classmethod
     def from_ls(
@@ -527,10 +590,10 @@ class LabelingDataset:
                 parent_image = None
 
             # build tile
-            detection_objects = Detection.from_ls(task.annotations, image_path)
+            detection_list = Detection.from_ls(task.annotations, image_path)
 
             tile = Tile(
-                annotations=detection_objects,
+                annotations=detection_list,
                 image_data=None,
                 image_path=image_path,
                 x_offset=x1,

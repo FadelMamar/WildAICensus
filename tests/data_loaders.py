@@ -261,7 +261,11 @@ def load_dataset_from_yolo():
     ]
 
     dataset = LabelingDataset.from_yolo(
-        images_dirs=images_dirs, paths=None, load_empty=True, max_workers=2
+        images_dirs=images_dirs,
+        paths=None,
+        load_empty=True,
+        max_workers=2,
+        label_map={0: "wildlife"},
     )
 
     return dataset
@@ -300,6 +304,6 @@ if __name__ == "__main__":
 
     # dataset = load_dataset_from_dirs()
 
-    # dataset = load_dataset_from_yolo()
+    dataset = load_dataset_from_yolo()
 
     pass

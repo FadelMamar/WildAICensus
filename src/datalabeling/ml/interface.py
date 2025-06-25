@@ -83,7 +83,7 @@ class InferenceEngine(object):
         tiles: list[Tile] = None,
         return_tiles: bool = False,
         return_as_df: bool = False,
-    ) -> list[Detection] | list[Tile] | pd.DataFrame:
+    ) -> Sequence[list[Detection]] | list[Tile] | pd.DataFrame:
         """Multithreaded detector"""
 
         paths = images_paths
@@ -97,13 +97,12 @@ class InferenceEngine(object):
         detections = self.detector.run(images_paths=paths)
 
         if tiles is not None:
-            # if tiles are provided,
             for i, tile in enumerate(tiles):
                 tile.set_predictions(detections[i])
 
         if return_tiles:
             assert tiles is not None, (
-                "This is likely an error. tiles have not been set."
+                "This is likely an error. 'tiles' is not provided."
             )
             return tiles
 
@@ -292,7 +291,7 @@ class InferenceEngine(object):
         detector = ObjectDetectionSystem(
             config=pred_config, detection_label_map=detection_label_map
         )
-        detector.set_model(model=detection_model, task="detect", path_weights=None)
+        detector.set_model(model=detection_model)
         detector.set_processor(roi_processor=roi_processor)
 
         engine = cls(config=pred_config)

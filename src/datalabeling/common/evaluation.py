@@ -63,26 +63,22 @@ class Metrics:
         # partition rows
         df_pred = (
             data.loc[data["is_annot"] == False, :]
-            .dropna(subset="is_annot", axis=0)  # dropping unlabeled
+            .dropna(
+                axis=0,
+                subset=["is_annot", "label", "x_min", "y_min", "x_max", "y_max"],
+                how="any",
+            )
             .drop(columns="is_annot")
         )
+
         df_gt = (
             data.loc[data["is_annot"] == True, :]
-            .dropna(subset="is_annot", axis=0)  # dropping unlabeled
+            .dropna(
+                axis=0,
+                subset=["is_annot", "label", "x_min", "y_min", "x_max", "y_max"],
+                how="any",
+            )
             .drop(columns="is_annot")
-        )
-
-        # drop NaNs
-        df_gt = df_gt.dropna(
-            axis=0,
-            subset=["label", "x_min", "y_min", "x_max", "y_max"],
-            how="any",
-        )
-
-        df_pred = df_pred.dropna(
-            axis=0,
-            subset=["label", "x_min", "y_min", "x_max", "y_max"],
-            how="any",
         )
 
         df_results = []
@@ -92,10 +88,14 @@ class Metrics:
 
         loader = iterator(df_pred=df_pred, df_gt=df_gt)
 
-        with ThreadPool(max_workers) as executor:
-            for df_eval in tqdm(executor.map(func, loader), desc="computing..."):
-                if not df_eval.empty:
-                    df_results.append(df_eval)
+        # with ThreadPool(max_workers) as executor:
+        #     for df_eval in tqdm(executor.map(func, loader), desc="computing..."):
+        #         if not df_eval.empty:
+        #             df_results.append(df_eval)
+
+        for df_eval in tqdm(map(func, loader), desc="computing..."):
+            if not df_eval.empty:
+                df_results.append(df_eval)
 
         if len(df_results) > 0:
             df_results = pd.concat(
@@ -117,6 +117,8 @@ class Metrics:
             df_results.at[i, "pred_FP"] = 0
             df_results.at[i, "map50"] = np.nan
             df_results.at[i, "map75"] = np.nan
+
+        df_results = df_results.convert_dtypes()
 
         return df_results
 
@@ -206,8 +208,8 @@ class Metrics:
         df_pred_i["pred_label"] = "None"
 
         for i in range(len(df_pred_i)):
-            df_pred_i.loc[i, "TP"] = best_iou[i].item() >= self.tp_iou_threshold
-            df_pred_i.loc[i, "FP"] = best_iou[i].item() < self.tp_iou_threshold
+            df_pred_i.loc[i, "TP"] = (best_iou[i].item() >= self.tp_iou_threshold) * 1
+            df_pred_i.loc[i, "FP"] = (best_iou[i].item() < self.tp_iou_threshold) * 1
             df_pred_i.loc[i, "best_ciou"] = best_iou[i].item()
             df_pred_i.loc[i, "matching_gt"] = (
                 json.dumps(gt[best_gt_idx[i]].numpy().tolist())
@@ -239,14 +241,16 @@ class Metrics:
             df_eval.append(df_gt_i)
 
         if not df_pred_i.empty:
+            for k, v in stats.items():
+                if k == "all_scores":
+                    v = ",".join(map(str, v))
+                df_pred_i[k] = v
             df_eval.append(df_pred_i)
 
         if len(df_eval) > 0:
             df_eval = pd.concat(df_eval, ignore_index=True, sort=False).reset_index(
                 drop=True
             )
-            for k, v in stats.items():
-                df_eval[k] = v
 
         else:
             df_eval = pd.DataFrame()
@@ -610,7 +614,12 @@ class ReportGenerator:
     ):
         pass
 
-    def run(self, df_results_per_img: pd.DataFrame, plot: bool = False) -> None:
+    def run(
+        self,
+        df_results_per_img: pd.DataFrame,
+        plot: bool = False,
+        save_plot: str = None,
+    ) -> None:
         """Generate comprehensive performance report"""
 
         tp_fp_tn = (
@@ -632,24 +641,29 @@ class ReportGenerator:
 
         fig = None
         if plot:
-            fig, axs = plt.subplots(ncols=1, nrows=4, figsize=(10, 5))
-            # plot tp_fp_tn distribution
+            fig, axs = plt.subplots(ncols=1, nrows=4, figsize=(15, 10))
             tp_fp_tn.plot(kind="box", ax=axs[0])
-
-            # plot map50 distribution
             df_results_per_img[["map50", "map75"]].plot(kind="box", ax=axs[1])
-
             df_results_per_img[
                 [
                     "pred_area",
                 ]
             ].plot(kind="box", ax=axs[2])
 
-            df_results_per_img[
-                [
-                    "all_scores",
-                ]
-            ].plot(kind="box", ax=axs[4])
+            # df_results_per_img[
+            #     [
+            #         "all_scores",
+            #     ]
+            # ].plot(kind="box", ax=axs[3])
+            if save_plot:
+                fig.savefig(
+                    save_plot,
+                    dpi=300,  # Resolution
+                    # bbox_inches='tight',        # Remove extra whitespace
+                    facecolor="white",  # Background color
+                    edgecolor="none",  # Border color
+                    format="png",
+                )  # File format
 
         return stats, fig
 

@@ -543,17 +543,7 @@ class DetectionThread(threading.Thread):
             "Provide detection model or url to inference service i.e. YOLO"
         )
 
-        # TODO: debug
-        # if self.enable_async:
-        #     await self.init_session()
-
-        # sleep_time = 0
         while True:
-            # if self.shared_buffers.counts["data"] < self.config.batch_size * 4:
-            #     time.sleep(1.0 + sleep_time)
-            #     sleep_time += 0.5  # extend wait
-            #     continue
-
             # get data
             data, offsets, metadata = self.collect_batch()
 
@@ -612,53 +602,24 @@ class PostProcessingThread(threading.Thread):
         self.roi_processor = roi_processor
 
     def postprocess(
-        self, results: list[UltralyticsResults], tile: Tile, offset_info: dict
+        self, detections: List[Detection], tile: Tile, offset_info: dict
     ) -> List[Detection]:
-        # ultralytics results to coco
-        detections = self._result_to_coco(
-            results,
-            offset_info=offset_info,
-            tile_width=tile.width,
-            tile_height=tile.height,
+        # offset detections
+        for i, pred in enumerate(detections):
+            pred.parent_image = tile.image_path
+            pred.image_gps_loc = tile.tile_gps_loc
+            pred.gps_loc = None
+            pred.to_absolute_coords(
+                x_offset=offset_info["x_offset"][i], y_offset=offset_info["y_offset"][i]
+            )
+
+        tile.set_predictions(detections)
+        tile.filter_detections(method="nms", threshold=self.config.nms_iou, clamp=True)
+        tile.update_detection_gps(
+            sensor_height=self.config.sensor_height,
+            flight_height=self.config.flight_height,
+            gsd=self.config.gsd,
         )
-
-        # Get gps coordinates
-        gps_coords = tile.tile_gps_loc
-        if gps_coords is None:
-            # image gps coordinate
-            gps_info = GPSUtils.get_gps_coord(
-                file_name=tile.image_path, image=None, return_as_decimal=False
-            )
-            if isinstance(gps_info, tuple):
-                gps_coords = gps_info[0]
-            else:
-                gps_coords = gps_info
-
-        # format detections
-        detections = [
-            Detection.from_coco(
-                pred,
-                parent_image=tile.image_path,
-                image_gps_loc=tile.tile_gps_loc,
-                gps_loc=None,
-            )
-            for pred in detections
-        ]
-
-        # add detections gps
-        for det in detections:
-            if det.image_gps_loc is None:
-                continue
-            with Image.open(tile.image_path) as image:
-                det.gps_loc = compute_detection_gps(
-                    x_center=det.x,
-                    y_center=det.y,
-                    image=image,
-                    image_gps_loc=det.image_gps_loc,
-                    flight_height=self.config.flight_height,
-                    sensor_height=self.config.sensor_height,
-                    gsd=self.config.gsd,
-                )
 
         # post process roi
         if self.roi_processor:
@@ -673,135 +634,55 @@ class PostProcessingThread(threading.Thread):
 
         return detections
 
-    def _result_to_coco(
+    def _run_once(
         self,
-        result: list,
-        tile_width: int,
-        tile_height: int,
-        offset_info: dict,
-    ) -> list[dict]:
-        bboxs = []
-        conf = []
-        label = []
+    ):
+        # Get detection results from buffer
+        results_package = self.shared_buffers.get(detections=True)
 
-        for i, boxes in enumerate(result):
-            bbox = torch.Tensor(boxes["bbox"])
+        if results_package == "DONE":
+            self.shared_buffers.put(filtered_detections="DONE")
+            self.logger.info("No more data to process")
+            return "DONE"
 
-            if bbox.numel() == 0:
-                continue
+        # Apply post-processing
+        raw_detections = results_package["detections"]
+        tile = results_package["metadata"]["tile"]
+        offset_info = results_package["offset_info"]
 
-            # mapping to untiled coordinates
-            bbox[:, [0, 2]] = bbox[:, [0, 2]] + offset_info["x_offset"][i]
-            bbox[:, [1, 3]] = bbox[:, [1, 3]] + offset_info["y_offset"][i]
-
-            bboxs.append(bbox)
-            conf.extend(boxes["score"])
-            label.extend(boxes["label"])
-
-        if len(bboxs) == 0:
-            return []
-
-        bboxs = torch.vstack(bboxs)
-        conf = torch.Tensor(conf)
-        label = torch.Tensor(label).long()
-
-        window = 10  # due to obb conversion to xyxy
-        if torch.min(bboxs) < 0:
-            if torch.min(bboxs) > -1 * window:
-                bboxs = torch.clamp(bboxs, min=0)
-            else:
-                raise ValueError(f"{torch.min(bboxs)} < -{window}")
-
-        if torch.max(bboxs[:, [0, 2]]) > tile_width:
-            if torch.max(bboxs[:, [0, 2]]) < (
-                tile_width + window
-            ):  # due to obb conversion
-                bboxs[:, [0, 2]] = torch.clamp(bboxs[:, [0, 2]], min=0, max=tile_width)
-            else:
-                raise ValueError(
-                    f"{torch.max(bboxs[:, [0, 2]])} > {tile_width}+{window}"
-                )
-
-        if torch.max(bboxs[:, [1, 3]]) > tile_height:
-            if torch.max(bboxs[:, [1, 3]]) < (
-                tile_height + window
-            ):  # due to obb conversion
-                bboxs[:, [1, 3]] = torch.clamp(bboxs[:, [1, 3]], min=0, max=tile_height)
-            else:
-                raise ValueError(f"{torch.max(bboxs[:, [1, 3]])} > {tile_height}")
-
-        # Non-max suppression
-        indx = nms(boxes=bboxs, scores=conf, iou_threshold=self.config.nms_iou)
-
-        # xyxy -> coco xywh
-        bboxs[:, 2] = bboxs[:, 2] - bboxs[:, 0]
-        bboxs[:, 3] = bboxs[:, 3] - bboxs[:, 1]
-
-        # retaining selected boxes
-        bboxs = bboxs.tolist()
-        conf = conf.tolist()
-        label = label.tolist()
-        coco = [
-            dict(
-                bbox=bboxs[i],
-                category_id=label[i],
-                category_name=self.label_map.get(label[i], None),
-                score=conf[i],
-                file_name=offset_info["file_name"][i],
+        try:
+            t1 = time.perf_counter()
+            filtered_detections = self.postprocess(
+                raw_detections, tile=tile, offset_info=offset_info
             )
-            for i in indx.tolist()
-        ]
+            t2 = time.perf_counter() - t1
+            self.logger.debug(f"Postprocessing took: {t2:.3f}s")
+        except:
+            traceback.print_exc()
+            self.shared_buffers.put(filtered_detections="DONE")
+            self.logger.info("Graceful shutdown of thread.")
+            return "DONE"
 
-        return coco
+        results_package["final_detections"] = filtered_detections
+        results_package["postprocess_time"] = t2
+
+        # self.shared_buffers.put(filtered_detections=results_package)
+        self.outputs.append(results_package)
+
+        # Filter by confidence
+        # detections = self.filter_detections(detections,
+        #                                   self.output_config.get("conf_threshold", 0.5))
+
+        return None
 
     def run(self):
         """Main thread execution loop"""
         self.logger.info("Starting post-processing thread")
 
-        # sleep_time = 0
         while True:
-            # wait for detections to be computed
-            # if self.shared_buffers.counts["detections"] < self.config.batch_size * 2:
-            #     time.sleep(1.0 + sleep_time)
-            #     sleep_time += 0.5  # extend wait
-            #     continue
-
-            # Get detection results from buffer
-            results_package = self.shared_buffers.get(detections=True)
-
-            if results_package == "DONE":
-                self.shared_buffers.put(filtered_detections="DONE")
-                self.logger.info("No more data to process")
+            status = self._run_once()
+            if status == "DONE":
                 break
-
-            # Apply post-processing
-            detections = results_package["detections"]
-            tile = results_package["metadata"]["tile"]
-            offset_info = results_package["offset_info"]
-
-            try:
-                t1 = time.perf_counter()
-                detections = self.postprocess(
-                    detections, tile=tile, offset_info=offset_info
-                )
-                t2 = time.perf_counter() - t1
-                self.logger.debug(f"Postprocessing took: {t2:.3f}s")
-            except:
-                traceback.print_exc()
-                self.shared_buffers.put(filtered_detections="DONE")
-                self.logger.info("Graceful shutdown of thread.")
-                break
-
-            # Filter by confidence
-            # detections = self.filter_detections(detections,
-            #                                   self.output_config.get("conf_threshold", 0.5))
-
-            # Update results package
-            results_package["final_detections"] = detections
-            results_package["postprocess_time"] = t2
-
-            # self.shared_buffers.put(filtered_detections=results_package)
-            self.outputs.append(results_package)
 
 
 class ObjectDetectionSystem:
@@ -835,18 +716,14 @@ class ObjectDetectionSystem:
     def set_processor(self, roi_processor: DetectionsPostprocessor):
         self._roi_processor = roi_processor
 
-    def set_model(self, model: YOLO, path_weights: str = None, task: str = "detect"):
+    def set_model(self, model: Detector):
         self._detection_model = model
-        self._detection_model_path = path_weights
-        self._detection_task = task
 
     def _set_handlers(
         self,
     ):
         self.detection_thread.set_model(
             model=self._detection_model,
-            path_weights=self._detection_model_path,
-            task=self._detection_task,
         )
 
         self.postprocess_thread.set_processor(roi_processor=self._roi_processor)
@@ -864,7 +741,6 @@ class ObjectDetectionSystem:
         """Start all threads"""
         self.logger.info("Starting Object Detection System")
 
-        # set detection model
         self._set_handlers()
 
         # Start threads in order
@@ -911,7 +787,7 @@ class ObjectDetectionSystem:
 
     def run(
         self, images_paths: Sequence[str], img_loading_batch: int = 4
-    ) -> List[Detection]:
+    ) -> List[List[Detection]]:
         """
         Run the system for a specified duration or until stopped
         """
@@ -949,63 +825,6 @@ class ObjectDetectionSystem:
 
         # print(out)
 
-        detections = [o["final_detections"] for i, o in enumerate(out)]
+        detections = [o["final_detections"] for o in out]
 
         return detections
-
-
-# if __name__ == "__main__":
-#     config = PredictionConfig(
-#         imgsz=800,
-#         tilesize=800,
-#         batch_size=4,
-#         overlap_ratio=0.2,
-#         confidence_threshold=0.2,
-#         inference_service_url=None,
-#         flight_height=180,
-#         sensor_height=24,
-#         gsd=None,
-#         nms_iou=0.5,
-#         verbose=True,
-#         # min_area=100,
-#         # max_area=None,
-#         cls_imgsz=128,
-#         # device="cuda:0",
-#     )
-
-#     image_path = r"D:\herdnet-Det-PTR_emptyRatio_0.0\yolo_format\images\0d1ba3c424ad4414ac37dbd0c93460ea_1_51_0_1024_640_1664.jpg"
-#     # image_path = r"D:\savmap_dataset_v2\raw\tmp\0a3ed15cfab4453795564140e8fde8ba.JPG"
-
-#     images = [image_path] * 5
-
-#     # load Roi processor
-#     path = r"D:\datalabeling\base_models_weights\roi_classifier.ckpt"  # r"./runs-classifier/best-v2.ckpt"
-#     model = ImageClassifier.load_from_checkpoint(
-#         path, cls_is_features=True, map_location=config.device
-#     )
-#     roi_classifier = get_processor("classifier")(
-#         model,
-#         label_map={0: "gt", 1: "tn"},
-#         device=config.device,
-#         feature_extractor=get_processor("feature_extractor")(),
-#         imgsz=config.cls_imgsz,
-#     )
-#     roi_processor = DetectionsPostprocessor(
-#         keep_classes=["gt"],  # from roi classifier
-#     )
-#     roi_processor.set_classifier(roi_classifier)
-
-#     detection_system = ObjectDetectionSystem(
-#         data_source=images,
-#         config=config,
-#         buffer_size=32,
-#         timeout=15,
-#         detection_label_map={},
-#         roi_processor=roi_processor,
-#     )
-
-#     detection_system.run()
-
-#     outputs = detection_system.outputs
-
-#     pass

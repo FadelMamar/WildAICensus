@@ -5,6 +5,8 @@ import math
 import geopy
 import torch
 from torchvision.transforms import PILToTensor
+from torchvision.ops import nms
+
 from PIL import Image
 import pandas as pd
 import numpy as np
@@ -178,6 +180,27 @@ class Detection:
             return math.floor(x)
         return x
 
+    def bbox(self, formating: str = "xyxy"):
+        if formating == "xyxy":
+            return [self.x_min, self.y_min, self.x_max, self.y_max]
+        else:
+            raise ValueError("only 'xyxy' supproted.")
+
+    def clamp_bbox(self, x_range: tuple, y_range: tuple):
+        for r in [x_range, y_range]:
+            assert len(r) == 2, f"r={r}"
+            assert r[1] >= r[0], f"r={r}"
+
+        clamp = lambda x, r: max(min(x, r[1]), r[0])
+
+        self.x_min = clamp(self.x_min, x_range)
+        self.y_min = clamp(self.y_min, y_range)
+
+        self.x_max = clamp(self.x_max, x_range)
+        self.y_max = clamp(self.y_max, y_range)
+
+        pass
+
     @property
     def y(
         self,
@@ -290,6 +313,10 @@ class Tile:
 
         return None
 
+    def set_offsets(self, x_offset: int, y_offset: int):
+        self.y_offset = y_offset
+        self.x_offset = x_offset
+
     def offset_detections(
         self,
     ):
@@ -314,12 +341,44 @@ class Tile:
         else:
             logger.info("Failed...self.x_offset is None or self.y_offset is not None.")
 
+    def _nms(self, threshold: float = 0.5):
+        if len(self.predictions) < 2:
+            return self.predictions
+
+        bboxs = torch.Tensor([det.bbox() for det in self.predictions])
+        scores = torch.Tensor([det.score for det in self.predictions])
+
+        # get indices of examples to keep
+        indx = nms(boxes=bboxs, scores=scores, iou_threshold=threshold)
+
+        return [self.predictions[i] for i in indx.tolist()]
+
+    def filter_detections(
+        self, method: str = "nms", threshold: float = 0.5, clamp: bool = True
+    ):
+        assert method == "nms", "only nms is supported"
+
+        if len(self.predictions) < 1:
+            return
+
+        if clamp:
+            for det in self.predictions:
+                det.clamp_bbox(x_range=(0, self.width), y_range=(0, self.height))
+
+        self.predictions = self._nms(threshold)
+
+        return None
+
     def update_detection_gps(
         self,
         sensor_height: float,
         flight_height: float,
         gsd: float,
     ):
+        if self.tile_gps_loc is None:
+            logger.info("No gps coordinate found in the tile")
+            return
+
         assert isinstance(self.tile_gps_loc, str), (
             f"Expected self.tile_gps_loc to be 'str'. Found '{type(self.tile_gps_loc)}' "
         )
@@ -382,7 +441,7 @@ class Tile:
         df = pd.DataFrame.from_dict(out, orient="columns")
 
         if df.empty:
-            df.at[0, "image_width"] = self.width
+            df.at[0, "image_width"] = self.width  # add a row
 
         df["image_width"] = self.width
         df["image_height"] = self.height

@@ -394,6 +394,29 @@ class Detector(ABC):
         )
         self.config = config
 
+    def load_image_and_resize(self, image: Image.Image | torch.Tensor) -> torch.Tensor:
+        assert isinstance(image, Image.Image) or isinstance(image, torch.Tensor), (
+            f"Received unexpected type:{type(image)}"
+        )
+
+        transform = T.Resize(
+            (self.config.tilesize, self.config.tilesize),
+            interpolation=T.InterpolationMode.NEAREST,
+        )
+
+        if isinstance(image, Image.Image):
+            transform = T.Compose([T.PILToTensor(), transform])
+
+        image_tensor = transform(image).float()
+
+        if len(image_tensor.shape) == 3:
+            image_tensor = image_tensor.unsqueeze(0)
+
+        image_tensor = (
+            image_tensor / 255.0 if image_tensor.max() > 1.0 else image_tensor
+        )
+        return image_tensor
+
     @abstractmethod
     def preprocess(self, image: Image.Image) -> Image.Image:
         """
@@ -478,21 +501,12 @@ class UltralyticsDetector(Detector):
         self.device = config.device
 
     def preprocess(
-        self, image: Image.Image, target_size: list[int] = 640
+        self, image: Image.Image | torch.Tensor, target_size: list[int] = 640
     ) -> Image.Image:
         """
         Preprocesses the input image for prediction.
         """
-        transform = T.Compose(
-            [
-                T.PILToTensor(),
-                T.Resize(target_size, interpolation=T.InterpolationMode.NEAREST),
-            ]
-        )
-
-        image_tensor = transform(image).unsqueeze(0).float() / 255.0
-
-        return image_tensor
+        return self.load_image_and_resize(image)
 
     def postprocess(self, detections: list[UltralyticsResults]) -> list[Detection]:
         """
@@ -552,6 +566,7 @@ class UltralyticsDetector(Detector):
 
         if isinstance(image, Image.Image):
             assert image.mode == "RGB", "Image must be in RGB mode"
+
             image = self.preprocess(
                 image, target_size=[self.config.imgsz, self.config.imgsz]
             )
@@ -560,7 +575,7 @@ class UltralyticsDetector(Detector):
             image,
             device=self.device,
             imgsz=self.config.imgsz,
-            conf=self.config.conf,
+            conf=self.config.confidence_threshold,
             verbose=self.config.verbose,
             max_det=300,
         )
@@ -573,6 +588,7 @@ class GroundingDinoDetector(Detector):
         self,
         config: PredictionConfig,
         model_path: str = "IDEA-Research/grounding-dino-tiny",
+        instruction: str = "detect wildlife species",
     ):
         """
         Initializes the GroundingDinoDetector with a YOLO model.
@@ -581,20 +597,30 @@ class GroundingDinoDetector(Detector):
         super().__init__(config=config)
 
         self.device = config.device
-        self.transform = AutoProcessor.from_pretrained(model_path)
+        self.transform = AutoProcessor.from_pretrained(model_path, use_fast=True)
         self.model = (
             AutoModelForZeroShotObjectDetection.from_pretrained(model_path)
             .eval()
             .to(self.device)
         )
 
-    def preprocess(self, image: Image.Image, text: list[str]) -> Image.Image:
+        self.instruction = instruction
+
+    def preprocess(self, image: Image.Image | torch.Tensor, text: str) -> Image.Image:
         """
         Preprocesses the input image for prediction.
         """
-        return self.transform(images=image, text=text, return_tensors="pt").to(
-            self.device
+        assert isinstance(image, Image.Image) or isinstance(image, torch.Tensor), (
+            f"Received type:{type(image)}. Expected Image.Image or torch.Tensor"
         )
+        assert isinstance(text, str), f"Received type {type(image)}"
+
+        image = self.load_image_and_resize(image)
+        text = [[text]] * image.shape[0]
+
+        return self.transform(
+            images=image, text=text, return_tensors="pt", do_rescale=False
+        ).to(self.device)
 
     def postprocess(
         self,
@@ -645,18 +671,15 @@ class GroundingDinoDetector(Detector):
     @torch.no_grad()
     def predict(
         self,
-        image: Image.Image,
-        text: list[str] = [
-            "detect wlidlife species",
-        ],
+        image: Image.Image | torch.Tensor,
+        text: str = None,
         text_threshold: float = 0.25,
     ) -> list[Detection]:
-        assert isinstance(image, Image.Image), (
-            f"Received type:{type(image)}. Expected Image.Image"
-        )
+        text = text or self.instruction
         inputs = self.preprocess(image, text)
         results = self.model(**inputs)
-        target_sizes = [(image.height, image.width)]
+        batchsize = inputs["pixel_values"].shape[0]
+        target_sizes = [(self.config.tilesize, self.config.tilesize)] * batchsize
         return self.postprocess(
             detections=results,
             ids=inputs.input_ids,

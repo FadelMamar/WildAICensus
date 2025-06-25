@@ -6,8 +6,9 @@ from datalabeling.common.evaluation import (
 )
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
 from datalabeling.ml.interface import InferenceEngine
+from datalabeling.ml.models import UltralyticsDetector, GroundingDinoDetector
 from datalabeling.common.dataset_loader import LabelingDataset
-from ultralytics import YOLO
+
 from pathlib import Path
 
 
@@ -32,15 +33,21 @@ def run_perf_evaluator():
         # device="cuda:0",
     )
 
+    label_map = {0: "wildlife"}
+
+    detection_model = UltralyticsDetector(
+        model_path="D:/datalabeling/base_models_weights/best.pt", config=config
+    )
+
     engine, _ = InferenceEngine.load_engine(
         pred_config=config,
         roi_classifier_path=None,  # r"..\base_models_weights\roi_classifier.ckpt",
         roi_cls_is_features=True,
         roi_cls_label_map={0: "gt", 1: "tn"},
         roi_keep_classes=["gt"],
-        detection_label_map={0: "wildlife"},
+        detection_label_map=label_map,
         feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=YOLO(r"..\base_models_weights\best.pt"),
+        detection_model=detection_model,
         mlflow_model_alias="demo",
         mlflow_model_name="labeler",
     )
@@ -48,13 +55,14 @@ def run_perf_evaluator():
     perf_eval = PerformanceEvaluator()
 
     images_dirs = [
-        r"D:\workspace\data\savmap_dataset_v2\images_tmp",
+        r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images",
     ]
 
     load_results = False
 
     # creating dataset and adding predictions
-    dataset = LabelingDataset.from_dirs(images_dirs)
+    dataset = LabelingDataset.from_yolo(images_dirs, label_map=label_map)
+
     if not load_results:
         dataset.add_predictions(engine=engine, build=True)
 
@@ -76,7 +84,7 @@ def run_perf_evaluator():
     reporter = ReportGenerator()
     stats, fig = reporter.run(df_metrics_per_img, plot=True)
 
-    return df_metrics_per_img  # , df_hard_negatives
+    return df_metrics_per_img, stats  # , df_hard_negatives
 
 
 def calibration():
@@ -116,8 +124,8 @@ def calibration():
 
 
 if __name__ == "__main__":
-    # df_metrics_per_img = run_perf_evaluator()
+    df_metrics_per_img, stats = run_perf_evaluator()
 
-    calibration()
+    # calibration()
 
     pass
