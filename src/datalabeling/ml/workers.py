@@ -17,6 +17,7 @@ import torch
 from torch.utils.data import DataLoader, TensorDataset, ConcatDataset, Dataset
 from torchvision.transforms import PILToTensor
 from PIL import Image
+import os
 import json
 import base64
 import requests
@@ -26,6 +27,9 @@ from tqdm import tqdm
 from torchvision.ops import nms
 import asyncio
 import aiohttp
+import uuid
+import datetime
+import sqlite3
 
 from .models import Detector, UltralyticsDetector, GroundingDinoDetector
 from ..common.config import PredictionConfig
@@ -617,7 +621,12 @@ class PostProcessingThread(threading.Thread):
             )
 
         tile.set_predictions(detections)
-        tile.filter_detections(method="nms", threshold=self.config.nms_iou, clamp=True)
+        tile.filter_detections(
+            method="nms",
+            threshold=self.config.nms_iou,
+            clamp=True,
+            confidence_threshold=self.config.confidence_threshold,
+        )
         tile.update_detection_gps(
             sensor_height=self.config.sensor_height,
             flight_height=self.config.flight_height,
@@ -660,21 +669,15 @@ class PostProcessingThread(threading.Thread):
             )
             t2 = time.perf_counter() - t1
             self.logger.debug(f"Postprocessing took: {t2:.3f}s")
+            results_package["final_detections"] = filtered_detections
+            results_package["postprocess_time"] = t2
+            self.outputs.append(results_package)
+            self.shared_buffers.put(filtered_detections=results_package)
         except:
             traceback.print_exc()
             self.shared_buffers.put(filtered_detections="DONE")
             self.logger.info("Graceful shutdown of thread.")
             return "DONE"
-
-        results_package["final_detections"] = filtered_detections
-        results_package["postprocess_time"] = t2
-
-        # self.shared_buffers.put(filtered_detections=results_package)
-        self.outputs.append(results_package)
-
-        # Filter by confidence
-        # detections = self.filter_detections(detections,
-        #                                   self.output_config.get("conf_threshold", 0.5))
 
         return None
 
@@ -686,6 +689,113 @@ class PostProcessingThread(threading.Thread):
             status = self._run_once()
             if status == "DONE":
                 break
+
+
+class DetectionUploader(threading.Thread):
+    """
+    Thread responsible for uploading processed detections to the database.
+    """
+
+    def __init__(
+        self,
+        shared_buffers,
+        sqlite_path: str,
+    ):
+        super().__init__(name="DetectionUploader")
+        self.shared_buffers = shared_buffers
+        self.logger = logging.getLogger(self.name)
+
+        # Initialize DB connection
+        self.conn = sqlite3.connect(sqlite_path, check_same_thread=False)
+        self.conn.row_factory = sqlite3.Row
+        self.cursor = self.conn.cursor()
+        self._create_table_if_not_exists()
+
+    def _create_table_if_not_exists(self):
+        with self.conn.cursor() as cur:
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS wildlife_detections (
+                detection_id UUID PRIMARY KEY,
+                species TEXT,
+                latitude REAL,
+                longitude REAL,
+                altitude REAL,
+                confidence REAL,
+                image_gps TEXT,
+                source_image TEXT,
+                timestamp TEXT,
+            );
+            """)
+            self.conn.commit()
+
+    def _detection_to_dict(self, det: Detection):
+        assert isinstance(det, Detection)
+        lat, long, alt = det.gps_as_decimals
+        return {
+            "detection_id": uuid.uuid4(),
+            "species": det.class_name,
+            "latitude": round(lat, 8),
+            "longitude": round(long, 8),
+            "altitude": alt,
+            "confidence": round(det.score, 3),
+            "image_gps": det.image_gps_loc,
+            "source_image": str(det.parent_image),
+        }
+
+    def _upload_detections(self, detections):
+        rows = []
+        for det in detections:
+            det_dict = self._detection_to_dict(det)
+
+            rows.append(
+                (
+                    det_dict["detection_id"],
+                    det_dict["species"],
+                    det_dict["latitude"],
+                    det_dict["longitude"],
+                    det_dict["confidence"],
+                    det_dict["image_gps"],
+                    det_dict["source_image"],
+                    str(datetime.datetime.utcnow()),
+                )
+            )
+
+        self.cursor.execute(
+            """
+                INSERT INTO wildlife_detections (
+                    detection_id, species, latitude, longitude, confidence,
+                    image_gps, source_image, timestamp
+                ) VALUES %s
+            """,
+            rows,
+        )
+        self.conn.commit()
+
+    def run(self):
+        self.logger.info("Starting detection upload thread.")
+
+        try:
+            while True:
+                data_package = self.shared_buffers.get(filtered_detections=True)
+
+                if data_package == "DONE":
+                    self.logger.info("Upload thread received shutdown signal.")
+                    break
+
+                detections = data_package["final_detections"]
+
+                t1 = time.perf_counter()
+                self._upload_detections(detections)
+                t2 = time.perf_counter() - t1
+
+                self.logger.info(
+                    f"Uploaded {len(detections)} detections in {t2:.2f} seconds."
+                )
+        except Exception as e:
+            self.logger.exception("Error during upload:")
+        finally:
+            self.conn.close()
+            self.logger.info("Database connection closed.")
 
 
 class ObjectDetectionSystem:
@@ -707,6 +817,7 @@ class ObjectDetectionSystem:
         self.data_thread: DataLoadingThread = None
         self.detection_thread: DetectionThread = None
         self.postprocess_thread: PostProcessingThread = None
+        self.detection_uploader: DetectionUploader = None
         self.label_map = detection_label_map
         self.config = config
         self._detection_model = None
@@ -750,32 +861,15 @@ class ObjectDetectionSystem:
         self.data_thread.start()
         self.detection_thread.start()
         self.postprocess_thread.start()
-
-        # while True :
-
-        # if not self.detection_thread.is_alive():
-        #     if self.shared_buffers.counts["data"] >= self.config.batch_size:
-        # self.detection_thread.start()
-        # break
-        # time.sleep(1)
-
-        # if not self.postprocess_thread.is_alive():
-        #     if self.shared_buffers.counts["detections"] >= self.config.batch_size:
-        #         self.postprocess_thread.start()
-        #         # break
-        #     time.sleep(1)
-
-        # if self.postprocess_thread.is_alive():
-        #     break
+        self.detection_uploader.start()
 
         self.logger.info("All threads started")
 
-        # wait for threads to finish
         self._join_workers()
 
     def _join_workers(self):
         """Stop all threads gracefully"""
-        # self.logger.info("Stopping Object Detection System")
+        self.logger.info("Stopping Object Detection System")
 
         # Signal shutdown
         self.shared_buffers.shutdown()
@@ -784,6 +878,7 @@ class ObjectDetectionSystem:
         self.data_thread.join()
         self.detection_thread.join()
         self.postprocess_thread.join()
+        self.detection_uploader.join()
 
         self.logger.info("All threads stopped")
         return None
@@ -813,20 +908,11 @@ class ObjectDetectionSystem:
             label_map=self.label_map,
         )
 
+        self.detection_uploader = DetectionUploader()
+
         self._process_pipeline()
 
         out = self.outputs
-
-        # get outputs, wait for threads to finish
-        # out = None
-        # t1 = time.perf_counter()
-        # while out is None:
-        #     time.sleep(2)
-        #     out = self.outputs
-        #     if (time.perf_counter() - t1) > 15:
-        #         break
-
-        # print(out)
 
         detections = [o["final_detections"] for o in out]
 

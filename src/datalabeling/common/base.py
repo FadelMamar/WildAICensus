@@ -305,7 +305,8 @@ class Detection:
     def gps_as_decimals(
         self,
     ):
-        assert isinstance(self.gps_loc, str)
+        if self.gps_loc is None:
+            return None, None, None
 
         point = geopy.Point.from_string(self.gps_loc)
 
@@ -439,12 +440,21 @@ class Tile:
         return [self.predictions[i] for i in indx.tolist()]
 
     def filter_detections(
-        self, method: str = "nms", threshold: float = 0.5, clamp: bool = True
+        self,
+        method: str = "nms",
+        threshold: float = 0.5,
+        clamp: bool = True,
+        confidence_threshold: float = 0.0,
     ):
         assert method == "nms", "only nms is supported"
 
         if len(self.predictions) < 1:
             return
+
+        if confidence_threshold > 0.0:
+            self.predictions = [
+                det for det in self.predictions if det.score >= confidence_threshold
+            ]
 
         if clamp:
             for det in self.predictions:
