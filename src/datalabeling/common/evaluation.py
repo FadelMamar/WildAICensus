@@ -16,8 +16,13 @@ from ultralytics.utils.metrics import ConfusionMatrix
 from ultralytics.data import converter
 import seaborn as sns
 import matplotlib.pyplot as plt
+from scipy.spatial import distance_matrix
+from scipy.optimize import linear_sum_assignment
+from functools import lru_cache
+
 
 from ..ml.interface import InferenceEngine
+from ..ml.models import Detector
 from .config import EvaluationConfig, PredictionConfig
 from .dataset_loader import LabelingDataset
 
@@ -25,22 +30,33 @@ logger = logging.getLogger("Evaluation")
 
 
 class Metrics:
-    def __init__(self, tp_iou_threshold: float = 0.5):
+    def __init__(
+        self,
+        score_threshold: float = 0.25,
+        tp_method: str = "iou",
+        tp_iou_threshold: float = 0.5,
+        tp_distance_threshold: float = 50.0,
+    ):
         self.mean_ap = MeanAveragePrecision(
             box_format="xyxy",
             iou_type="bbox",
             max_detection_thresholds=[1, 10, 100],
-            iou_thresholds=[0.15, 0.25, 0.35, 0.5, 0.75, 0.85, 0.95],
+            # iou_thresholds=[0.15, 0.25, 0.35, 0.5, 0.75, 0.85, 0.95],
         )
-
+        self.score_threshold = score_threshold
         self.bbox_cols = ["x_min", "y_min", "x_max", "y_max"]
         self.tp_iou_threshold = tp_iou_threshold
+        self.tp_distance_threshold = tp_distance_threshold
+        self.tp_method = tp_method
+
+        assert tp_method in ["iou", "distance"], f"Received: {tp_method}"
 
     def run(self, dataset: LabelingDataset, max_workers: int = 1) -> pd.DataFrame:
         logger.info("Computing evaluation metrics per image...")
 
-        def iterator(df_pred, df_gt):
-            image_paths = df_pred["file_name"].unique()
+        def iterator(df_pred: pd.DataFrame, df_gt: pd.DataFrame):
+            image_paths = set(df_gt["file_name"]).union(set(df_pred["file_name"]))
+            image_paths = list(image_paths)
 
             for path in image_paths:
                 pred = (
@@ -55,14 +71,18 @@ class Metrics:
                 )
                 yield gt, pred
 
-        data = dataset.data
+        data = dataset.data.copy()
         data.sort_values("file_name", inplace=True)
 
         assert not data.empty, "The dataset is empty. Please check"
 
+        data["x_center"] = (data["x_min"] + data["x_max"]) / 2
+        data["y_center"] = (data["y_min"] + data["y_max"]) / 2
+
         # partition rows
+        mask_pred = data["is_annot"] == False  # * (data['score']>=self.score_threshold)
         df_pred = (
-            data.loc[data["is_annot"] == False, :]
+            data.loc[mask_pred, :]
             .dropna(
                 axis=0,
                 subset=["is_annot", "label", "x_min", "y_min", "x_max", "y_max"],
@@ -71,6 +91,7 @@ class Metrics:
             .drop(columns="is_annot")
         )
 
+        # positive samples
         df_gt = (
             data.loc[data["is_annot"] == True, :]
             .dropna(
@@ -110,7 +131,7 @@ class Metrics:
         missing = list(missing)
         df_results["pred_TN"] = 0
         for path in missing:
-            i = len(df_results)
+            i = len(df_results)  # add a row
             df_results.at[i, "file_name"] = path
             df_results.at[i, "pred_TN"] = 1
             df_results.at[i, "pred_TP"] = 0
@@ -118,38 +139,98 @@ class Metrics:
             df_results.at[i, "map50"] = np.nan
             df_results.at[i, "map75"] = np.nan
 
-        df_results = df_results.convert_dtypes()
+        df_results[["pred_TP", "gt_FN", "pred_FP", "pred_TN"]] = df_results[
+            ["pred_TP", "gt_FN", "pred_FP", "pred_TN"]
+        ].fillna(0)
+
+        # every row is a pred or gt
+        check = (
+            df_results[["pred_TP", "pred_FP", "pred_TN", "gt_FN"]].sum(axis=1) != 1
+        ).sum()
+        assert check == 0, (
+            "Error happened in the confusion matrix compution. Please check code."
+        )
+
+        # TP + FN = Total Ground Truth
+        assert df_results[["gt_FN", "pred_TP"]].values.sum() == len(df_gt)
+
+        # TP + FP = Total Predictions
+        assert df_results[["pred_FP", "pred_TP"]].values.sum() == len(df_pred)
 
         return df_results
+
+    def add_distance_to_closest(
+        self, df_pred: pd.DataFrame, df_gt: pd.DataFrame
+    ) -> pd.DataFrame:
+        if df_gt.empty:
+            df_pred["dist_closest_gt"] = np.inf
+            df_pred["matched_gt_idx"] = -1
+            return df_pred
+
+        if df_pred.empty:
+            return df_pred
+
+        if "x_center" not in df_pred.columns or "x_center" not in df_gt.columns:
+            df_pred["x_center"] = (df_pred["x_min"] + df_pred["x_max"]) / 2
+            df_pred["y_center"] = (df_pred["y_min"] + df_pred["y_max"]) / 2
+            df_gt["x_center"] = (df_gt["x_min"] + df_gt["x_max"]) / 2
+            df_gt["y_center"] = (df_gt["y_min"] + df_gt["y_max"]) / 2
+
+        distances = distance_matrix(
+            df_pred[["x_center", "y_center"]].values,
+            df_gt[["x_center", "y_center"]].values,
+        )
+
+        # Initialize arrays
+        df_pred["dist_closest_gt"] = np.inf  # distances.min(1)
+        df_pred["matched_gt_idx"] = -1
+
+        # Perform Hungarian algorithm for optimal one-to-one assignment
+        # Handle case where number of predictions != number of ground truths
+        if len(df_pred) <= len(df_gt):
+            # More or equal ground truths than predictions
+            pred_indices, gt_indices = linear_sum_assignment(distances)
+
+            # Assign matched distances and indices
+            for pred_idx, gt_idx in zip(pred_indices, gt_indices):
+                df_pred.iloc[pred_idx, df_pred.columns.get_loc("dist_closest_gt")] = (
+                    distances[pred_idx, gt_idx]
+                )
+                df_pred.iloc[pred_idx, df_pred.columns.get_loc("matched_gt_idx")] = (
+                    gt_idx
+                )
+
+        else:
+            # More predictions than ground truths
+            # Transpose the distance matrix and solve
+            gt_indices, pred_indices = linear_sum_assignment(distances.T)
+
+            # Assign matched distances and indices for matched predictions
+            for gt_idx, pred_idx in zip(gt_indices, pred_indices):
+                df_pred.iloc[pred_idx, df_pred.columns.get_loc("dist_closest_gt")] = (
+                    distances[pred_idx, gt_idx]
+                )
+                df_pred.iloc[pred_idx, df_pred.columns.get_loc("matched_gt_idx")] = (
+                    gt_idx
+                )
+
+        return df_pred
 
     def _get_bbox(self, gt: pd.DataFrame):
         return gt[self.bbox_cols].to_numpy().astype(float)
 
-    def _run_per_image(
-        self, df_gt_i: pd.DataFrame, df_pred_i: pd.DataFrame
-    ) -> pd.DataFrame:
-        # check validity
-        unique_images_gt = set(df_gt_i["file_name"])
-        unique_images_pred = set(df_pred_i["file_name"])
-        assert len(unique_images_gt) <= 1 and len(unique_images_pred) <= 1, (
-            "df_gt_i or df_pred_i has data for more than one image. Not Allowed!"
-        )
-        assert unique_images_gt.issubset(unique_images_pred), (
-            "groundtruth image are does not match prediction image"
-        )
-
+    def compute_map_ciou(self, df_pred: pd.DataFrame, df_gt: pd.DataFrame):
         # gt
-        gt = torch.from_numpy(self._get_bbox(gt=df_gt_i).clip(min=0))
-        labels = df_gt_i.loc[:, "label"].to_numpy().astype(int)
+        gt = torch.from_numpy(self._get_bbox(gt=df_gt).clip(min=0))
+        labels = df_gt.loc[:, "label"].to_numpy().astype(int)
 
         # pred
-        pred = self._get_bbox(gt=df_pred_i).clip(
+        pred = self._get_bbox(gt=df_pred).clip(
             min=0,
         )
-
         pred = torch.from_numpy(pred)
-        pred_score = df_pred_i.loc[:, "score"].to_numpy()
-        classes = df_pred_i.loc[:, "label"].to_numpy().astype(int)
+        pred_score = df_pred.loc[:, "score"].to_numpy()
+        classes = df_pred.loc[:, "label"].to_numpy().astype(int)
 
         # compute mAPs
         pred_list = [
@@ -178,83 +259,161 @@ class Metrics:
             map50=metric["map_50"].cpu().item(),
             map75=metric["map_75"].cpu().item(),
             all_scores=pred_score.tolist(),
-            max_scores=pred_score.max(),
+            max_scores=np.nan,
         )
+        if len(pred_score) > 0:
+            stats["stats"] = max(stats["all_scores"])
 
+        return box_ious, stats
+
+    def compute_tp_fp_iou(
+        self, df_pred: pd.DataFrame, df_gt: pd.DataFrame, box_ious: torch.Tensor
+    ):
         ## get FPs
-        if df_gt_i.empty:
-            df_pred_i["TP"] = 0
-            df_pred_i["FP"] = len(df_pred_i)
+        if df_gt.empty:
+            df_pred["TP"] = 0
+            df_pred["FP"] = len(df_pred)
 
             # rename columns
-            df_eval = df_pred_i.rename(
+            df_eval = df_pred.rename(
                 columns={
-                    col: f"pred_{col}"
-                    for col in df_pred_i.columns
-                    if col != "file_name"
+                    col: f"pred_{col}" for col in df_pred.columns if col != "file_name"
                 },
             )
-            for k, v in stats.items():
-                df_eval[k] = v
+            df_eval["gt_FN"] = 0
 
             return df_eval
 
-        ## get FNs
-        # TODO: make it work for multiclass?
         # For each prediction: find best-matching GT
         best_iou, best_gt_idx = box_ious.max(dim=1)
-        df_pred_i["matching_gt"] = "None"
-        df_pred_i["matching_gt"] = df_pred_i["matching_gt"].astype("object")
-        df_pred_i["pred_label"] = "None"
+        # df_pred["matching_gt"] = "None"
+        # df_pred["matching_gt"] = df_pred["matching_gt"].astype("object")
+        # df_pred["pred_label"] = "None"
 
-        for i in range(len(df_pred_i)):
-            df_pred_i.loc[i, "TP"] = (best_iou[i].item() >= self.tp_iou_threshold) * 1
-            df_pred_i.loc[i, "FP"] = (best_iou[i].item() < self.tp_iou_threshold) * 1
-            df_pred_i.loc[i, "best_ciou"] = best_iou[i].item()
-            df_pred_i.loc[i, "matching_gt"] = (
-                json.dumps(gt[best_gt_idx[i]].numpy().tolist())
-                if df_pred_i.loc[i, "TP"]
-                else "None"
-            )
+        for i in range(len(df_pred)):
+            df_pred.loc[i, "TP"] = (best_iou[i].item() >= self.tp_iou_threshold) * 1
+            df_pred.loc[i, "FP"] = (best_iou[i].item() <= 0.0) * 1  # never matched
+            df_pred.loc[i, "best_ciou"] = best_iou[i].item()
+            # df_pred.loc[i, "matching_gt"] = (
+            #     json.dumps(gt[best_gt_idx[i]].numpy().tolist())
+            #     if df_pred.loc[i, "TP"]
+            #     else "None"
+            # )
 
-        # For each ground-truth: mark FN if never matched
+        # get FN
         worst_pred_iou, _ = box_ious.max(dim=0)
-        for i in range(len(df_gt_i)):
-            df_gt_i.loc[i, "FN"] = worst_pred_iou[i].item() < self.tp_iou_threshold
+        for i in range(len(df_gt)):
+            df_gt.loc[i, "FN"] = (worst_pred_iou[i].item() < self.tp_iou_threshold) * 1
+        df_gt.rename(
+            columns={col: f"gt_{col}" for col in df_gt.columns if col != "file_name"},
+            inplace=True,
+        )
+        gt_FN = df_gt.loc[df_gt["gt_FN"] > 0, :]
 
         # rename columns
-        df_pred_i.rename(
+        df_eval = df_pred.rename(
             columns={
-                col: f"pred_{col}" for col in df_pred_i.columns if col != "file_name"
+                col: f"pred_{col}" for col in df_pred.columns if col != "file_name"
             },
-            inplace=True,
         )
 
-        df_gt_i.rename(
-            columns={col: f"gt_{col}" for col in df_gt_i.columns if col != "file_name"},
-            inplace=True,
-        )
+        df_eval = pd.concat([df_eval, gt_FN]).reset_index(drop=True)
 
-        # merge pred and gt dfs
-        df_eval = []
-        if not df_gt_i.empty:
-            df_eval.append(df_gt_i)
+        return df_eval
 
-        if not df_pred_i.empty:
-            for k, v in stats.items():
-                if k == "all_scores":
-                    v = ",".join(map(str, v))
-                df_pred_i[k] = v
-            df_eval.append(df_pred_i)
+    def compute_tp_fp_distance(self, df_pred: pd.DataFrame, df_gt: pd.DataFrame):
+        df_pred = self.add_distance_to_closest(df_pred=df_pred, df_gt=df_gt)
 
-        if len(df_eval) > 0:
-            df_eval = pd.concat(df_eval, ignore_index=True, sort=False).reset_index(
-                drop=True
+        if df_pred.empty:
+            # df_pred.loc[0,:] = np.nan
+            df_eval = df_pred.rename(
+                columns={
+                    col: f"pred_{col}" for col in df_pred.columns if col != "file_name"
+                },
+            )
+            df_gt["gt_FN"] = 1
+            df_eval = pd.concat([df_eval, df_gt]).reset_index(drop=True)
+
+        else:
+            df_pred["TP"] = (
+                df_pred["dist_closest_gt"] <= self.tp_distance_threshold
+            ) * 1
+
+            if df_gt.empty:
+                df_pred["FP"] = 1
+            else:
+                df_pred["FP"] = (
+                    df_pred["dist_closest_gt"] > self.tp_distance_threshold
+                ) * 1
+
+            # get FN
+            mask_fn = (df_pred["dist_closest_gt"] > self.tp_distance_threshold) * (
+                np.isinf(df_pred["dist_closest_gt"]) == False
+            )
+            unmatched_gt_indx = df_pred.loc[mask_fn, "matched_gt_idx"]
+            unmatched_gt_indx = list(unmatched_gt_indx)
+            df_gt["gt_FN"] = 0
+            df_gt.iloc[unmatched_gt_indx, df_gt.columns.get_loc("gt_FN")] = 1
+            df_gt_unmatched = df_gt.iloc[unmatched_gt_indx, :].copy()
+
+            df_eval = df_pred.rename(
+                columns={
+                    col: f"pred_{col}" for col in df_pred.columns if col != "file_name"
+                },
+            )
+
+            if not df_gt_unmatched.empty:
+                df_eval = pd.concat([df_eval, df_gt_unmatched]).reset_index(drop=True)
+            else:
+                df_eval["gt_FN"] = 0
+
+        return df_eval
+
+    def compute_tp_fp_maps(
+        self, df_pred: pd.DataFrame, df_gt: pd.DataFrame, method: str = "iou"
+    ):
+        box_ious, stats = self.compute_map_ciou(df_pred=df_pred, df_gt=df_gt)
+
+        if method == "iou":
+            df_eval = self.compute_tp_fp_iou(
+                df_pred=df_pred, df_gt=df_gt, box_ious=box_ious
+            )
+
+        elif method == "distance":
+            df_eval = self.compute_tp_fp_distance(
+                df_pred=df_pred,
+                df_gt=df_gt,
             )
 
         else:
-            df_eval = pd.DataFrame()
+            raise NotImplementedError
 
+        if df_eval.empty:
+            return df_eval
+
+        mask_pred = ~df_eval["pred_x_min"].isna()
+        for k, v in stats.items():
+            df_eval.loc[mask_pred, k] = v
+
+        return df_eval
+
+    def _run_per_image(
+        self, df_gt_i: pd.DataFrame, df_pred_i: pd.DataFrame
+    ) -> pd.DataFrame:
+        # check validity
+        unique_images_gt = set(df_gt_i["file_name"])
+        unique_images_pred = set(df_pred_i["file_name"])
+        assert len(unique_images_gt) <= 1 and len(unique_images_pred) <= 1, (
+            "df_gt_i or df_pred_i has data for more than one image. Not Allowed!"
+        )
+        if not df_pred_i.empty:
+            assert unique_images_gt.issubset(unique_images_pred), (
+                "groundtruth image are does not match prediction image"
+            )
+
+        df_eval = self.compute_tp_fp_maps(
+            df_pred=df_pred_i, df_gt=df_gt_i, method=self.tp_method
+        )
         return df_eval
 
 
@@ -262,20 +421,24 @@ class Metrics:
 # Performance Evaluation
 # =====================
 class PerformanceEvaluator:
-    def __init__(self):
-        pass
+    def __init__(self, config: EvaluationConfig):
+        self.config = config
 
     def run(
         self,
         dataset: LabelingDataset,
         pred_results_dir: str,
-        tp_iou_threshold: float = 0.5,
         load_results: bool = False,
         save_tag: str = "",
     ) -> pd.DataFrame | None:
         """Calculate performance metrics"""
 
-        metrics = Metrics(tp_iou_threshold=tp_iou_threshold)
+        metrics = Metrics(
+            tp_method=self.config.tp_method,
+            score_threshold=self.config.score_threshold,
+            tp_iou_threshold=self.config.tp_iou_threshold,
+            tp_distance_threshold=self.config.tp_distance_threshold,
+        )
 
         # when providing a list of images
         stem = (
@@ -287,9 +450,6 @@ class PerformanceEvaluator:
         if load_results:
             try:
                 dataset.import_data(save_path)
-            except FileNotFoundError:
-                traceback.print_exc()
-                raise FileNotFoundError()
             except:
                 traceback.print_exc()
                 raise ValueError()
@@ -297,125 +457,37 @@ class PerformanceEvaluator:
             dataset.save_data_csv(save_path=save_path)
 
         # compute metrics per image
-        df_metrics_per_image = metrics.run(dataset)
+        df_results = metrics.run(dataset)
 
-        return df_metrics_per_image
+        # if results_per_image:
+        return df_results, self._get_per_image_metrics(df_results)
 
+    def _get_per_image_metrics(self, df_results: pd.DataFrame):
+        results = dict()
 
-# TODO: debug
-class CustomValidator(DetectionValidator):
-    """From https://github.com/ultralytics/ultralytics/blob/main/ultralytics/models/yolo/detect/val.py
-    Adapted to compute confusion matrix for a given iou threshold
-    """
+        conf_matrix = ["pred_TP", "pred_FP", "pred_TN", "gt_FN"]
+        maps = ["map75", "map50"]
 
-    def init_metrics(self, model):
-        """
-        Initialize evaluation metrics for YOLO detection validation.
+        for filename, df in df_results.groupby("file_name"):
+            metrics = dict()
+            metrics["max_scores"] = df["pred_score"].dropna().max()
+            if "pred_best_ciou" in df.columns:
+                metrics["mean_ciou"] = df["pred_best_ciou"].dropna().mean()
 
-        Args:
-            model (torch.nn.Module): Model to validate.
-        """
-        val = self.data.get(self.args.split, "")  # validation path
-        self.is_coco = (
-            isinstance(val, str)
-            and "coco" in val
-            and (
-                val.endswith(f"{os.sep}val2017.txt")
-                or val.endswith(f"{os.sep}test-dev2017.txt")
-            )
-        )  # is COCO
-        self.is_lvis = (
-            isinstance(val, str) and "lvis" in val and not self.is_coco
-        )  # is LVIS
-        self.class_map = (
-            converter.coco80_to_coco91_class()
-            if self.is_coco
-            else list(range(1, len(model.names) + 1))
-        )
-        self.args.save_json |= (
-            self.args.val and (self.is_coco or self.is_lvis) and not self.training
-        )  # run final val
-        self.names = model.names
-        self.nc = len(model.names)
-        self.end2end = getattr(model, "end2end", False)
-        self.metrics.names = self.names
-        self.metrics.plot = self.args.plots
-        self.confusion_matrix = ConfusionMatrix(
-            nc=self.nc, conf=self.args.conf, iou_thres=self.args.iou, task="detect"
-        )
-        self.seen = 0
-        self.jdict = []
-        self.stats = dict(tp=[], conf=[], pred_cls=[], target_cls=[], target_img=[])
+            if "distance_closest_gt" in df.columns:
+                metrics["mean_dist_closest_gt"] = (
+                    df["distance_closest_gt"].dropna().mean()
+                )
 
+            metrics["mean_pred_area"] = df["pred_area"].dropna().mean()
+            for col in conf_matrix:
+                metrics[col] = df[col].dropna().sum()
+            for col in maps:
+                metrics[col] = df[col].dropna().mean()
 
-# TODO: debug
-def ultralytics_val(args: EvaluationConfig):
-    # remove label.cache files
-    # from ..ml.utils import remove_label_cache
-    # remove_label_cache(data_config_yaml=args.data_config)
+            results[filename] = metrics
 
-    for split in args.splits:
-        print("-" * 20, split, "-" * 20)
-
-        val_args = dict(model=args.weights, data=args.data_config)
-
-        run_name = (
-            args.name
-            + "#"
-            + split
-            + f"#{round(args.conf_threshold * 100)}#{round(args.iou_threshold * 100)}#{args.augment}#{args.max_det}-"
-        )
-
-        validator = CustomValidator(
-            args=val_args, save_dir=Path(args.project_name) / run_name
-        )
-
-        # set args
-        validator.args.conf = args.conf_threshold
-        validator.args.iou = args.iou_threshold
-        validator.args.mode = "val"
-        validator.args.imgsz = args.imgsz
-        validator.args.batch = args.batch_size
-        validator.args.device = args.device
-        validator.args.augment = args.augment
-        validator.args.split = split
-        validator.args.name = run_name
-        validator.args.project = args.project_name
-        validator.args.max_det = args.max_det
-        validator.args.save_crop = False
-        validator.args.save_json = False
-        validator.args.plots = args.plots
-        validator.args.save_hybridd = args.save_hybrid
-        validator.args.save_txt = args.save_txt
-        validator.args.save_conf = args.save_txt
-
-        # run evaluation
-        results = validator()
-
-        cf_matrix = validator.confusion_matrix.matrix
-        labels = list(validator.names.values()) + ["background"]
-
-        for i, label in enumerate(labels + ["background"]):
-            if label == "background":
-                break
-
-            tp = cf_matrix[i, i]
-            actual_positive = cf_matrix[:, i].sum()
-            predicted_positive = cf_matrix[i, :].sum()
-            # fp = predicted_positive - tp
-            # fn = actual_positive - tp
-
-            precision = tp / (predicted_positive + 1e-8)
-            recall = tp / (actual_positive + 1e-8)
-            f1score = 2 * precision * recall / (precision + recall + 1e-8)
-
-            results = dict(
-                precision=round(precision, 4),
-                recall=round(recall, 4),
-                f1score=round(f1score, 4),
-            )
-
-            print(f"results for {label} : ", results, end="\n")
+        results = pd.DataFrame.from_dict(results, orient="index")
 
         return results
 
@@ -432,7 +504,7 @@ class Calibrator:
         roi_cls_label_map: dict = {0: "gt", 1: "tn"},
         roi_keep_classes: list = ["gt"],
         roi_cls_is_features: bool = True,
-        detection_model: YOLO = None,
+        detection_model: Detector = None,
         mlflow_model_alias: str = "demo",
         mlflow_model_name: str = "labeler",
     ):
@@ -455,24 +527,34 @@ class Calibrator:
 
         self.count = 0
 
-        assert (inference_service_url is None and detection_model is None) == False
+        # assert not (inference_service_url is None and detection_model is None)
 
-    def _run_once(self, params: dict, save_tag: str = ""):
+    # @lru_cache(maxsize=None)
+    def _add_predictions(
+        self,
+        imgsz: int,
+        tilesize: int,
+        overlap_ratio: float,
+        nms_iou: float,
+        cls_imgsz: int,
+        flight_height: int = 180,
+        sensor_height: int = 24,
+    ):
         config = PredictionConfig(
-            imgsz=params.get("imgsz"),
-            tilesize=params.get("tilesize"),
+            imgsz=imgsz,
+            tilesize=tilesize,
             batch_size=self.batch_size,
-            overlap_ratio=params.get("overlap_ratio"),
-            confidence_threshold=params.get("confidence_threshold"),
+            overlap_ratio=overlap_ratio,
+            confidence_threshold=0.1,
             inference_service_url=self.inference_service_url,
-            flight_height=params.get("flight_height", 180),
-            sensor_height=params.get("sensor_height", 24),
+            flight_height=flight_height,
+            sensor_height=sensor_height,
             gsd=None,
-            nms_iou=params.get("nms_iou"),
+            nms_iou=nms_iou,
             verbose=False,
-            min_area=params.get("min_area"),
-            max_area=params.get("max_area"),
-            cls_imgsz=params.get("cls_imgsz"),
+            min_area=None,
+            max_area=None,
+            cls_imgsz=cls_imgsz,
             device=self.device,
         )
 
@@ -488,14 +570,16 @@ class Calibrator:
             mlflow_model_alias=self.mlflow_model_alias,
             mlflow_model_name=self.mlflow_model_name,
         )
-
         self.dataset.add_predictions(engine=engine, build=True)
+        return None
 
-        perf_eval = PerformanceEvaluator()
+    def _run_once(self, params: dict, save_tag: str = ""):
+        eval_config = EvaluationConfig(**params)
 
-        df_metrics_per_img = perf_eval.run(
+        perf_eval = PerformanceEvaluator(eval_config)
+
+        df_results, df_metrics_per_img = perf_eval.run(
             dataset=self.dataset,
-            tp_iou_threshold=params.get("tp_iou_threshold"),
             pred_results_dir=self.pred_results_dir,
             load_results=False,
             save_tag=save_tag,
@@ -503,47 +587,41 @@ class Calibrator:
 
         # report generation
         reporter = ReportGenerator()
-        stats, _ = reporter.run(df_metrics_per_img)
-        if np.isnan(stats["map50"]).all():
-            map50 = 1.0
-        else:
-            map50 = np.nansum(stats["map50"])
+        stats = reporter.run(df_results, plot=False, save_plot=None)
+        # if np.isnan(stats["map50"]).all():
+        #     map50 = 1.0
+        # else:
+        #     map50 = np.nansum(stats["map50"])
 
-        if np.isnan(stats["map75"]).all():
-            map75 = 1.0
-        else:
-            map75 = np.nansum(stats["map75"])
+        # if np.isnan(stats["map75"]).all():
+        #     map75 = 1.0
+        # else:
+        #     map75 = np.nansum(stats["map75"])
 
-        results = [stats["FP"]] + [stats[k] for k in ["TP", "TN"]] + [map50, map75]
+        # results = [stats["FP"]] + [stats[k] for k in ["TP", "TN"]] + [map50, map75]
 
-        return results
+        return stats["F1"]  # results
 
     def __call__(self, trial):
         hyperparameters = dict(
-            overlap_ratio=[
-                0.2,
-            ],  # np.linspace(0.1,0.4,5).round(3).tolist(),
-            tilesize=[
-                800,
-            ],  # [800,960,992,1024]
-            imgsz=[
-                800,
-            ],
-            cls_imgsz=[
-                98,
-            ],
-            confidence_threshold=np.linspace(0.1, 0.7, 5).round(3).tolist(),
+            score_threshold=np.linspace(0.1, 0.7, 5).round(3).tolist(),
             # min_area=(np.arange(5,25,5)**2).tolist(),
             # max_area=(np.arange(25,100,5)**2).tolist(),
-            nms_iou=np.linspace(0.2, 0.7, 5).round(3).tolist(),
-            tp_iou_threshold=np.linspace(0.2, 0.7, 5).round(3).tolist(),
         )
 
-        sampled = {
+        tp_method = trial.suggest_categorical("tp_method", ["iou", "distance"])
+        if tp_method == "iou":
+            hyperparameters["tp_iou_threshold"] = (
+                np.linspace(0.2, 0.7, 5).round(3).tolist()
+            )
+        else:
+            hyperparameters["tp_distance_threshold"] = (np.arange(1, 10) * 20).tolist()
+
+        params = {
             k: trial.suggest_categorical(f"{k}", v) for k, v in hyperparameters.items()
         }
 
-        scores = self._run_once(sampled, save_tag=f"trial-{self.count}")
+        scores = self._run_once(params, save_tag=f"trial-{self.count}")
 
         self.count += 1
 
@@ -552,9 +630,12 @@ class Calibrator:
     def run(
         self,
         dataset: LabelingDataset,
+        tilesize=800,
+        imgsz=800,
+        cls_imgsz=98,
+        overlap_ratio=0.2,
         n_trials=20,
         study_name="demo-muti",
-        load_study_if_exists=True,
         mlflow_exp_name="calibrating",
         storage="sqlite:///hypsearch.sql",
     ):
@@ -581,26 +662,39 @@ class Calibrator:
         )
 
         opt_direction = dict()
-        opt_direction["directions"] = ["minimize"] + ["maximize"] * 4
-        # opt_direction['direction'] = "maximize"
+        opt_direction["direction"] = "maximize"
 
-        study = optuna.create_study(
-            sampler=TPESampler(multivariate=True, group=True),
-            study_name=study_name,
-            pruner=optuna.pruners.HyperbandPruner(),
-            load_if_exists=load_study_if_exists,
-            storage=storage,
-            **opt_direction,
+        # compute detections
+        config = dict(
+            overlap_ratio=overlap_ratio,
+            tilesize=tilesize,
+            imgsz=imgsz,
+            cls_imgsz=cls_imgsz,
         )
 
-        study.optimize(
-            self,
-            n_trials=n_trials,
-            n_jobs=1,
-            show_progress_bar=True,
-            timeout=60 * 60 * 3,
-            callbacks=[mlflc],
-        )
+        for nms_iou in np.linspace(0.1, 0.7, 5):
+            config["nms_iou"] = nms_iou
+            msg = "Running with :\n" + json.dumps(config, indent=2)
+            logger.info(msg)
+            self._add_predictions(**config)
+
+            study = optuna.create_study(
+                sampler=TPESampler(multivariate=True, group=True),
+                study_name=study_name,
+                pruner=optuna.pruners.HyperbandPruner(),
+                load_if_exists=True,
+                storage=storage,
+                **opt_direction,
+            )
+
+            study.optimize(
+                self,
+                n_trials=n_trials,
+                n_jobs=1,
+                show_progress_bar=True,
+                timeout=60 * 60 * 3,
+                callbacks=[mlflc],
+            )
 
         return
 
@@ -614,24 +708,31 @@ class ReportGenerator:
     ):
         pass
 
-    def run(
-        self,
-        df_results_per_img: pd.DataFrame,
-        plot: bool = False,
-        save_plot: str = None,
-    ) -> None:
-        """Generate comprehensive performance report"""
-
+    def get_stats(self, df_results: pd.DataFrame):
         tp_fp_tn = (
-            df_results_per_img
+            df_results
             # .dropna()
-            .groupby("file_name")[["pred_TP", "pred_FP", "pred_TN"]]
+            .groupby("file_name")[
+                [
+                    "pred_TP",
+                    "pred_FP",
+                    # "pred_TN",
+                    "gt_FN",
+                ]
+            ]
             .sum()
-            .rename(columns={"pred_TP": "TP", "pred_FP": "FP", "pred_TN": "TN"})
+            .rename(
+                columns={
+                    "pred_TP": "TP",
+                    "pred_FP": "FP",
+                    # "pred_TN": "TN",
+                    "gt_FN": "FN",
+                }
+            )
         )
         tp_fp_tn_sum = tp_fp_tn.sum().to_dict()
-        map50 = df_results_per_img["map50"].to_numpy()
-        map75 = df_results_per_img["map75"].to_numpy()
+        map50 = df_results["map50"].to_numpy()
+        map75 = df_results["map75"].to_numpy()
 
         stats = dict(
             map50=map50,
@@ -639,33 +740,66 @@ class ReportGenerator:
         )
         stats.update(tp_fp_tn_sum)
 
-        fig = None
+        # precision
+        p = 0
+        if (stats["TP"] + stats["FP"]) > 0:
+            p = stats["TP"] / (stats["TP"] + stats["FP"])
+
+        # recall
+        r = 0
+        if (stats["TP"] + stats["FN"]) > 0:
+            r = stats["TP"] / (stats["TP"] + stats["FN"])
+
+        stats["precision"] = p
+        stats["recall"] = r
+
+        stats["F1"] = 0
+        if (p + r) > 0:
+            stats["F1"] = 2 * p * r / (p + r)
+
+        return stats, tp_fp_tn
+
+    def plot(self, df_results, tp_fp_tn, save_plot: str = None):
+        fig, axs = plt.subplots(ncols=2, nrows=2, figsize=(15, 10))
+
+        axs = axs.ravel()
+
+        sns.barplot(data=tp_fp_tn, ax=axs[0], estimator=np.sum, errorbar=None)
+
+        sns.histplot(
+            data=df_results.loc[df_results["map50"] > -1, "map50"],
+            ax=axs[1],
+            stat="count",
+        )
+
+        sns.boxplot(data=df_results["pred_area"], orient="h", ax=axs[2])
+
+        sns.histplot(data=df_results["pred_score"], ax=axs[3], stat="count")
+
+        if save_plot:
+            fig.savefig(
+                save_plot,
+                dpi=300,  # Resolution
+                facecolor="white",  # Background color
+                edgecolor="none",  # Border color
+                format="png",
+            )
+        pass
+
+    def run(
+        self,
+        df_results: pd.DataFrame,
+        plot: bool = False,
+        save_plot: str = None,
+    ) -> None:
+        """Generate comprehensive performance report"""
+
+        stats, tp_fp_tn = self.get_stats(df_results)
+
         if plot:
-            fig, axs = plt.subplots(ncols=1, nrows=4, figsize=(15, 10))
-            tp_fp_tn.plot(kind="box", ax=axs[0])
-            df_results_per_img[["map50", "map75"]].plot(kind="box", ax=axs[1])
-            df_results_per_img[
-                [
-                    "pred_area",
-                ]
-            ].plot(kind="box", ax=axs[2])
+            self.plot(df_results=df_results, tp_fp_tn=tp_fp_tn, save_plot=save_plot)
 
-            # df_results_per_img[
-            #     [
-            #         "all_scores",
-            #     ]
-            # ].plot(kind="box", ax=axs[3])
-            if save_plot:
-                fig.savefig(
-                    save_plot,
-                    dpi=300,  # Resolution
-                    # bbox_inches='tight',        # Remove extra whitespace
-                    facecolor="white",  # Background color
-                    edgecolor="none",  # Border color
-                    format="png",
-                )  # File format
-
-        return stats, fig
+        return stats
 
 
 # =====================
@@ -852,6 +986,9 @@ class ModelEvaluator:
         self.sample_selector = HardSampleSelector(eval_config)
         self.reporter = ReportGenerator()
 
+        self.eval_config = eval_config
+
+    # TODO
     def run(
         self,
         engine: InferenceEngine,
@@ -862,20 +999,24 @@ class ModelEvaluator:
     ) -> None:
         """Complete evaluation workflow"""
 
+        if not load_results:
+            dataset.add_predictions(engine=engine, build=True)
+
         # Load data
-        df_metrics_per_image = self.evaluator.run(
-            engine=engine,
+        df_results, df_metrics_per_img = self.evaluator.run(
             dataset=dataset,
+            tp_method="distance",
+            tp_distance_threshold=50,
+            tp_iou_threshold=self.eval_config.tp_iou_threshold,
             pred_results_dir=pred_results_dir,
             load_results=load_results,
-            save_tag=save_tag,
         )
 
-        # Analyze results
-        df_hard_negatives = self.sample_selector.run(df_metrics_per_image)
+        # mining hard sampels
+        df_hard_negatives = self.sample_selector.run(df_results)
 
-        # Generate reports
-        self.reporter.generate_performance_report(df_metrics_per_image)
-        self.reporter.generate_hard_samples_report(df_hard_negatives)
+        # report generation
+        reporter = ReportGenerator()
+        stats, fig = reporter.run(df_results, plot=False)
 
         return df_metrics_per_image, df_hard_negatives

@@ -3,6 +3,7 @@ from datalabeling.common.evaluation import (
     HardSampleSelector,
     ReportGenerator,
     Calibrator,
+    Metrics,
 )
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
 from datalabeling.ml.interface import InferenceEngine
@@ -10,16 +11,46 @@ from datalabeling.ml.models import UltralyticsDetector, GroundingDinoDetector
 from datalabeling.common.dataset_loader import LabelingDataset
 
 from pathlib import Path
+import pandas as pd
 
 
-def run_perf_evaluator():
+def run_metrics_computation():
+    metric = Metrics(tp_iou_threshold=0.5)
+
+    df_pred = pd.DataFrame(
+        {
+            "x_min": [10, 50],
+            "x_max": [20, 60],
+            "y_min": [10, 50],
+            "y_max": [20, 60],
+        }
+    )
+
+    df_gt = pd.DataFrame(
+        {
+            "x_min": [12, 100],
+            "x_max": [22, 110],
+            "y_min": [12, 100],
+            "y_max": [22, 110],
+        }
+    )
+
+    df_pred = metric.add_distance_to_closest(df_pred=df_pred, df_gt=df_gt)
+    # print(df_match)
+
+    return df_pred
+
+
+def run_perf_evaluator(load_results=False):
     eval_config = EvaluationConfig()
-    eval_config.score_threshold = 0.25
+    eval_config.score_threshold = 0.2
     eval_config.map_threshold = 0.3
     eval_config.uncertainty_method = "entropy"
     eval_config.uncertainty_threshold = 4
     eval_config.score_col = "max_scores"
     eval_config.tp_iou_threshold = 0.5
+    eval_config.tp_method = "distance"
+    eval_config.tp_distance_threshold = 100
 
     config = PredictionConfig(
         imgsz=800,
@@ -52,24 +83,23 @@ def run_perf_evaluator():
         mlflow_model_name="labeler",
     )
 
-    perf_eval = PerformanceEvaluator()
+    perf_eval = PerformanceEvaluator(eval_config)
 
     images_dirs = [
         r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images",
     ]
 
-    load_results = False
-
     # creating dataset and adding predictions
     dataset = LabelingDataset.from_yolo(images_dirs, label_map=label_map)
+
+    print(dataset.get_stats())
 
     if not load_results:
         dataset.add_predictions(engine=engine, build=True)
 
     # run evaluator
-    df_metrics_per_img = perf_eval.run(
+    df_results, df_metrics_per_img = perf_eval.run(
         dataset=dataset,
-        tp_iou_threshold=eval_config.tp_iou_threshold,
         pred_results_dir=r"D:\workspace\data\savmap_dataset_v2\images_tmp",
         load_results=load_results,
     )
@@ -77,14 +107,14 @@ def run_perf_evaluator():
     # print("results: ", df_metrics_per_img)
 
     # mining hard sampels
-    # sample_selector = HardSampleSelector(config=eval_config)
-    # df_hard_negatives = sample_selector.run(df_metrics_per_img)
+    sample_selector = HardSampleSelector(config=eval_config)
+    df_hard_negatives = sample_selector.run(df_results)
 
     # report generation
     reporter = ReportGenerator()
-    stats, fig = reporter.run(df_metrics_per_img, plot=True)
+    stats = reporter.run(df_results, plot=True, save_plot="report.png")
 
-    return df_metrics_per_img, stats  # , df_hard_negatives
+    return df_results, df_metrics_per_img, stats, df_hard_negatives
 
 
 def calibration():
@@ -124,8 +154,10 @@ def calibration():
 
 
 if __name__ == "__main__":
-    df_metrics_per_img, stats = run_perf_evaluator()
+    df_results, df_metrics_per_img, stats, df_hard_negatives = run_perf_evaluator(True)
 
     # calibration()
+
+    # df_pred = run_metrics_computation()
 
     pass
