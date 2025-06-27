@@ -38,7 +38,7 @@ class FiftyOneVisualizer:
 
         self.persistent = persistent
 
-    def load_dataset(
+    def create_load_dataset(
         self,
     ):
         self.dataset = self._labeled_dataset.to_fiftyone(
@@ -59,15 +59,15 @@ class FiftyOneVisualizer:
             auto_launch: Whether to automatically open browser
             view_name: Optional name for a specific view of the data
         """
+        raise NotImplementedError()
+        # self.load_dataset()
 
-        self.add_images()
+        # self.logger.info(f"Dataset contains {len(self.dataset)} samples")
 
-        self.logger.info(f"Dataset contains {len(self.dataset)} samples")
+        # # Create a session
+        # session = fo.launch_app(self.dataset, port=port, auto=auto_launch)
 
-        # Create a session
-        session = fo.launch_app(self.dataset, port=port, auto=auto_launch)
-
-        session.wait()
+        # session.wait()
 
 
 # TODO debug

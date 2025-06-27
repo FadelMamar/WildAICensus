@@ -1,6 +1,10 @@
 from datalabeling.common.config import PredictionConfig
 from datalabeling.ml.interface import InferenceEngine
-from datalabeling.ml.models import UltralyticsDetector, GroundingDinoDetector
+from datalabeling.ml.models import (
+    UltralyticsDetector,
+    GroundingDinoDetector,
+    build_detector,
+)
 from datalabeling.ml.workers import ObjectDetectionSystem
 from ultralytics import YOLO
 from datalabeling.common.mlflow_utils import load_registered_model
@@ -35,23 +39,27 @@ config = PredictionConfig(
 ALIAS = "demo"  # -rt-batch8'
 NAME = "labeler"
 
+MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
+roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
+roi_cls_is_features = True
+roi_cls_label_map = {0: "gt", 1: "tn"}
+roi_keep_classes = ["gt"]
+detection_label_map = {0: "wildlife"}
+feature_extractor_path = "facebook/dinov2-with-registers-small"
+
 
 def run_inference_engine(image_paths: list[str]):
-    detection_model = UltralyticsDetector(
-        model_path="D:/datalabeling/base_models_weights/best.pt", config=config
-    )
-
     engine, _ = InferenceEngine.load_engine(
         pred_config=config,
-        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
-        roi_cls_is_features=True,
-        roi_cls_label_map={0: "gt", 1: "tn"},
-        roi_keep_classes=["gt"],
-        detection_label_map={0: "wildlife"},
-        feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=detection_model,
-        mlflow_model_alias="demo",
-        mlflow_model_name="labeler",
+        roi_classifier_path=roi_classifier_path,
+        roi_cls_is_features=roi_cls_is_features,
+        roi_cls_label_map=roi_cls_label_map,
+        roi_keep_classes=roi_keep_classes,
+        detection_label_map=detection_label_map,
+        feature_extractor_path=feature_extractor_path,
+        model_path=MODEL_PATH,
+        mlflow_model_alias=ALIAS,
+        mlflow_model_name=NAME,
     )
 
     detections = engine.inference(images_paths=image_paths, return_as_df=True)
@@ -72,15 +80,15 @@ def run_inference_on_dataset(
 
     engine, _ = InferenceEngine.load_engine(
         pred_config=config,
-        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
-        roi_cls_is_features=True,
-        roi_cls_label_map={0: "gt", 1: "tn"},
-        roi_keep_classes=["gt"],
-        detection_label_map={0: "wildlife"},
-        feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=YOLO(r"D:\datalabeling\base_models_weights\best.pt"),
-        mlflow_model_alias="demo",
-        mlflow_model_name="labeler",
+        roi_classifier_path=roi_classifier_path,
+        roi_cls_is_features=roi_cls_is_features,
+        roi_cls_label_map=roi_cls_label_map,
+        roi_keep_classes=roi_keep_classes,
+        detection_label_map=detection_label_map,
+        feature_extractor_path=feature_extractor_path,
+        model_path=MODEL_PATH,
+        mlflow_model_alias=ALIAS,
+        mlflow_model_name=NAME,
     )
 
     # # Load environment variables
@@ -125,9 +133,18 @@ def run_inference_on_dataset(
 
 
 def run_model(path: str):
-    # model = UltralyticsDetector(model_path="D:/datalabeling/base_models_weights/best.pt",config=config)
+    model = build_detector(
+        detection_model_type="ultralytics",
+        model_path=MODEL_PATH,
+        model=None,
+        config=config,
+    )
 
-    model = GroundingDinoDetector(config=config)
+    # model = build_detector(detection_model_type="hf-groundingdino",
+    #                                  model_path="IDEA-Research/grounding-dino-tiny",
+    #                                  model=None,
+    #                                  config=config,
+    #                                  )
 
     image = Image.open(path)
 
@@ -150,34 +167,22 @@ def run_detector(
     )
     # detector.set_processor(roi_processor=processor)
 
-    model = UltralyticsDetector(
-        model_path="D:/datalabeling/base_models_weights/best.pt", config=config
+    model = build_detector(
+        detection_model_type="ultralytics",
+        model_path=MODEL_PATH,
+        model=None,
+        config=config,
     )
 
-    # model = GroundingDinoDetector(config=config)
+    # model = build_detector(detection_model_type="hf-groundingdino",
+    #                                  model_path="IDEA-Research/grounding-dino-tiny",
+    #                                  model=None,
+    #                                  config=config,
+    #                                  )
 
     detector.set_model(model=model)
 
     results = detector.run(images_paths=image_paths)
-
-    # results_url = None
-    # results_url = Detector.predict_url(
-    #     image_path=tile.image_path,
-    #     inference_service_url="http://localhost:4141/predict",
-    # )
-
-    # print(tile.predictions)
-    # print(results[0])
-    # print(results_url[0][0])
-
-    print("Inference time improved: ", perf_counter() - t1_start)
-
-    # t1_start = perf_counter()
-    # results = detector.legacy_predict(tile=None,image_path=tile.image_path)
-    # perf2 = perf_counter() - t1_start
-    # print("Inference time SAHI: ", perf_counter() - t1_start)
-
-    # print("speed up:", perf2/perf1)
 
     return results
 
@@ -190,15 +195,15 @@ def run_annotator(
 ):
     annotator, _ = InferenceEngine.load_engine(
         pred_config=config,
-        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
-        roi_cls_is_features=True,
-        roi_cls_label_map={0: "gt", 1: "tn"},
-        roi_keep_classes=["gt"],
-        detection_label_map={0: "wildlife"},
-        feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=None,
-        mlflow_model_alias="demo",
-        mlflow_model_name="labeler",
+        roi_classifier_path=roi_classifier_path if add_processor else None,
+        roi_cls_is_features=roi_cls_is_features,
+        roi_cls_label_map=roi_cls_label_map,
+        roi_keep_classes=roi_keep_classes,
+        detection_label_map=detection_label_map,
+        feature_extractor_path=feature_extractor_path,
+        model_path=MODEL_PATH,
+        mlflow_model_alias=ALIAS,
+        mlflow_model_name=NAME,
         set_ls_client=True,
         dot_env_path=dotenv_path,
     )

@@ -208,17 +208,17 @@ def load_yolo_label(
     # add features
     with Image.open(image_path) as img:
         width, height = img.size
-        df["width"] = [width] * num_lines
-        df["height"] = [height] * num_lines
+        df["image_width"] = [width] * num_lines
+        df["image_height"] = [height] * num_lines
         df["file_name"] = [str(image_path)] * num_lines
 
     # unnormalize values
     for i in range(1, 5):
         df[f"x{i}"] = np.clip(
-            df[f"x{i}"] * df["width"][0], a_min=0, a_max=df["width"][0]
+            df[f"x{i}"] * df["image_width"][0], a_min=0, a_max=df["image_width"][0]
         )
         df[f"y{i}"] = np.clip(
-            df[f"y{i}"] * df["height"][0], a_min=0, a_max=df["height"][0]
+            df[f"y{i}"] * df["image_height"][0], a_min=0, a_max=df["image_height"][0]
         )
 
     df["x_min"] = df["x1"]

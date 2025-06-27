@@ -377,8 +377,8 @@ class ImageClassifier(L.LightningModule):
 
 
 class Detector(ABC):
-    def __init__(self, config: PredictionConfig = None):
-        self.config: PredictionConfig = config
+    def __init__(self, config: PredictionConfig):
+        self.config = config
 
     def warmup(self, image_size=(640, 640), **kwargs):
         try:
@@ -388,19 +388,23 @@ class Detector(ABC):
                 "Failed to warmup the model, please check the model and image size."
             )
 
-    def set_prediction_config(self, config: PredictionConfig):
-        assert isinstance(config, PredictionConfig), (
-            "config must be an instance of PredictionConfig"
-        )
-        self.config = config
+    # def set_prediction_config(self, config: PredictionConfig):
+    #     assert isinstance(config, PredictionConfig), (
+    #         "config must be an instance of PredictionConfig"
+    #     )
+    #     self.config = config
 
-    def load_image_and_resize(self, image: Image.Image | torch.Tensor) -> torch.Tensor:
+    def load_image_and_resize(
+        self, image: Image.Image | torch.Tensor, target_size: int = 640
+    ) -> torch.Tensor:
         assert isinstance(image, Image.Image) or isinstance(image, torch.Tensor), (
             f"Received unexpected type:{type(image)}"
         )
-
+        assert isinstance(target_size, int), (
+            f"received {target_size} of type {type(target_size)}"
+        )
         transform = T.Resize(
-            (self.config.tilesize, self.config.tilesize),
+            (target_size, target_size),
             interpolation=T.InterpolationMode.NEAREST,
         )
 
@@ -456,10 +460,13 @@ class Detector(ABC):
         """
         raise NotImplementedError("This method should be implemented by subclasses.")
 
+    @staticmethod
     def predict_url(
-        self,
         image: torch.Tensor,
+        inference_service_url: str,
         timeout: int = 360,
+        nms_iou: float = 0.5,
+        confidence_threshold: float = 0.25,
     ) -> list[dict]:
         assert isinstance(image, torch.Tensor), "Image must be a torch.Tensor"
         assert len(image.shape) == 4, "Image tensor must be B,C,H,W"
@@ -468,12 +475,12 @@ class Detector(ABC):
         payload = {
             "tensor": base64.b64encode(as_bytes).decode("utf-8"),
             "shape": list(image.shape),
-            "iou_nms": self.config.nms_iou,
-            "conf": self.config.confidence_threshold,
+            "iou_nms": nms_iou,
+            "conf": confidence_threshold,
         }
 
         res = requests.post(
-            url=self.config.inference_service_url, json=payload, timeout=timeout
+            url=inference_service_url, json=payload, timeout=timeout
         ).json()
 
         res = res.get("detections", "FAILED")
@@ -485,8 +492,35 @@ class Detector(ABC):
         return res
 
 
+def build_detector(
+    detection_model_type: str,
+    model_path: str,
+    config: PredictionConfig,
+    model=None,
+    text_instruction: str = "detect wildlife species",
+) -> Detector:
+    if detection_model_type == "ultralytics":
+        return UltralyticsDetector(
+            model_path=model_path, config=config, task="detect", model=model
+        )
+
+    elif detection_model_type == "hf-groundingdino":
+        return GroundingDinoDetector(
+            model_path=model_path, config=config, instruction=text_instruction
+        )
+
+    else:
+        raise NotImplementedError()
+
+
 class UltralyticsDetector(Detector):
-    def __init__(self, model_path: str, config: PredictionConfig, task: str = "detect"):
+    def __init__(
+        self,
+        model_path: str,
+        config: PredictionConfig,
+        task: str = "detect",
+        model: YOLO = None,
+    ):
         """
         Initializes the UltralyticsDetector with a YOLO model.
 
@@ -494,19 +528,26 @@ class UltralyticsDetector(Detector):
             model_path (str): Path to the YOLO model file.
             device (str): Device to run the model on (e.g., 'cpu', 'cuda').
         """
+
         super().__init__(config=config)
-        self.model = YOLO(
-            model_path, task=task
-        ).eval()  # Load the model in evaluation mode
-        self.device = config.device
+
+        assert sum([model_path is None, model is None]) == 1, (
+            "Provide either 'model_path' or 'model'"
+        )
+        if model_path:
+            self.model = YOLO(model_path, task=task)
+        else:
+            self.model = model
+
+        self.model = self.model.eval()
 
     def preprocess(
-        self, image: Image.Image | torch.Tensor, target_size: list[int] = 640
+        self, image: Image.Image | torch.Tensor, target_size: int = 640
     ) -> Image.Image:
         """
         Preprocesses the input image for prediction.
         """
-        return self.load_image_and_resize(image)
+        return self.load_image_and_resize(image, target_size=target_size)
 
     def postprocess(self, detections: list[UltralyticsResults]) -> list[Detection]:
         """
@@ -573,7 +614,7 @@ class UltralyticsDetector(Detector):
 
         results = self.model.predict(
             image,
-            device=self.device,
+            device=self.config.device,
             imgsz=self.config.imgsz,
             conf=self.config.confidence_threshold,
             verbose=self.config.verbose,
@@ -589,24 +630,26 @@ class GroundingDinoDetector(Detector):
         config: PredictionConfig,
         model_path: str = "IDEA-Research/grounding-dino-tiny",
         instruction: str = "detect wildlife species",
+        model=None,
     ):
         """
         Initializes the GroundingDinoDetector with a YOLO model.
         """
-
         super().__init__(config=config)
 
-        self.device = config.device
+        if model_path is None:
+            raise NotImplementedError
+        else:
+            self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_path)
+
         self.transform = AutoProcessor.from_pretrained(model_path, use_fast=True)
-        self.model = (
-            AutoModelForZeroShotObjectDetection.from_pretrained(model_path)
-            .eval()
-            .to(self.device)
-        )
+        self.model = self.model.eval().to(self.config.device)
 
         self.instruction = instruction
 
-    def preprocess(self, image: Image.Image | torch.Tensor, text: str) -> Image.Image:
+    def preprocess(
+        self, image: Image.Image | torch.Tensor, text: str, target_size: int = 640
+    ) -> Image.Image:
         """
         Preprocesses the input image for prediction.
         """
@@ -615,7 +658,7 @@ class GroundingDinoDetector(Detector):
         )
         assert isinstance(text, str), f"Received type {type(image)}"
 
-        image = self.load_image_and_resize(image)
+        image = self.load_image_and_resize(image, target_size=target_size)
         text = [[text]] * image.shape[0]
 
         return self.transform(
@@ -676,10 +719,10 @@ class GroundingDinoDetector(Detector):
         text_threshold: float = 0.25,
     ) -> list[Detection]:
         text = text or self.instruction
-        inputs = self.preprocess(image, text)
+        inputs = self.preprocess(image, text, target_size=self.config.imgsz)
         results = self.model(**inputs)
         batchsize = inputs["pixel_values"].shape[0]
-        target_sizes = [(self.config.tilesize, self.config.tilesize)] * batchsize
+        target_sizes = [(self.config.imgsz, self.config.imgsz)] * batchsize
         return self.postprocess(
             detections=results,
             ids=inputs.input_ids,

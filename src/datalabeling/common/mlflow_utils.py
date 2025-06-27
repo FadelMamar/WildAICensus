@@ -30,6 +30,8 @@ def load_registered_model(
             except:
                 model = model.unwrap_python_model().classifier
 
+    metadata["detection_model_type"] = "ultralytics"
+
     return model, metadata
 
 

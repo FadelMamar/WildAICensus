@@ -913,7 +913,7 @@ class LabelingDataset:
             }
             coco_dataset["images"].append(image_dict)
 
-            df_detections = df.dropna()
+            df_detections = df.dropna(how="any")
             # Loop through the annotations and add them to the COCO dataset
             for i in range(len(df_detections)):
                 x_min, y_min, x_max, y_max = df_detections[
@@ -941,7 +941,7 @@ class LabelingDataset:
     def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
         try:
             # Try to load existing dataset
-            dataset = fo.load_dataset(dataset_name)
+            dataset = fo.load_dataset(dataset_name, create_if_necessary=False)
             logger.info(f"Loaded existing dataset: {dataset_name}")
         except ValueError:
             # Create new dataset if it doesn't exist
@@ -950,8 +950,10 @@ class LabelingDataset:
 
         samples = []
 
+        data = self.data.dropna(how="any", subset=["x_min", "x_max", "y_min", "y_max"])
+
         for img_path, df_detections in tqdm(
-            self.data.groupby("file_name"), desc="Creating-fifytone-dataset"
+            data.groupby("file_name"), desc="Creating-fifytone-dataset"
         ):
             if not os.path.exists(img_path):
                 logger.warning(f"Warning: Image not found at {img_path}.Skipping")
@@ -959,41 +961,52 @@ class LabelingDataset:
 
             sample = fo.Sample(filepath=img_path)
 
-            if df_detections.dropna().empty:
+            if df_detections.dropna(how="all").empty:
                 logger.info(f"Image at {img_path} is a negative sample")
-                sample["is_positive"] = False
+                # sample["is_positive"] = False
                 samples.append(sample)
                 continue
 
-            # conf = bboxes['scores']
-            class_name = df_detections["class"].tolist()
+            class_name = df_detections["class_name"].tolist()
 
             # get bbox [x, y, w, h] in normalized coords [0,1]
             bboxes = df_detections[["x_min", "y_min"]].copy()
-            bboxes.loc[:, "x_min"] /= df_detections.loc[:, "width"]
-            bboxes.loc[:, "y_min"] /= df_detections.loc[:, "height"]
+            bboxes.loc[:, "x_min"] /= df_detections.loc[:, "image_width"]
+            bboxes.loc[:, "y_min"] /= df_detections.loc[:, "image_height"]
             bboxes["w"] = 0.0
             bboxes["h"] = 0.0
             bboxes.loc[:, "w"] = (
                 df_detections.loc[:, "x_max"] - df_detections.loc[:, "x_min"]
-            ) / df_detections.loc[:, "width"]
+            ) / df_detections.loc[:, "image_width"]
             bboxes.loc[:, "h"] = (
                 df_detections.loc[:, "y_max"] - df_detections.loc[:, "y_min"]
-            ) / df_detections.loc[:, "height"]
+            ) / df_detections.loc[:, "image_height"]
             bboxes = bboxes[["x_min", "y_min", "w", "h"]].to_numpy().tolist()
 
-            # Convert detections to FiftyOne format
-            fo_detections = []
-            for i, box in enumerate(bboxes):
-                fo_detection = fo.Detection(
-                    label=class_name[i],
-                    bounding_box=box,
-                    # confidence=det.get('confidence', None)
-                )
-                fo_detections.append(fo_detection)
+            scores = [np.nan] * len(df_detections)
+            if "score" in df_detections.columns:
+                scores = df_detections["score"].to_list()
 
-            sample["gt"] = fo.Detections(detections=fo_detections)
-            sample["is_positive"] = True
+            # add groundtruth
+            gt_fo_detections = []
+            pred_fo_detections = []
+            for i, box in enumerate(bboxes):
+                score = scores[i]
+                if not np.isnan(score):
+                    fo_detection = fo.Detection(
+                        label=class_name[i], bounding_box=box, confidence=score
+                    )
+                    pred_fo_detections.append(fo_detection)
+                else:
+                    fo_detection = fo.Detection(
+                        label=class_name[i],
+                        bounding_box=box,
+                    )
+                    gt_fo_detections.append(fo_detection)
+
+            sample["ground_truth"] = fo.Detections(detections=gt_fo_detections)
+            sample["predictions"] = fo.Detections(detections=pred_fo_detections)
+
             samples.append(sample)
 
         dataset.add_samples(samples)
@@ -1588,8 +1601,8 @@ class ClassificationDatasetBuilder:
             load_results=self.config.load_results,
         )
 
-        if df_metrics.empty:
-            return None
+        # if df_metrics.empty:
+        #     return None
 
         mask_fp = df_metrics["pred_FP"] == True
         for file_name, df_det in tqdm(

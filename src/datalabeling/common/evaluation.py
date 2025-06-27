@@ -19,12 +19,18 @@ import matplotlib.pyplot as plt
 from scipy.spatial import distance_matrix
 from scipy.optimize import linear_sum_assignment
 from functools import lru_cache
+import subprocess
+import joblib
+import tempfile
+import sys
 
 
 from ..ml.interface import InferenceEngine
-from ..ml.models import Detector
+from ..ml.models import Detector, build_detector
 from .config import EvaluationConfig, PredictionConfig
 from .dataset_loader import LabelingDataset
+from .visualizer import FiftyOneVisualizer
+
 
 logger = logging.getLogger("Evaluation")
 
@@ -80,7 +86,7 @@ class Metrics:
         data["y_center"] = (data["y_min"] + data["y_max"]) / 2
 
         # partition rows
-        mask_pred = data["is_annot"] == False  # * (data['score']>=self.score_threshold)
+        mask_pred = data["is_annot"] == False * (data["score"] >= self.score_threshold)
         df_pred = (
             data.loc[mask_pred, :]
             .dropna(
@@ -180,6 +186,7 @@ class Metrics:
             df_pred[["x_center", "y_center"]].values,
             df_gt[["x_center", "y_center"]].values,
         )
+        distances = distances.astype(float)
 
         # Initialize arrays
         df_pred["dist_closest_gt"] = np.inf  # distances.min(1)
@@ -430,7 +437,7 @@ class PerformanceEvaluator:
         pred_results_dir: str,
         load_results: bool = False,
         save_tag: str = "",
-    ) -> pd.DataFrame | None:
+    ) -> tuple[pd.DataFrame]:
         """Calculate performance metrics"""
 
         metrics = Metrics(
@@ -499,12 +506,14 @@ class Calibrator:
         batch_size: int = 8,
         inference_service_url: str | None = None,  # "http://localhost:4141/predict",
         feature_extractor_path: str | None = "facebook/dinov2-with-registers-small",
-        roi_weights: str = r"..\base_models_weights\roi_classifier.ckpt",
+        roi_classifier_path: str = r"..\base_models_weights\roi_classifier.ckpt",
         detection_label_map: dict = {0: "wildlife"},
         roi_cls_label_map: dict = {0: "gt", 1: "tn"},
         roi_keep_classes: list = ["gt"],
         roi_cls_is_features: bool = True,
-        detection_model: Detector = None,
+        detection_model_type: str = "ultralytics",
+        model_path: str = None,
+        text_instruction: str = "detect wildlife species",
         mlflow_model_alias: str = "demo",
         mlflow_model_name: str = "labeler",
     ):
@@ -518,16 +527,18 @@ class Calibrator:
         self.roi_cls_label_map = roi_cls_label_map
         self.roi_keep_classes = roi_keep_classes
         self.roi_cls_is_features = roi_cls_is_features
-        self.detection_model = detection_model
+
+        self.detection_model_type = detection_model_type
+        self.model_path = model_path
+        self.text_instruction = text_instruction
+
         self.mlflow_model_alias = mlflow_model_alias
         self.mlflow_model_name = mlflow_model_name
-        self.roi_weights = roi_weights
+        self.roi_classifier_path = roi_classifier_path
         self.feature_extractor_path = feature_extractor_path
         self.batch_size = batch_size
 
         self.count = 0
-
-        # assert not (inference_service_url is None and detection_model is None)
 
     # @lru_cache(maxsize=None)
     def _add_predictions(
@@ -560,13 +571,15 @@ class Calibrator:
 
         engine, _ = InferenceEngine.load_engine(
             pred_config=config,
-            roi_classifier_path=self.roi_weights,
+            roi_classifier_path=self.roi_classifier_path,
             roi_cls_is_features=self.roi_cls_is_features,
             roi_cls_label_map=self.roi_cls_label_map,
             roi_keep_classes=self.roi_keep_classes,
             detection_label_map=self.detection_label_map,
             feature_extractor_path=self.feature_extractor_path,
-            detection_model=self.detection_model,
+            model_path=self.model_path,
+            detection_model_type=self.detection_model_type,
+            text_instruction=self.text_instruction,
             mlflow_model_alias=self.mlflow_model_alias,
             mlflow_model_name=self.mlflow_model_name,
         )
@@ -587,7 +600,7 @@ class Calibrator:
 
         # report generation
         reporter = ReportGenerator()
-        stats = reporter.run(df_results, plot=False, save_plot=None)
+        stats = reporter.run(df_results, save_plot=None)
         # if np.isnan(stats["map50"]).all():
         #     map50 = 1.0
         # else:
@@ -796,7 +809,7 @@ class ReportGenerator:
 
         stats, tp_fp_tn = self.get_stats(df_results)
 
-        if plot:
+        if save_plot is not None:
             self.plot(df_results=df_results, tp_fp_tn=tp_fp_tn, save_plot=save_plot)
 
         return stats
@@ -988,26 +1001,30 @@ class ModelEvaluator:
 
         self.eval_config = eval_config
 
-    # TODO
     def run(
         self,
         engine: InferenceEngine,
         dataset: LabelingDataset,
-        pred_results_dir: str = None,
+        pred_results_dir: str,
         save_tag: str = "",
         load_results: bool = False,
+        fo_dataset_name: str = "demo",
+        fo_dataset_persistent: bool = True,
+        save_plot="report.png",
     ) -> None:
         """Complete evaluation workflow"""
+
+        if not os.path.exists(pred_results_dir):
+            raise FileNotFoundError
 
         if not load_results:
             dataset.add_predictions(engine=engine, build=True)
 
-        # Load data
+        logger.info(dataset.get_stats())
+
+        # run evaluator
         df_results, df_metrics_per_img = self.evaluator.run(
             dataset=dataset,
-            tp_method="distance",
-            tp_distance_threshold=50,
-            tp_iou_threshold=self.eval_config.tp_iou_threshold,
             pred_results_dir=pred_results_dir,
             load_results=load_results,
         )
@@ -1016,7 +1033,72 @@ class ModelEvaluator:
         df_hard_negatives = self.sample_selector.run(df_results)
 
         # report generation
-        reporter = ReportGenerator()
-        stats, fig = reporter.run(df_results, plot=False)
+        stats = self.reporter.run(df_results, save_plot=save_plot)
 
-        return df_metrics_per_image, df_hard_negatives
+        dataset_path = os.path.join(pred_results_dir, "dataset.joblib")
+        joblib.dump(dataset, filename=dataset_path)
+
+        # visualize
+        current_file = Path(__file__).resolve()
+        project_root = current_file.parents[3]
+        script_path = project_root / "helper-scripts/cli.bat"
+
+        if not script_path.exists():
+            raise FileNotFoundError(f"Script not found: {script_path}")
+
+        args = [
+            "visualize_dataset",
+            str(dataset_path),
+            str(fo_dataset_name),
+            str(fo_dataset_persistent),
+        ]
+        # Build command more safely
+        if sys.platform == "win32":
+            cmd = [str(script_path)] + args
+            shell = True
+        else:
+            raise NotImplementedError
+
+        logger.info(f"Running command: {' '.join(cmd)}")
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, cwd=str(project_root), check=True
+        )
+
+        try:
+            # Run with improved error handling
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                cwd=str(project_root),
+                shell=shell,
+                check=True,
+                env=os.environ.copy(),  # Preserve environment variables
+            )
+
+            # Log success
+            logger.info("Command completed successfully")
+            if result.stdout:
+                logger.debug(f"STDOUT: {result.stdout}")
+            if result.stderr:
+                logger.debug(f"STDERR: {result.stderr}")
+
+            return result
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"Command failed with return code {e.returncode}")
+            logger.error(f"STDOUT: {e.stdout}")
+            logger.error(f"STDERR: {e.stderr}")
+            logger.error(f"Command: {' '.join(e.cmd)}")
+            raise
+
+        except FileNotFoundError as e:
+            logger.error(f"Command not found: {e}")
+            logger.error("Make sure 'uv' is installed and in PATH")
+            raise
+
+        except Exception as e:
+            logger.error(f"Unexpected error running command: {e}")
+            raise
+
+        return df_results, df_metrics_per_img, stats, df_hard_negatives

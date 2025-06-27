@@ -445,8 +445,11 @@ class DetectionThread(threading.Thread):
             batch, out_shape=(self.config.batch_size, *batch.shape[1:])
         )
         if self.config.inference_service_url:
-            res = self.model.predict_url(
+            res = Detector.predict_url(
                 image=batch,
+                inference_service_url=self.config.inference_service_url,
+                nms_iou=self.config.nms_iou,
+                confidence_threshold=self.config.confidence_threshold,
             )
 
         else:

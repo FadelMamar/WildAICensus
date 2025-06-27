@@ -15,7 +15,7 @@ from label_studio_sdk.client import LabelStudio
 from PIL import Image
 
 from .workers import ObjectDetectionSystem, GPSUtils
-from .models import ImageClassifier, YOLO
+from .models import ImageClassifier, YOLO, Detector, build_detector
 from ..common.processor import DetectionsPostprocessor, get_processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
@@ -95,6 +95,9 @@ class InferenceEngine(object):
         logger.info(f"Running inference on {len(paths)} images.")
 
         detections = self.detector.run(images_paths=paths)
+
+        if len(detections) != len(paths):
+            raise Exception()
 
         if tiles is not None:
             for i, tile in enumerate(tiles):
@@ -239,23 +242,41 @@ class InferenceEngine(object):
         roi_keep_classes: list = ["gt"],
         detection_label_map: dict = {0: "wildlife"},
         feature_extractor_path: str = "facebook/dinov2-with-registers-small",
-        detection_model: YOLO = None,
+        model_path: str = None,
+        detection_model_type: str = "ultralytics",
+        text_instruction: str = "detect wildlife species",
         mlflow_model_alias: str = "demo",
         mlflow_model_name: str = "labeler",
         set_ls_client: bool = False,
         dot_env_path: str = None,
     ) -> tuple:
-        if (detection_model is None) and (pred_config.inference_service_url is None):
+        if (model_path is None) and (pred_config.inference_service_url is None):
             logger.info(
                 f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
             )
-            detection_model, metadata = load_registered_model(
+            model, metadata = load_registered_model(
                 alias=mlflow_model_alias,
                 name=mlflow_model_name,
                 mlflow_tracking_url="http://localhost:5000",
                 load_unwrapped=True,
             )
             logger.info(f"model's metadata={metadata}")
+
+            detection_model = build_detector(
+                detection_model_type=metadata["detection_model_type"],
+                model_path=None,
+                model=model,
+                config=pred_config,
+                text_instruction=text_instruction,
+            )
+        else:
+            detection_model = build_detector(
+                detection_model_type=detection_model_type,
+                model_path=model_path,
+                model=None,
+                config=pred_config,
+                text_instruction=text_instruction,
+            )
 
         # build roi postprocessor
         feature_extractor = get_processor("feature_extractor")(
