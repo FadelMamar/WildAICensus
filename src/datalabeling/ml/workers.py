@@ -691,6 +691,7 @@ class PostProcessingThread(threading.Thread):
                 break
 
 
+# TODO
 class DetectionUploader(threading.Thread):
     """
     Thread responsible for uploading processed detections to the database.
@@ -817,7 +818,7 @@ class ObjectDetectionSystem:
         self.data_thread: DataLoadingThread = None
         self.detection_thread: DetectionThread = None
         self.postprocess_thread: PostProcessingThread = None
-        self.detection_uploader: DetectionUploader = None
+        # self.detection_uploader: DetectionUploader = None
         self.label_map = detection_label_map
         self.config = config
         self._detection_model = None
@@ -861,7 +862,7 @@ class ObjectDetectionSystem:
         self.data_thread.start()
         self.detection_thread.start()
         self.postprocess_thread.start()
-        self.detection_uploader.start()
+        # self.detection_uploader.start()
 
         self.logger.info("All threads started")
 
@@ -878,7 +879,7 @@ class ObjectDetectionSystem:
         self.data_thread.join()
         self.detection_thread.join()
         self.postprocess_thread.join()
-        self.detection_uploader.join()
+        # self.detection_uploader.join()
 
         self.logger.info("All threads stopped")
         return None

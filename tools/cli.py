@@ -24,8 +24,10 @@ from datalabeling.common.config import TrainingConfig
 from datalabeling.ml.train import TrainingManager
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
 from datalabeling.common.io import load_yaml
+from datalabeling.common.evaluation import ModelEvaluator
 from datalabeling.common.dataset_loader import (
     ClassificationDatasetBuilder,
+    LabelingDataset,
 )
 
 
@@ -464,6 +466,69 @@ def visualize_dataset(
     visualizer.create_load_dataset()
 
     logger.info("Fiftyone dataset '{fo_dataset_name}' created.")
+
+
+# TODO
+def validation():
+    eval_config = EvaluationConfig()
+    eval_config.score_threshold = 0.2
+    eval_config.map_threshold = 0.3
+    eval_config.uncertainty_method = "entropy"
+    eval_config.uncertainty_threshold = 4
+    eval_config.score_col = "max_scores"
+    eval_config.tp_iou_threshold = 0.5
+    eval_config.tp_method = "distance"
+    eval_config.tp_distance_threshold = 100
+
+    pipe = ModelEvaluator(eval_config=eval_config)
+
+    config = PredictionConfig(
+        imgsz=800,
+        tilesize=800,
+        overlap_ratio=0.2,
+        confidence_threshold=0.2,
+        inference_service_url=None,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=98,
+        # device="cuda:0",
+    )
+
+    label_map = {0: "wildlife"}
+
+    engine, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=None,  # r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map={0: "gt", 1: "tn"},
+        roi_keep_classes=["gt"],
+        detection_label_map=label_map,
+        feature_extractor_path="facebook/dinov2-with-registers-small",
+        model_path=r"D:/datalabeling/base_models_weights/best.pt",
+        detection_model_type="ultralytics",
+        mlflow_model_alias="demo",
+        mlflow_model_name="labeler",
+    )
+
+    images_dirs = [
+        r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images",
+    ]
+
+    # creating dataset and adding predictions
+    dataset = LabelingDataset.from_yolo(images_dirs, label_map=label_map)
+
+    out = pipe.run(
+        engine=engine,
+        dataset=dataset,
+        fo_dataset_name="demo",
+        save_plot="report.png",
+        save_tag="",
+        fo_dataset_persistent=True,
+        load_results=True,
+        pred_results_dir=r"D:\workspace\data\savmap_dataset_v2\images_tmp",
+    )
+
+    return None
 
 
 if __name__ == "__main__":

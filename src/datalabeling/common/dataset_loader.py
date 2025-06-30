@@ -327,6 +327,7 @@ class LabelingDataset:
             self.build(force_rebuild=True)
         return None
 
+    # TODO: review logic
     def get_stats(
         self,
     ):
@@ -342,18 +343,42 @@ class LabelingDataset:
                 data[bbox_columns].dropna(how="any")["file_name"].nunique()
             )
             stats["pred_predicted_negative"] = (
-                len(data) - stats["pred_predicted_positive"]
+                data["file_name"].nunique() - stats["pred_predicted_positive"]
             )
 
         # gt
-        data = self.data.loc[self.data["is_annot"] == True, :]
-        stats["gt_number_labeled"] = data["is_annot"].sum()
-        stats["gt_number_unlabeled"] = len(data) - stats["gt_number_labeled"]
-        stats["gt_instance_distribution"] = data["class_name"].value_counts().to_dict()
-        stats["gt_number_positive"] = (
-            data[bbox_columns].dropna(how="any")["file_name"].nunique()
+        data_gt = self.data.loc[self.data["is_annot"] == True, :]
+        if len(data_gt) > 0:
+            stats["gt_number"] = data_gt["is_annot"].sum()
+            stats["gt_instance_distribution"] = (
+                data_gt["class_name"].value_counts().to_dict()
+            )
+            stats["gt_number_positive"] = (
+                data_gt[bbox_columns].dropna(how="any")["file_name"].nunique()
+            )
+            stats["gt_number_negative"] = len(data_gt) - stats["gt_number_positive"]
+        else:
+            stats["gt_number_negative"] = 0
+            stats["gt_number_positive"] = 0
+            stats["gt_number"] = 0
+            stats["gt_instance_distribution"] = {}
+
+        # predictions
+        data_pred = self.data.loc[self.data["is_annot"] == False, :]
+        if len(data_pred) > 0:
+            stats["pred_number"] = data_pred["is_annot"].sum()
+            stats["pred_instance_distribution"] = (
+                data_pred["class_name"].value_counts().to_dict()
+            )
+
+        else:
+            stats["pred_number"] = 0
+            stats["pred_instance_distribution"] = {}
+
+        # unlabeled
+        stats["unlabeled_number"] = sum(
+            self.data["is_annot"].apply(lambda x: x is None)
         )
-        stats["gt_number_negative"] = len(data) - stats["gt_number_positive"]
 
         return stats
 

@@ -23,59 +23,35 @@ import json
 import logging
 from datetime import datetime
 import math
+from itertools import product
 from collections import defaultdict
+from tqdm import tqdm
+import torch
+from torchmetrics.functional.detection import complete_intersection_over_union
+import copy
+import os
 
 from .base import Tile, Detection
+from .dataset_loader import LabelingDataset
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
-class AnimalType(Enum):
-    """Enumeration of detectable animal types in savanna"""
-
-    ELEPHANT = "elephant"
-    ZEBRA = "zebra"
-    GIRAFFE = "giraffe"
-    WILDEBEEST = "wildebeest"
-    LION = "lion"
-    BUFFALO = "buffalo"
-    UNKNOWN = "unknown"
-
-
-@dataclass
-class GPSCoordinate:
-    """GPS coordinate with utility methods"""
-
-    latitude: float
-    longitude: float
-    altitude: Optional[float] = None
-
-    def distance_to(self, other: "GPSCoordinate") -> float:
-        """Calculate distance in meters using Haversine formula"""
-        R = 6371000  # Earth's radius in meters
-
-        lat1, lon1 = math.radians(self.latitude), math.radians(self.longitude)
-        lat2, lon2 = math.radians(other.latitude), math.radians(other.longitude)
-
-        dlat = lat2 - lat1
-        dlon = lon2 - lon1
-
-        a = (
-            math.sin(dlat / 2) ** 2
-            + math.cos(lat1) * math.cos(lat2) * math.sin(dlon / 2) ** 2
-        )
-        c = 2 * math.asin(math.sqrt(a))
-
-        return R * c
-
-
 class OverlapStrategy(ABC):
     """Abstract strategy for detecting overlapping images"""
 
+    def __init__(
+        self,
+    ):
+        self.stats = None
+        pass
+
     @abstractmethod
-    def find_overlapping_images(self, images: List[DroneImage]) -> Dict[str, List[str]]:
+    def find_overlapping_images(
+        self, images: List[Tile], min_overlap_threshold: float = 0.0
+    ) -> Dict[str, List[str]]:
         """Find overlapping images and return mapping of image_id -> overlapping_image_ids"""
         pass
 
@@ -83,24 +59,61 @@ class OverlapStrategy(ABC):
 class GPSOverlapStrategy(OverlapStrategy):
     """GPS-based overlap detection using geographic footprints"""
 
-    def __init__(self, min_overlap_threshold: float = 0.1):
-        self.min_overlap_threshold = min_overlap_threshold
+    def __init__(
+        self,
+    ):
+        self.stats = None
+        pass
 
-    def find_overlapping_images(self, images: List[Tile]) -> Dict[str, List[str]]:
+    def _compute_iou(self, images: List[Tile]) -> np.ndarray:
+        """Compute Intersection over Union (IoU) between two bounding boxes"""
+
+        boxes = [img.geo_box for img in images]
+        boxes = torch.tensor(boxes)
+        box_ious = complete_intersection_over_union(
+            preds=boxes, target=boxes, aggregate=False
+        )
+
+        return box_ious.numpy()
+
+    def find_overlapping_images(
+        self, images: List[Tile], min_overlap_threshold: float = 0.0
+    ) -> Dict[str, List[str]]:
         overlap_map = defaultdict(list)
+        ious = self._compute_iou(images=images)
+        for i, img1 in enumerate(tqdm(images, desc="Finding overlapping images")):
+            for j, img2 in enumerate(images):
+                if i <= j:  # only consider above diagonal because it's symmetric
+                    continue
+                if ious[i, j] > min_overlap_threshold:
+                    overlap_map[str(img1.image_path)].append(str(img2.image_path))
 
-        for i, img1 in enumerate(images):
-            footprint1 = img1.geographic_footprint
+        overlap_map = dict(overlap_map)
+        self.stats = self.overlap_map_stats(overlap_map)
+        return overlap_map
 
-            for img2 in images[i + 1 :]:
-                footprint2 = img2.geographic_footprint
-                overlap_ratio = footprint1.overlap_ratio(footprint2)
-
-                if overlap_ratio >= self.min_overlap_threshold:
-                    overlap_map[img1.image_id].append(img2.image_id)
-                    overlap_map[img2.image_id].append(img1.image_id)
-
-        return dict(overlap_map)
+    def overlap_map_stats(self, overlap_map: dict) -> dict:
+        """
+        Compute statistics on the overlap_map.
+        Returns a dictionary with:
+        - num_images: number of images (keys in the map)
+        - avg_neighbors: average number of neighbors per image
+        - max_neighbors: maximum number of neighbors for any image
+        - min_neighbors: minimum number of neighbors for any image
+        - neighbor_counts: list of neighbor counts for each image
+        """
+        num_images = len(overlap_map)
+        neighbor_counts = [len(neighs) for neighs in overlap_map.values()]
+        avg_neighbors = float(np.mean(neighbor_counts)) if neighbor_counts else 0.0
+        max_neighbors = max(neighbor_counts) if neighbor_counts else 0
+        min_neighbors = min(neighbor_counts) if neighbor_counts else 0
+        return {
+            "num_images": num_images,
+            "avg_neighbors": avg_neighbors,
+            "max_neighbors": max_neighbors,
+            "min_neighbors": min_neighbors,
+            # 'neighbor_counts': neighbor_counts,
+        }
 
 
 class DuplicateRemovalStrategy(ABC):
@@ -108,102 +121,99 @@ class DuplicateRemovalStrategy(ABC):
 
     @abstractmethod
     def remove_duplicates(
-        self, detections: List[Detection], overlap_map: Dict[str, List[str]]
-    ) -> List[Detection]:
+        self,
+        tiles: List[Tile],
+        overlap_map: Dict[str, List[str]],
+        iou_threshold: float = 0.8,
+    ) -> List[Tile]:
         pass
 
 
-class ConfidenceBasedRemovalStrategy(DuplicateRemovalStrategy):
-    """Remove duplicates based on confidence scores and spatial proximity"""
+class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
+    """
+    Responsible for finding groups of duplicate predictions given a list of Tile objects with predictions.
+    Can also return unique predictions using a specified duplicate removal strategy.
+    """
 
     def __init__(
-        self, spatial_threshold: float = 0.5, temporal_threshold: float = 300
-    ):  # 5 minutes
-        self.spatial_threshold = spatial_threshold
-        self.temporal_threshold = temporal_threshold
+        self,
+    ):
+        pass
+
+    def _compute_iou(
+        self, detections_1: List[Detection], detections_2: List[Detection]
+    ) -> np.ndarray:
+        """Compute Intersection over Union (IoU) between two bounding boxes"""
+
+        boxes = [det.geo_box for det in detections_1]
+        boxes_2 = [det.geo_box for det in detections_2]
+        boxes = torch.tensor(boxes)
+        boxes_2 = torch.tensor(boxes_2)
+        box_ious = complete_intersection_over_union(
+            preds=boxes, target=boxes_2, aggregate=False
+        )
+
+        return box_ious.numpy()
+
+    def _prune_duplicates_between_tiles(
+        self, tile1: Tile, tile2: Tile, iou_threshold: float = 0.8
+    ) -> Tuple[Tile, Tile]:
+        if not tile1.predictions or not tile2.predictions:
+            return tile1, tile2
+
+        ious = self._compute_iou(tile1.predictions, tile2.predictions)  # shape [N1, N2]
+        keep1 = np.ones(len(tile1.predictions), dtype=bool)
+        keep2 = np.ones(len(tile2.predictions), dtype=bool)
+
+        # Only compare predictions of the same class
+        for i, det1 in enumerate(tile1.predictions):
+            for j, det2 in enumerate(tile2.predictions):
+                if det1.class_name != det2.class_name:
+                    ious[i, j] = -1  # Mark as invalid
+
+        idxs1, idxs2 = np.where(ious > iou_threshold)
+        for i, j in zip(idxs1, idxs2):
+            det1 = tile1.predictions[i]
+            det2 = tile2.predictions[j]
+            # Only process if both are still marked to keep
+            if not (keep1[i] and keep2[j]):
+                continue
+            if det1.distance_to_centroid > det2.distance_to_centroid:
+                keep1[i] = False
+            else:
+                keep2[j] = False
+
+        tile1.predictions = [det for i, det in enumerate(tile1.predictions) if keep1[i]]
+        tile2.predictions = [det for j, det in enumerate(tile2.predictions) if keep2[j]]
+        return tile1, tile2
 
     def remove_duplicates(
-        self, detections: List[Detection], overlap_map: Dict[str, List[str]]
-    ) -> List[Detection]:
-        # Group detections by animal type
-        grouped_detections = defaultdict(list)
-        for detection in detections:
-            grouped_detections[detection.animal_type].append(detection)
-
-        unique_detections = []
-
-        for animal_type, animal_detections in grouped_detections.items():
-            unique_detections.extend(
-                self._remove_duplicates_for_type(animal_detections, overlap_map)
-            )
-
-        return unique_detections
-
-    def _remove_duplicates_for_type(
-        self, detections: List[Detection], overlap_map: Dict[str, List[str]]
-    ) -> List[Detection]:
-        """Remove duplicates for a specific animal type"""
-        unique_detections = []
-        processed_ids = set()
-
-        # Sort by confidence (highest first)
-        sorted_detections = sorted(detections, key=lambda x: x.confidence, reverse=True)
-
-        for detection in sorted_detections:
-            if detection.detection_id in processed_ids:
-                continue
-
-            # Find potential duplicates in overlapping images
-            duplicates = self._find_potential_duplicates(
-                detection, detections, overlap_map
-            )
-
-            # Mark all duplicates as processed
-            for dup in duplicates:
-                processed_ids.add(dup.detection_id)
-
-            # Keep the highest confidence detection
-            best_detection = max(duplicates, key=lambda x: x.confidence)
-            unique_detections.append(best_detection)
-            processed_ids.add(detection.detection_id)
-
-        return unique_detections
-
-    def _find_potential_duplicates(
         self,
-        detection: Detection,
-        all_detections: List[Detection],
+        tiles: List[Tile],
         overlap_map: Dict[str, List[str]],
-    ) -> List[Detection]:
-        """Find potential duplicate detections"""
-        duplicates = [detection]
+        iou_threshold: float = 0.8,
+    ) -> List[Tile]:
+        """
+        For every image (Tile), consider its neighbors' predictions (from overlap_map).
+        For each prediction in the image, check all predictions in neighbor images.
+        If class matches and IoU > threshold, save the pair (detection, neighbor_detection) in a list.
+        Returns the list of such pairs.
+        """
+        image_path_to_tile = {str(tile.image_path): tile for tile in tiles}
 
-        # Get images that overlap with the detection's image
-        overlapping_images = overlap_map.get(detection.image_id, [])
+        for image_path in tqdm(
+            overlap_map.keys(), desc="Removing duplicates in Overlapping regions"
+        ):
+            tile = image_path_to_tile[image_path]
+            for neighbor in overlap_map[image_path]:
+                tile2 = image_path_to_tile[str(neighbor)]
+                tile1, tile2 = self._prune_duplicates_between_tiles(
+                    tile, tile2, iou_threshold
+                )
+                image_path_to_tile[str(tile1.image_path)] = tile1
+                image_path_to_tile[str(tile2.image_path)] = tile2
 
-        for other_detection in all_detections:
-            if (
-                other_detection.detection_id != detection.detection_id
-                and other_detection.animal_type == detection.animal_type
-                and other_detection.image_id in overlapping_images
-            ):
-                # Check spatial proximity and temporal similarity
-                if self._are_likely_same_object(detection, other_detection):
-                    duplicates.append(other_detection)
-
-        return duplicates
-
-    def _are_likely_same_object(self, det1: Detection, det2: Detection) -> bool:
-        """Determine if two detections are likely the same object"""
-        # For now, we use bounding box IoU as a proxy for spatial proximity
-        # In a real implementation, you'd project bounding boxes to geographic coordinates
-        spatial_similarity = det1.bounding_box.iou(det2.bounding_box)
-
-        # Check temporal proximity
-        time_diff = abs((det1.timestamp - det2.timestamp).total_seconds())
-        temporal_similarity = time_diff <= self.temporal_threshold
-
-        return spatial_similarity >= self.spatial_threshold and temporal_similarity
+        return list(image_path_to_tile.values())
 
 
 class WildlifeCensusSystem:
@@ -217,66 +227,44 @@ class WildlifeCensusSystem:
         self.overlap_strategy = overlap_strategy
         self.duplicate_removal_strategy = duplicate_removal_strategy
         self.images: List[Tile] = []
-        self.all_detections: List[Detection] = []
-        self.unique_detections: List[Detection] = []
         self.overlap_map: Dict[str, List[str]] = {}
 
-    def add_image(self, image: Tile):
-        """Add a drone image to the system"""
-        self.images.append(image)
-        self.all_detections.extend(image.detections)
-        logger.info(
-            f"Added image {image.image_id} with {len(image.detections)} detections"
-        )
+        self.stats = dict()
 
-    def process_overlaps(self):
+    def set_dataset(self, dataset: LabelingDataset):
+        self.dataset = dataset
+        self.stats["dataset_raw_stats"] = self.dataset.get_stats()
+
+    def run(
+        self, image_overlap_threshold: float = 0.0, detection_iou_threshold: float = 0.8
+    ):
         """Process image overlaps and remove duplicate detections"""
-        logger.info("Processing image overlaps...")
-        self.overlap_map = self.overlap_strategy.find_overlapping_images(self.images)
 
-        total_overlaps = (
-            sum(len(overlaps) for overlaps in self.overlap_map.values()) // 2
+        logger.info("Finding overlapping images...")
+        images = copy.deepcopy(self.dataset.tiles)
+        self.overlap_map = self.overlap_strategy.find_overlapping_images(
+            images, min_overlap_threshold=image_overlap_threshold
         )
-        logger.info(f"Found {total_overlaps} overlapping image pairs")
+        self.stats["overlap_stats"] = self.overlap_strategy.stats
+
+        # detections to utm coords & geographic footprint
+        for tile in self.dataset.tiles:
+            tile.update_detection_gps()
 
         logger.info("Removing duplicate detections...")
-        self.unique_detections = self.duplicate_removal_strategy.remove_duplicates(
-            self.all_detections, self.overlap_map
+        tiles = self.duplicate_removal_strategy.remove_duplicates(
+            self.dataset.tiles, self.overlap_map, iou_threshold=detection_iou_threshold
         )
 
-        logger.info(
-            f"Reduced {len(self.all_detections)} detections to "
-            f"{len(self.unique_detections)} unique detections"
-        )
+        # updating dataset with removed duplicates
+        self.dataset.tiles = tiles
+        self.dataset.build(force_rebuild=True)
+        # self.stats["dataset_pruned_stats"] = self.dataset.get_stats()
 
-    def get_animal_counts(self) -> Dict[AnimalType, int]:
-        """Get counts of each animal type"""
-        counts = defaultdict(int)
-        for detection in self.unique_detections:
-            counts[detection.animal_type] += 1
-        return dict(counts)
-
+    @property
     def get_statistics(self) -> Dict[str, any]:
         """Get comprehensive statistics about the detection process"""
-        return {
-            "total_images": len(self.images),
-            "total_raw_detections": len(self.all_detections),
-            "total_unique_detections": len(self.unique_detections),
-            "overlap_pairs": sum(
-                len(overlaps) for overlaps in self.overlap_map.values()
-            )
-            // 2,
-            "duplicate_removal_rate": 1
-            - (len(self.unique_detections) / len(self.all_detections))
-            if self.all_detections
-            else 0,
-            "animal_counts": self.get_animal_counts(),
-            "average_confidence": np.mean(
-                [d.confidence for d in self.unique_detections]
-            )
-            if self.unique_detections
-            else 0,
-        }
+        return self.stats
 
     def export_results(self, filepath: str):
         """Export results to JSON file"""
@@ -291,23 +279,11 @@ class WildlifeCensusSystem:
                 },
             },
             "statistics": self.get_statistics(),
-            "detections": [
-                {
-                    "detection_id": d.detection_id,
-                    "animal_type": d.animal_type.value,
-                    "confidence": d.confidence,
-                    "image_id": d.image_id,
-                    "timestamp": d.timestamp.isoformat(),
-                    "bounding_box": {
-                        "x1": d.bounding_box.x1,
-                        "y1": d.bounding_box.y1,
-                        "x2": d.bounding_box.x2,
-                        "y2": d.bounding_box.y2,
-                    },
-                }
-                for d in self.unique_detections
-            ],
+            "detections": self.dataset.data.to_dict(orient="list"),
         }
+
+        if not os.path.exists(os.path.dirname(filepath)):
+            os.makedirs(os.path.dirname(filepath))
 
         with open(filepath, "w") as f:
             json.dump(results, f, indent=2)

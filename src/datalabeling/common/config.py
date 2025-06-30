@@ -6,6 +6,8 @@ import logging
 
 logger = logging.getLogger("Config")
 
+SENSOR_HEIGHTS = dict(ZenmuseP1=24)
+
 
 @dataclass
 class TilingConfig:

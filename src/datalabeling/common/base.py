@@ -1,54 +1,44 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence, Tuple
 import math
 import geopy
+from jinja2.nodes import If
 import torch
 from torchvision.transforms import PILToTensor
 from torchvision.ops import nms
-
+from torchmetrics.functional.detection import complete_intersection_over_union
 from PIL import Image
 import pandas as pd
 import numpy as np
 import logging
+import uuid
 
 logger = logging.getLogger(__name__)
 
 from .annotation_utils import compute_detection_gps, GPSUtils, ImageProcessor
+from .config import SENSOR_HEIGHTS
+
+
+def compute_iou(bbox1: List[float], bbox2: List[float]) -> float:
+    """Compute Intersection over Union (IoU) between two bounding boxes"""
+
+    bbox1 = torch.tensor([bbox1])
+    bbox2 = torch.tensor([bbox2])
+
+    iou = complete_intersection_over_union(
+        preds=bbox1, target=bbox2, aggregate=False
+    ).numpy()
+
+    return iou.ravel()[0]
 
 
 @dataclass
-class BoundingBox:
-    """2D bounding box for detected objects"""
-
-    x1: float
-    y1: float
-    x2: float
-    y2: float
-
-    @property
-    def center(self) -> Tuple[float, float]:
-        return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
-
-    @property
-    def area(self) -> float:
-        return (self.x2 - self.x1) * (self.y2 - self.y1)
-
-    def iou(self, other: "BoundingBox") -> float:
-        """Calculate Intersection over Union with another bounding box"""
-        # Calculate intersection
-        x1 = max(self.x1, other.x1)
-        y1 = max(self.y1, other.y1)
-        x2 = min(self.x2, other.x2)
-        y2 = min(self.y2, other.y2)
-
-        if x1 >= x2 or y1 >= y2:
-            return 0.0
-
-        intersection = (x2 - x1) * (y2 - y1)
-        union = self.area + other.area - intersection
-
-        return intersection / union if union > 0 else 0.0
+class FlightSpecs:
+    sensor_height: float = 24  # in mm
+    focal_length: float = 35  # in mm
+    gsd: float = None  # in cm/px
+    flight_height: float = 180  # in meters
 
 
 @dataclass
@@ -60,34 +50,25 @@ class GeographicBounds:
     east: float  # Max longitude
     west: float  # Min longitude
 
-    def intersects(self, other: "GeographicBounds") -> bool:
-        """Check if this bounds intersects with another"""
-        return not (
-            self.east < other.west
-            or self.west > other.east
-            or self.north < other.south
-            or self.south > other.north
-        )
-
-    def intersection_area(self, other: "GeographicBounds") -> float:
-        """Calculate intersection area in square degrees"""
-        if not self.intersects(other):
-            return 0.0
-
-        width = min(self.east, other.east) - max(self.west, other.west)
-        height = min(self.north, other.north) - max(self.south, other.south)
-        return width * height
-
     @property
     def area(self) -> float:
         """Calculate area in square degrees"""
         return (self.east - self.west) * (self.north - self.south)
 
+    def box(self, box_format="xyxy") -> List[float]:
+        if box_format == "xyxy":
+            return [self.west, self.south, self.east, self.north]
+        else:
+            raise ValueError("only 'xyxy' supproted.")
+
     def overlap_ratio(self, other: "GeographicBounds") -> float:
-        """Calculate overlap ratio (IoU) with another bounds"""
-        intersection = self.intersection_area(other)
-        union = self.area + other.area - intersection
-        return intersection / union if union > 0 else 0.0
+        """Calculate overlap ratio (IoU) with another bounds using torchmetrics IntersectionOverUnion"""
+
+        # Prepare boxes in [x_min, y_min, x_max, y_max] format
+        box_self = [self.west, self.south, self.east, self.north]
+        box_other = [other.west, other.south, other.east, other.north]
+
+        return compute_iou(box_self, box_other)
 
 
 @dataclass
@@ -98,10 +79,47 @@ class Detection:
     y_max: int
     label: int
     class_name: str
+    id: str = None
     score: float = None
     gps_loc: str = None
     image_gps_loc: str = None
     parent_image: str = None
+    timestamp: str = None
+    distance_to_centroid: float = None
+
+    geographic_footprint: GeographicBounds = None
+
+    def __post_init__(self):
+        if self.id is None:
+            self.id = str(uuid.uuid4())
+
+        self._get_distance_to_centroid()
+
+    def _get_distance_to_centroid(
+        self,
+    ) -> None:
+        if self.parent_image is None:
+            return None
+
+        with Image.open(self.parent_image) as image:
+            width, height = image.size
+            self.distance_to_centroid = math.sqrt(
+                (self.x - width / 2) ** 2 + (self.y - height / 2) ** 2
+            )
+
+        return None
+
+    def iou(self, other: "Detection") -> float:
+        """Compute Intersection over Union (IoU) between two bounding boxes"""
+        return compute_iou(self.bbox(box_format="xyxy"), other.bbox(box_format="xyxy"))
+
+    def geo_iou(self, other: "Detection") -> float:
+        """Compute Intersection over Union (IoU) between two bounding boxes"""
+        return self.geographic_footprint.overlap_ratio(other.geographic_footprint)
+
+    @property
+    def geo_box(self):
+        return self.geographic_footprint.box(box_format="xyxy")
 
     @classmethod
     def empty(cls, parent_image: str = None):
@@ -235,7 +253,9 @@ class Detection:
         return template
 
     def get_base_image(self) -> Image.Image:
-        assert self.parent_image is not None, "Parent image is not defined"
+        if self.parent_image is None:
+            raise ValueError("Parent image is not defined")
+
         return Image.open(self.parent_image)
 
     @property
@@ -316,6 +336,44 @@ class Detection:
 
         return lat, long, alt
 
+    def set_geographic_footprint_from_gps(
+        self, gsd: float, image_width: int, image_height: int
+    ):
+        """
+        Update the detection's geographic_footprint using its gps_loc field, similar to Tile._extract_geographic_footprint.
+        width, height: dimensions of the image
+        gsd: ground sample distance (cm/px)
+        """
+        if self.gps_loc is None:
+            logger.info("No gps coordinate found in the detection")
+            return
+
+        try:
+            latitude, longitude, altitude = self.gps_as_decimals
+        except Exception as e:
+            logger.error(f"Failed to parse gps_loc: {self.gps_loc}, error: {e}")
+            return
+
+        xs = np.array([self.x_min, self.x_max])
+        ys = np.array([self.y_min, self.y_max])
+        xs_utm, ys_utm = ImageProcessor.generate_pixel_coordinates(
+            x=xs,
+            y=ys,
+            lat_center=latitude,
+            lon_center=longitude,
+            W=image_width,
+            H=image_height,
+            gsd=gsd,
+            return_as_utm=True,
+        )
+        self.geographic_footprint = GeographicBounds(
+            north=max(ys_utm),
+            south=min(ys_utm),
+            east=max(xs_utm),
+            west=min(xs_utm),
+        )
+        return None
+
 
 @dataclass
 class Tile:
@@ -323,6 +381,8 @@ class Tile:
 
     image_path: str
     image_data: Image.Image = None
+
+    id: str = None
 
     width: int = None
     height: int = None
@@ -335,7 +395,11 @@ class Tile:
     parent_image_date: str = None
 
     tile_gps_loc: str = None
-    sensor_height: float = 24
+    latitude: float = None
+    longitude: float = None
+    altitude: float = None
+    flight_specs: FlightSpecs = field(default_factory=FlightSpecs)
+    geographic_footprint: GeographicBounds = None
 
     predictions: List[Detection] = None
     annotations: List[Detection] = None
@@ -344,6 +408,9 @@ class Tile:
     _annot_is_original: bool = False
 
     def __post_init__(self):
+        if self.id is None:
+            self.id = str(uuid.uuid4())
+
         if self.parent_image:
             try:
                 self.parent_image_date = Image.open(self.parent_image)._getexif()[36867]
@@ -363,11 +430,28 @@ class Tile:
             self.width, self.height = self.image_data.size
 
         self._extract_gps_coords()
+        exif = self._extract_exif()
 
-        # gsd = ImageProcessor.get_gsd(image_path=self.image_path,
-        #                              image=self.image_data,
-        #                              sensor_height=self.sensor_height,
-        #                              )
+        if self.flight_specs is None:
+            raise ValueError("Flight specs are not provided.")
+
+        sensor_height = self.flight_specs.sensor_height
+        if sensor_height is None:
+            sensor_height = SENSOR_HEIGHTS.get(exif["Model"])
+            if sensor_height is None:
+                raise ValueError("Sensor height not found. Please provide it.")
+
+        self.gsd = self.flight_specs.gsd
+        if self.gsd is None:
+            self.gsd = ImageProcessor.get_gsd(
+                image_path=self.image_path,
+                image=self.image_data,
+                sensor_height=sensor_height,
+                flight_height=self.flight_specs.flight_height,
+                focal_length=self.flight_specs.focal_length,
+            )
+
+        self._extract_geographic_footprint()
 
         return None
 
@@ -376,6 +460,44 @@ class Tile:
             return self.image_data
         else:
             return Image.open(self.image_path)
+
+    @property
+    def geo_box(self):
+        return self.geographic_footprint.box(box_format="xyxy")
+
+    def geo_iou(self, other: "Tile") -> float:
+        return self.geographic_footprint.overlap_ratio(other.geographic_footprint)
+
+    def _extract_exif(self):
+        exif = GPSUtils.get_exif(file_name=self.image_path, image=self.image_data)
+        return exif
+
+    def _extract_geographic_footprint(self):
+        if self.tile_gps_loc is None:
+            logger.info("No gps coordinate found in the tile")
+            return
+        xs = np.array([0, self.width])
+        ys = np.array([0, self.height])
+
+        xs_utm, ys_utm = ImageProcessor.generate_pixel_coordinates(
+            x=xs,
+            y=ys,
+            lat_center=self.latitude,
+            lon_center=self.longitude,
+            W=self.width,
+            H=self.height,
+            gsd=self.gsd,
+            return_as_utm=True,
+        )
+
+        self.geographic_footprint = GeographicBounds(
+            north=max(ys_utm),
+            south=min(ys_utm),
+            east=max(xs_utm),
+            west=min(xs_utm),
+        )
+
+        return None
 
     def _extract_gps_coords(
         self,
@@ -388,12 +510,13 @@ class Tile:
         coords = GPSUtils.get_gps_coord(
             file_name=self.image_path,
             image=image,
-            altitude=None,
-            return_as_decimal=False,
+            return_as_decimal=True,
         )
         if coords is not None:
-            gps, _ = coords
-            self.tile_gps_loc = gps
+            self.latitude, self.longitude, self.altitude = coords[0]
+            self.tile_gps_loc = str(
+                geopy.Point(self.latitude, self.longitude, self.altitude / 1e3)
+            )
 
         logger.debug("gps extraction of tile failed")
 
@@ -466,9 +589,9 @@ class Tile:
 
     def update_detection_gps(
         self,
-        sensor_height: float,
-        flight_height: float,
-        gsd: float,
+        flight_height: float = None,
+        sensor_height: float = None,
+        gsd: float = None,
     ):
         if self.tile_gps_loc is None:
             logger.info("No gps coordinate found in the tile")
@@ -494,7 +617,6 @@ class Tile:
                 continue
 
             det.image_gps_loc = self.tile_gps_loc
-
             if det.image_gps_loc is not None:
                 try:
                     det.gps_loc = compute_detection_gps(
@@ -502,14 +624,18 @@ class Tile:
                         y_center=det.y,
                         image=image,
                         image_gps_loc=det.image_gps_loc,
-                        flight_height=flight_height,
-                        sensor_height=sensor_height,
-                        gsd=gsd,
+                        flight_height=flight_height or self.flight_specs.flight_height,
+                        sensor_height=sensor_height or self.flight_specs.sensor_height,
+                        gsd=gsd or self.gsd,
                     )
                 except Exception as e:
                     # print(e)
                     logger.error(f"Failed to compute GPS location of detections. {e}")
                     det.gps_loc = None
+
+            det.set_geographic_footprint_from_gps(
+                gsd=self.gsd, image_width=self.width, image_height=self.height
+            )
 
     def detections_to_df(
         self,
@@ -662,35 +788,3 @@ class Tile:
         }
 
         return tiles, offset_info
-
-    @property
-    def geographic_footprint(
-        self,
-    ) -> GeographicBounds:
-        """Calculate geographic footprint based on GPS and camera specs"""
-        altitude = self.gps_coordinate.altitude or 100  # Default altitude in meters
-
-        # Calculate ground sample distance (GSD)
-        focal_length = self.camera_specs.get("focal_length", 24)  # mm
-        sensor_width = self.camera_specs.get("sensor_width", 23.6)  # mm
-        sensor_height = self.camera_specs.get("sensor_height", 15.6)  # mm
-
-        # Ground coverage in meters
-        ground_width = (sensor_width * altitude) / focal_length
-        ground_height = (sensor_height * altitude) / focal_length
-
-        # Convert to degrees (approximate)
-        lat_deg_per_meter = 1 / 111320  # At equator
-        lon_deg_per_meter = 1 / (
-            111320 * math.cos(math.radians(self.gps_coordinate.latitude))
-        )
-
-        lat_offset = (ground_height / 2) * lat_deg_per_meter
-        lon_offset = (ground_width / 2) * lon_deg_per_meter
-
-        return GeographicBounds(
-            north=self.gps_coordinate.latitude + lat_offset,
-            south=self.gps_coordinate.latitude - lat_offset,
-            east=self.gps_coordinate.longitude + lon_offset,
-            west=self.gps_coordinate.longitude - lon_offset,
-        )

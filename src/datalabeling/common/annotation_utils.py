@@ -29,7 +29,7 @@ from ultralytics.data.dataset import YOLOConcatDataset, YOLODataset
 from label_studio_sdk.client import LabelStudio
 
 
-from .config import DataConfig
+from .config import DataConfig, SENSOR_HEIGHTS
 from .io import save_json, load_yolo_label
 
 logger = logging.getLogger(__name__)
@@ -1038,32 +1038,45 @@ class ImageProcessor:
         image_path: str,
         image: Image.Image | None = None,
         sensor_height: float = None,
-        flight_height: int = 180,
+        flight_height: float = 180,
+        focal_length: float = 35,
     ):
-        ##-- Sensor heights
-        sensor_heights = dict(ZenmuseP1=24)
-
         ##-- Extract exif
         exif = GPSUtils.get_exif(file_name=image_path, image=image)
 
+        if focal_length is None:
+            focal_length = exif["FocalLength"]
+
         if sensor_height is None:
-            sensor_height = sensor_heights.get(exif["Model"])
+            sensor_height = SENSOR_HEIGHTS.get(exif["Model"])
             if sensor_height is None:
                 raise ValueError("Sensor height not found. Please provide it.")
+        else:
+            assert isinstance(sensor_height, float) or isinstance(sensor_height, int), (
+                f"Received {sensor_height}"
+            )
 
         ##-- Compute gsd
-        focal_length = exif["FocalLength"] * 0.1  # in cm
+        focal_length *= 0.1  # in cm
         image_height = exif["ExifImageHeight"]  # in px
-        sensor_height = sensor_height * 0.1  # in cm
-        flight_height = flight_height * 1e2  # in cm
+        sensor_height *= 0.1  # in cm
+        flight_height *= 1e2  # in cm
 
+        # in cm/px
         gsd = flight_height * sensor_height / (focal_length * image_height)
 
         return round(gsd, 3)
 
     @staticmethod
     def generate_pixel_coordinates(
-        x, y, lat_center, lon_center, W, H, gsd=0.026
+        x,
+        y,
+        lat_center,
+        lon_center,
+        W,
+        H,
+        gsd: float = 2.6,
+        return_as_utm: bool = False,
     ) -> tuple[float, float]:
         """computes (x,y) pixel gps coordinates
 
@@ -1074,7 +1087,7 @@ class ImageProcessor:
             lon_center (float): longitude of center of image
             W (int): image width
             H (int): image height
-            gsd (float, optional): _description_. Defaults to 0.026.
+            gsd (float, optional): in cm/px. Defaults to 2.6.
 
         Returns:
             tuple: latitude, longitude
@@ -1084,6 +1097,8 @@ class ImageProcessor:
             lat_center, lon_center
         )
 
+        gsd *= 1e-2  # convert to m/px
+
         # Calculate offsets
         delta_x = (x - W / 2) * gsd
         delta_y = (H / 2 - y) * gsd  # Invert y-axis
@@ -1092,10 +1107,12 @@ class ImageProcessor:
         easting = easting_center + delta_x
         northing = northing_center + delta_y
 
-        # Convert back to lat/lon
-        lat, lon = utm.to_latlon(easting, northing, zone_num, zone_let)
-
-        return lat, lon
+        if return_as_utm:
+            return easting, northing
+            # Convert back to lat/lon
+        else:
+            lat, lon = utm.to_latlon(easting, northing, zone_num, zone_let)
+            return lat, lon
 
 
 class GPSUtils:
@@ -1212,8 +1229,8 @@ def compute_detection_gps(
     y_center,
     image: Image.Image,
     image_gps_loc: str,
-    flight_height: int = 180,
-    sensor_height: int = 24,
+    flight_height: float = 180,
+    sensor_height: float = 24,
     gsd: float = None,  # cm/px
 ) -> str:
     # None
@@ -1237,8 +1254,6 @@ def compute_detection_gps(
             sensor_height=sensor_height,
             flight_height=flight_height,
         )
-
-    gsd *= 1e-2  # convert to m/px
 
     px_lat, px_long = ImageProcessor.generate_pixel_coordinates(
         x=x_center,
