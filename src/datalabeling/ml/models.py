@@ -646,8 +646,6 @@ class UltralyticsDetector(Detector):
         else:
             self.model = model
 
-        self.model = self.model.eval()
-
     def preprocess(
         self, image: Image.Image | torch.Tensor, target_size: int = 640
     ) -> Image.Image:

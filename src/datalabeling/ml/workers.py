@@ -757,7 +757,18 @@ class DetectionThread(threading.Thread):
             try:
                 # Run detection
                 t1 = time.perf_counter()
-                detection_results = self.run_detection(data)
+                try:
+                    detection_results = self.run_detection(data)
+                except ModuleNotFoundError:
+                    traceback.print_exc()
+                    self.logger.error("Module not found. Check your environment.")
+                    self.shared_buffers.put(detections="ERROR")
+                    return
+                except Exception as e:
+                    traceback.print_exc()
+                    self.logger.error(f"Error running detection: {e}")
+                    self.shared_buffers.put(detections="ERROR")
+
                 dt = (time.perf_counter() - t1) / len(data)
 
                 self.logger.info(f"Detection time: {dt:.3f}s")
