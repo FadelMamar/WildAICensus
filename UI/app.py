@@ -695,7 +695,7 @@ def get_gps_coords_from_ls(
     assert config.root is not None, "Provide path to the original images directory"
 
     dataset = LabelingDataset.from_ls(
-        labelstudio_client,
+        labelstudio_client=labelstudio_client,
         project_id=project_id,
         config=config,
         top_n=top_n,
@@ -932,7 +932,6 @@ def start_training(
     return None
 
 
-# TODO: debug
 def register_model(
     weights_path: str,
     name: str = "labeler",
@@ -949,6 +948,7 @@ def register_model(
     script_path = "tools/register_model.py"
     args = [
         "register_detector",
+        weights_path,
         name,
         export_format,
         imgsz,
@@ -963,7 +963,7 @@ def register_model(
 
     cwd = Path(__file__).parent.parent
 
-    cmd = ["uv", "run", script_path] + list(args)
+    cmd = ["python", script_path] + list(args)
 
     result = subprocess.run(cmd, capture_output=True, text=True, cwd=cwd, check=True)
 

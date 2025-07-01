@@ -1,10 +1,12 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 import math
 import geopy
 import torch
 from torchvision.transforms import PILToTensor
+from torchvision.ops import nms
+
 from PIL import Image
 import pandas as pd
 import numpy as np
@@ -12,7 +14,80 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-from .annotation_utils import compute_detection_gps, GPSUtils
+from .annotation_utils import compute_detection_gps, GPSUtils, ImageProcessor
+
+
+@dataclass
+class BoundingBox:
+    """2D bounding box for detected objects"""
+
+    x1: float
+    y1: float
+    x2: float
+    y2: float
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        return ((self.x1 + self.x2) / 2, (self.y1 + self.y2) / 2)
+
+    @property
+    def area(self) -> float:
+        return (self.x2 - self.x1) * (self.y2 - self.y1)
+
+    def iou(self, other: "BoundingBox") -> float:
+        """Calculate Intersection over Union with another bounding box"""
+        # Calculate intersection
+        x1 = max(self.x1, other.x1)
+        y1 = max(self.y1, other.y1)
+        x2 = min(self.x2, other.x2)
+        y2 = min(self.y2, other.y2)
+
+        if x1 >= x2 or y1 >= y2:
+            return 0.0
+
+        intersection = (x2 - x1) * (y2 - y1)
+        union = self.area + other.area - intersection
+
+        return intersection / union if union > 0 else 0.0
+
+
+@dataclass
+class GeographicBounds:
+    """Geographic bounding box for image footprint"""
+
+    north: float  # Max latitude
+    south: float  # Min latitude
+    east: float  # Max longitude
+    west: float  # Min longitude
+
+    def intersects(self, other: "GeographicBounds") -> bool:
+        """Check if this bounds intersects with another"""
+        return not (
+            self.east < other.west
+            or self.west > other.east
+            or self.north < other.south
+            or self.south > other.north
+        )
+
+    def intersection_area(self, other: "GeographicBounds") -> float:
+        """Calculate intersection area in square degrees"""
+        if not self.intersects(other):
+            return 0.0
+
+        width = min(self.east, other.east) - max(self.west, other.west)
+        height = min(self.north, other.north) - max(self.south, other.south)
+        return width * height
+
+    @property
+    def area(self) -> float:
+        """Calculate area in square degrees"""
+        return (self.east - self.west) * (self.north - self.south)
+
+    def overlap_ratio(self, other: "GeographicBounds") -> float:
+        """Calculate overlap ratio (IoU) with another bounds"""
+        intersection = self.intersection_area(other)
+        union = self.area + other.area - intersection
+        return intersection / union if union > 0 else 0.0
 
 
 @dataclass
@@ -178,6 +253,27 @@ class Detection:
             return math.floor(x)
         return x
 
+    def bbox(self, formating: str = "xyxy"):
+        if formating == "xyxy":
+            return [self.x_min, self.y_min, self.x_max, self.y_max]
+        else:
+            raise ValueError("only 'xyxy' supproted.")
+
+    def clamp_bbox(self, x_range: tuple, y_range: tuple):
+        for r in [x_range, y_range]:
+            assert len(r) == 2, f"r={r}"
+            assert r[1] >= r[0], f"r={r}"
+
+        clamp = lambda x, r: max(min(x, r[1]), r[0])
+
+        self.x_min = clamp(self.x_min, x_range)
+        self.y_min = clamp(self.y_min, y_range)
+
+        self.x_max = clamp(self.x_max, x_range)
+        self.y_max = clamp(self.y_max, y_range)
+
+        pass
+
     @property
     def y(
         self,
@@ -226,16 +322,23 @@ class Tile:
 
     image_path: str
     image_data: Image.Image = None
+
     width: int = None
     height: int = None
+
     x_offset: int = None
     y_offset: int = None
+
     parent_image: str = None
     date: str = None
     parent_image_date: str = None
+
     tile_gps_loc: str = None
+    sensor_height: float = 24
+
     predictions: List[Detection] = None
     annotations: List[Detection] = None
+
     _pred_is_original: bool = False
     _annot_is_original: bool = False
 
@@ -259,6 +362,11 @@ class Tile:
             self.width, self.height = self.image_data.size
 
         self._extract_gps_coords()
+
+        # gsd = ImageProcessor.get_gsd(image_path=self.image_path,
+        #                              image=self.image_data,
+        #                              sensor_height=self.sensor_height,
+        #                              )
 
         return None
 
@@ -290,6 +398,10 @@ class Tile:
 
         return None
 
+    def set_offsets(self, x_offset: int, y_offset: int):
+        self.y_offset = y_offset
+        self.x_offset = x_offset
+
     def offset_detections(
         self,
     ):
@@ -314,12 +426,44 @@ class Tile:
         else:
             logger.info("Failed...self.x_offset is None or self.y_offset is not None.")
 
+    def _nms(self, threshold: float = 0.5):
+        if len(self.predictions) < 2:
+            return self.predictions
+
+        bboxs = torch.Tensor([det.bbox() for det in self.predictions])
+        scores = torch.Tensor([det.score for det in self.predictions])
+
+        # get indices of examples to keep
+        indx = nms(boxes=bboxs, scores=scores, iou_threshold=threshold)
+
+        return [self.predictions[i] for i in indx.tolist()]
+
+    def filter_detections(
+        self, method: str = "nms", threshold: float = 0.5, clamp: bool = True
+    ):
+        assert method == "nms", "only nms is supported"
+
+        if len(self.predictions) < 1:
+            return
+
+        if clamp:
+            for det in self.predictions:
+                det.clamp_bbox(x_range=(0, self.width), y_range=(0, self.height))
+
+        self.predictions = self._nms(threshold)
+
+        return None
+
     def update_detection_gps(
         self,
         sensor_height: float,
         flight_height: float,
         gsd: float,
     ):
+        if self.tile_gps_loc is None:
+            logger.info("No gps coordinate found in the tile")
+            return
+
         assert isinstance(self.tile_gps_loc, str), (
             f"Expected self.tile_gps_loc to be 'str'. Found '{type(self.tile_gps_loc)}' "
         )
@@ -382,7 +526,7 @@ class Tile:
         df = pd.DataFrame.from_dict(out, orient="columns")
 
         if df.empty:
-            df.at[0, "image_width"] = self.width
+            df.at[0, "image_width"] = self.width  # add a row
 
         df["image_width"] = self.width
         df["image_height"] = self.height
@@ -508,3 +652,35 @@ class Tile:
         }
 
         return tiles, offset_info
+
+    @property
+    def geographic_footprint(
+        self,
+    ) -> GeographicBounds:
+        """Calculate geographic footprint based on GPS and camera specs"""
+        altitude = self.gps_coordinate.altitude or 100  # Default altitude in meters
+
+        # Calculate ground sample distance (GSD)
+        focal_length = self.camera_specs.get("focal_length", 24)  # mm
+        sensor_width = self.camera_specs.get("sensor_width", 23.6)  # mm
+        sensor_height = self.camera_specs.get("sensor_height", 15.6)  # mm
+
+        # Ground coverage in meters
+        ground_width = (sensor_width * altitude) / focal_length
+        ground_height = (sensor_height * altitude) / focal_length
+
+        # Convert to degrees (approximate)
+        lat_deg_per_meter = 1 / 111320  # At equator
+        lon_deg_per_meter = 1 / (
+            111320 * math.cos(math.radians(self.gps_coordinate.latitude))
+        )
+
+        lat_offset = (ground_height / 2) * lat_deg_per_meter
+        lon_offset = (ground_width / 2) * lon_deg_per_meter
+
+        return GeographicBounds(
+            north=self.gps_coordinate.latitude + lat_offset,
+            south=self.gps_coordinate.latitude - lat_offset,
+            east=self.gps_coordinate.longitude + lon_offset,
+            west=self.gps_coordinate.longitude - lon_offset,
+        )

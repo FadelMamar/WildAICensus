@@ -277,6 +277,8 @@ class EvaluationConfig:
     tp_iou_threshold: float = 0.4
     fp_tp_ratio_threshold: float = 0.2
     fn_tp_ratio_threshold: float = 0.2
+    tp_method: str = "iou"  # iou or distance
+    tp_distance_threshold: int = 50
     # is_yolo_obb: bool = False
     score_col: str = "max_scores"
     load_results: bool = False

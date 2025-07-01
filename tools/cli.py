@@ -28,14 +28,6 @@ from datalabeling.common.dataset_loader import (
     ClassificationDatasetBuilder,
 )
 
-# import mlflow
-# os.environ["MLFLOW_TRACKING_URI"] = "http://localhost:5000"
-# from ultralytics import settings
-# # Update a setting
-# settings.update({"mlflow": True})
-# mlflow.set_tracking_uri("file:///c:/Users/Machine Learning/Desktop/workspace-wildAI/datalabeling/runs/mlflow")
-# mlflow.set_tracking_uri("http://localhost:5000")
-
 
 logger = logging.getLogger(__name__)
 
@@ -118,9 +110,6 @@ def train(args: TrainingConfig):
     TrainingManager(
         args=args,
         herdnet_loss=None,
-        herdnet_training_backend=args.herdnet_training_backend,
-        classifier_training_backend=args.cls_training_backend,
-        model_type=args.model_type,
     ).run()
 
 
@@ -304,6 +293,177 @@ def create_yolo_dataset(
 
     pipeline = Pipeline(steps)
     pipeline.run()
+
+
+def calibrate_model(
+    yolo_images_dirs: list[str],
+    label_map={0: "wildlife"},
+    roi_cls_label_map={0: "gt", 1: "tn"},
+    tilesize=640,
+    imgsz=640,
+    cls_imgsz=98,
+    overlap_ratio=0.2,
+    roi_keep_classes=["gt"],
+    roi_cls_is_features=True,
+    feature_extractor_path="facebook/dinov2-with-registers-small",
+    roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+    model_path=r"D:/datalabeling/base_models_weights/best.pt",
+    detection_model_type="ultralytics",
+    mlflow_model_alias="demo",
+    mlflow_model_name="labeler",
+    save_dir=".tmp/calibration",
+):
+    from datalabeling.common.evaluation import Calibrator
+    from datalabeling.common.dataset_loader import LabelingDataset
+
+    # creating dataset and adding predictions
+    dataset = LabelingDataset.from_yolo(yolo_images_dirs, label_map=label_map)
+
+    Path(save_dir).mkdir(exist_ok=True, parents=True)
+
+    calibrator = Calibrator(
+        pred_results_dir=save_dir,
+        inference_service_url=None,  # "http://localhost:4141/predict",
+        feature_extractor_path=feature_extractor_path,
+        roi_classifier_path=roi_classifier_path,
+        detection_label_map=label_map,
+        roi_cls_label_map=roi_cls_label_map,
+        roi_keep_classes=roi_keep_classes,
+        roi_cls_is_features=roi_cls_is_features,
+        model_path=model_path,
+        detection_model_type=detection_model_type,
+        mlflow_model_alias=mlflow_model_alias,
+        mlflow_model_name=mlflow_model_name,
+    )
+
+    calibrator.run(
+        dataset=dataset,
+        tilesize=tilesize,
+        imgsz=imgsz,
+        cls_imgsz=cls_imgsz,
+        overlap_ratio=overlap_ratio,
+    )
+
+
+def evaluate(
+    yolo_images_dirs: list[str],
+    pred_results_dir: str = ".tmp",
+    save_plot: str = "report.png",
+    save_hn: str = "hard_negative.csv",
+    label_map={0: "wildlife"},
+    roi_cls_label_map={0: "gt", 1: "tn"},
+    tilesize=640,
+    imgsz=640,
+    cls_imgsz=98,
+    overlap_ratio=0.2,
+    confidence_threshold=0.2,
+    roi_keep_classes=["gt"],
+    roi_cls_is_features=True,
+    feature_extractor_path="facebook/dinov2-with-registers-small",
+    roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
+    model_path=r"D:/datalabeling/base_models_weights/best.pt",
+    detection_model_type="ultralytics",
+    mlflow_model_alias="demo",
+    mlflow_model_name="labeler",
+    save_dir=".tmp/calibration",
+    load_results=False,
+):
+    from datalabeling.common.evaluation import (
+        PerformanceEvaluator,
+        HardSampleSelector,
+        ReportGenerator,
+    )
+    from datalabeling.common.config import EvaluationConfig, PredictionConfig
+    from datalabeling.ml.interface import InferenceEngine
+    from datalabeling.common.dataset_loader import LabelingDataset
+
+    eval_config = EvaluationConfig()
+    eval_config.score_threshold = 0.2
+    eval_config.map_threshold = 0.3
+    eval_config.uncertainty_method = "entropy"
+    eval_config.uncertainty_threshold = 4
+    eval_config.score_col = "max_scores"
+    eval_config.tp_iou_threshold = 0.5
+    eval_config.tp_method = "distance"
+    eval_config.tp_distance_threshold = 100
+
+    config = PredictionConfig(
+        imgsz=imgsz,
+        tilesize=tilesize,
+        overlap_ratio=overlap_ratio,
+        confidence_threshold=confidence_threshold,
+        inference_service_url=None,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=cls_imgsz,
+        # device="cuda:0",
+    )
+
+    engine, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=None,  # r"..\base_models_weights\roi_classifier.ckpt",
+        roi_cls_is_features=True,
+        roi_cls_label_map=roi_cls_label_map,
+        roi_keep_classes=roi_keep_classes,
+        detection_label_map=label_map,
+        feature_extractor_path=feature_extractor_path,
+        model_path=model_path,
+        detection_model_type=detection_model_type,
+        mlflow_model_alias=mlflow_model_alias,
+        mlflow_model_name=mlflow_model_name,
+    )
+
+    perf_eval = PerformanceEvaluator(eval_config)
+
+    # creating dataset and adding predictions
+    dataset = LabelingDataset.from_yolo(yolo_images_dirs, label_map=label_map)
+
+    print(dataset.get_stats())
+
+    if not load_results:
+        dataset.add_predictions(engine=engine, build=True)
+
+    # run evaluator
+    df_results, df_metrics_per_img = perf_eval.run(
+        dataset=dataset,
+        pred_results_dir=pred_results_dir,
+        load_results=load_results,
+    )
+
+    # mining hard sampels
+    sample_selector = HardSampleSelector(config=eval_config)
+    df_hard_negatives = sample_selector.run(df_results)
+
+    # report generation
+    reporter = ReportGenerator()
+    stats = reporter.run(
+        df_results, plot=isinstance(save_plot, str), save_plot=save_plot
+    )
+
+    if isinstance(save_hn, str):
+        df_hard_negatives.to_csv(save_hn, index=False)
+
+    return df_results, df_metrics_per_img, stats, df_hard_negatives
+
+
+def visualize_dataset(
+    dataset_path: str, fo_dataset_name: str, fo_dataset_persistent: bool = True
+):
+    from datalabeling.common.visualizer import FiftyOneVisualizer
+    import joblib
+
+    print("Loading dataset...")
+
+    dataset = joblib.load(dataset_path)
+
+    print(dataset.get_stats())
+
+    visualizer = FiftyOneVisualizer(
+        dataset=dataset, dataset_name=fo_dataset_name, persistent=fo_dataset_persistent
+    )
+    visualizer.create_load_dataset()
+
+    logger.info("Fiftyone dataset '{fo_dataset_name}' created.")
 
 
 if __name__ == "__main__":

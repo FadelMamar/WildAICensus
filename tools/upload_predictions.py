@@ -53,7 +53,6 @@ class Uploader:
                 roi_keep_classes=roi_keep_classes,
                 detection_label_map=detection_label_map,
                 feature_extractor_path=feature_extractor_path,
-                detection_model=None,
                 mlflow_model_alias=alias,
                 mlflow_model_name=mlflow_model_name,
                 set_ls_client=True,

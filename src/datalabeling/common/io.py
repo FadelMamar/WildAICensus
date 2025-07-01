@@ -70,6 +70,31 @@ def get_images_paths(
     return images_paths
 
 
+def get_local_path_ls(
+    image_url: str, download_resources: bool = False, **kwargs
+) -> str | None:
+    from label_studio_tools.core.utils.io import get_local_path
+    from urllib.parse import unquote
+
+    image_url = unquote(image_url)
+
+    image_path = get_local_path(
+        image_url, download_resources=download_resources, **kwargs
+    )
+    if not os.path.exists(image_path):
+        path = image_url.split("/data/local-files/?d=")[-1]
+        root = os.environ.get("LOCAL_FILES_DOCUMENT_ROOT") or os.environ.get(
+            "LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT"
+        )
+        image_path = os.path.join(root, path)
+
+    if not os.path.exists(image_path):
+        logger.warning(f"Local path not found for: {image_url}")
+        return None
+
+    return image_path
+
+
 def get_images_from_dirs(images_dirs: Sequence[str]) -> list[str]:
     c = chain.from_iterable([get_images_paths(d) for d in images_dirs])
     c = list(set(c))
@@ -183,17 +208,17 @@ def load_yolo_label(
     # add features
     with Image.open(image_path) as img:
         width, height = img.size
-        df["width"] = [width] * num_lines
-        df["height"] = [height] * num_lines
+        df["image_width"] = [width] * num_lines
+        df["image_height"] = [height] * num_lines
         df["file_name"] = [str(image_path)] * num_lines
 
     # unnormalize values
     for i in range(1, 5):
         df[f"x{i}"] = np.clip(
-            df[f"x{i}"] * df["width"][0], a_min=0, a_max=df["width"][0]
+            df[f"x{i}"] * df["image_width"][0], a_min=0, a_max=df["image_width"][0]
         )
         df[f"y{i}"] = np.clip(
-            df[f"y{i}"] * df["height"][0], a_min=0, a_max=df["height"][0]
+            df[f"y{i}"] * df["image_height"][0], a_min=0, a_max=df["image_height"][0]
         )
 
     df["x_min"] = df["x1"]
@@ -211,9 +236,9 @@ def load_yolo_label(
         if (col == "label") and label_map:
             classes = list(map(label_map.get, df[col]))
     if classes:
-        df["class"] = classes
+        df["class_name"] = classes
     else:
-        df["class"] = [None] * len(df["label"])
+        df["class_name"] = [None] * len(df["label"])
 
     return df, _format
 

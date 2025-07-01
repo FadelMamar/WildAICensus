@@ -16,7 +16,6 @@ from itertools import chain, product
 import math
 import geopy
 from urllib.parse import unquote
-from label_studio_tools.core.utils.io import get_local_path
 from label_studio_sdk.client import LabelStudio
 from concurrent.futures import ProcessPoolExecutor
 from multiprocessing.pool import ThreadPool
@@ -36,10 +35,8 @@ from .annotation_utils import (
 from .base import Tile, Detection
 
 from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
-from .io import load_yaml, DataHandler, get_images_from_dirs
+from .io import load_yaml, DataHandler, get_images_from_dirs, get_local_path_ls
 from .processor import FeatureExtractor
-from ..ml.models import Detector
-from ..ml.workers import ObjectDetectionSystem
 from ..ml.interface import InferenceEngine
 
 
@@ -330,6 +327,48 @@ class LabelingDataset:
             self.build(force_rebuild=True)
         return None
 
+    def get_stats(
+        self,
+    ):
+        bbox_columns = ["file_name", "x_min", "y_min", "x_max", "y_max"]
+
+        stats = dict()
+        if "score" in self.data.columns:
+            data = self.data.loc[~self.data["score"].isna(), :]
+            stats["pred_instance_distribution"] = (
+                data["class_name"].value_counts().to_dict()
+            )
+            stats["pred_predicted_positive"] = (
+                data[bbox_columns].dropna(how="any")["file_name"].nunique()
+            )
+            stats["pred_predicted_negative"] = (
+                len(data) - stats["pred_predicted_positive"]
+            )
+
+        # gt
+        data = self.data.loc[self.data["is_annot"] == True, :]
+        stats["gt_number_labeled"] = data["is_annot"].sum()
+        stats["gt_number_unlabeled"] = len(data) - stats["gt_number_labeled"]
+        stats["gt_instance_distribution"] = data["class_name"].value_counts().to_dict()
+        stats["gt_number_positive"] = (
+            data[bbox_columns].dropna(how="any")["file_name"].nunique()
+        )
+        stats["gt_number_negative"] = len(data) - stats["gt_number_positive"]
+
+        return stats
+
+    def _add_flag_for_negative_samples(
+        self,
+    ):
+        bbox_columns = ["x_min", "y_min", "x_max", "y_max"]
+        try:
+            self.data["is_negative"] = self.data[bbox_columns].isna().any(axis=1)
+        except KeyError:
+            pass
+        except Exception as e:
+            traceback.print_exc()
+            raise ValueError(f"{e}")
+
     def set_labelstudio_client(self, client):
         assert isinstance(client, LabelStudio), (
             "Expected type 'LabelStudio' but received {type(client)}"
@@ -356,6 +395,9 @@ class LabelingDataset:
             return None
 
         self.data = pd.concat(data, axis=0).reset_index(drop=True).convert_dtypes()
+
+        # self._add_flag_for_negative_samples()
+
         self._is_built = True
         return None
 
@@ -464,11 +506,29 @@ class LabelingDataset:
         )
 
         # load tiles
-        tiles = [Tile(image_path=p) for p in df_labels["file_name"].unique()]
+        tiles = []
+        bbox_columns = ["x_min", "y_min", "x_max", "y_max"]
+        for file_name, df_gt in df_labels.groupby("file_name"):
+            annotations = [
+                Detection(
+                    x_min=df_gt["x_min"].iat[i],
+                    x_max=df_gt["x_max"].iat[i],
+                    y_min=df_gt["y_min"].iat[i],
+                    y_max=df_gt["y_max"].iat[i],
+                    label=df_gt["label"].iat[i],
+                    class_name=df_gt["class_name"].iat[i],
+                )
+                for i in range(len(df_gt))
+            ]
+            tile = Tile(image_path=file_name, annotations=annotations)
+            tiles.append(tile)
 
         df_labels["is_annot"] = True
+        dataset = cls(data=df_labels, tiles=tiles)
 
-        return cls(data=df_labels, tiles=tiles)
+        # dataset._add_flag_for_negative_samples()
+
+        return dataset
 
     @classmethod
     def from_ls(
@@ -481,6 +541,7 @@ class LabelingDataset:
         load_existing_metadata: bool = False,
         max_workers: int = 1,
         ls_download_resources: bool = False,
+        skip_broken: bool = True,
     ):
         assert isinstance(labelstudio_client, LabelStudio), (
             "Provide an instance of LabelStudio"
@@ -496,75 +557,64 @@ class LabelingDataset:
                 load_existing_metadata=load_existing_metadata, max_workers=max_workers
             )
 
-        def load_unique_task(task) -> Tile | None:
-            img_url = unquote(task.data["image"])
-            # img_url = task.data["image"]
+        def load_unique_task(task, skip: bool = skip_broken) -> Tile | None:
+            image_url = unquote(task.data["image"])
 
-            try:
-                image_path = get_local_path(
-                    img_url,
-                    download_resources=ls_download_resources,
-                    # hostname=os.getenv("LABEL_STUDIO_URL"),
+            # try:
+            image_path = get_local_path_ls(
+                image_url=image_url,
+                download_resources=ls_download_resources,
+            )
+            if image_path is None:
+                if skip:
+                    return None
+                raise FileNotFoundError()
+
+            # get tile gps_coords and offsets if given
+            if tile_metadata is not None:
+                value = tile_metadata.get(
+                    Path(image_url).stem, None
+                ) or tile_metadata.get(Path(image_path).stem, None)
+                tile_gps_loc = None
+                x1 = y1 = None
+                if value is None:
+                    logger.warning(f"No metadata found for {image_url}. -> skipping")
+                    return None
+
+                tile_gps_loc = value["gps"]
+                (x1, x2), (y1, y2) = value["coordinates"]
+                parent_image = value["parent_image"]
+            else:
+                tile_gps_loc = None
+                x1 = y1 = None
+                parent_image = None
+
+            # build tile
+            detection_list = Detection.from_ls(task.annotations, image_path)
+
+            tile = Tile(
+                annotations=detection_list,
+                image_data=None,
+                image_path=image_path,
+                x_offset=x1,
+                y_offset=y1,
+                parent_image=parent_image,
+                tile_gps_loc=tile_gps_loc,
+            )
+
+            # update detections (annotations or predictions) gps loc using tile_gps_loc
+            if tile_gps_loc is not None:
+                tile.update_detection_gps(
+                    sensor_height=config.sensor_height,
+                    flight_height=config.flight_height,
+                    gsd=config.gsd,
                 )
-                
-                if not Path(image_path).exists():
-                    root = os.environ.get("LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT") or os.environ.get("LOCAL_FILES_DOCUMENT_ROOT")
-                    logger.info(f"{image_path} ## {img_url}")
-                    # logger.info(os.environ["LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT"])
-                    # logger.info(os.environ["LOCAL_FILES_DOCUMENT_ROOT"])
-                    
-                    image_path = img_url.split("/data/local-files/?d=")[-1]
-                    image_path = os.path.join(root,image_path)
-                    
-                    if not Path(image_path).exists():
-                        logger.info(image_path)
-                        raise FileNotFoundError()
+            return tile
 
-                # get tile gps_coords and offsets if given
-                if tile_metadata is not None:
-                    value = tile_metadata.get(
-                        Path(img_url).stem, None
-                    ) or tile_metadata.get(Path(image_path).stem, None)
-                    tile_gps_loc = None
-                    x1 = y1 = None
-                    if value is None:
-                        logger.warning(f"No metadata found for {img_url}. -> skipping")
-                        return None
-
-                    tile_gps_loc = value["gps"]
-                    (x1, x2), (y1, y2) = value["coordinates"]
-                    parent_image = value["parent_image"]
-                else:
-                    tile_gps_loc = None
-                    x1 = y1 = None
-                    parent_image = None
-
-                # build tile
-                detection_objects = Detection.from_ls(task.annotations, image_path)
-
-                tile = Tile(
-                    annotations=detection_objects,
-                    image_data=None,
-                    image_path=image_path,
-                    x_offset=x1,
-                    y_offset=y1,
-                    parent_image=parent_image,
-                    tile_gps_loc=tile_gps_loc,
-                )
-
-                # update detections (annotations or predictions) gps loc using tile_gps_loc
-                if tile_gps_loc is not None:
-                    tile.update_detection_gps(
-                        sensor_height=config.sensor_height,
-                        flight_height=config.flight_height,
-                        gsd=config.gsd,
-                    )
-                return tile
-
-            except Exception:
-                logger.warning(f"Failed for: {img_url} -> skipping")
-                traceback.print_exc()
-                return None
+            # except Exception:
+            #     logger.warning(f"Failed for: {img_url} -> skipping")
+            #     traceback.print_exc()
+            #     return None
 
         # get tasks in project
         tasks = labelstudio_client.tasks.list(
@@ -863,7 +913,7 @@ class LabelingDataset:
             }
             coco_dataset["images"].append(image_dict)
 
-            df_detections = df.dropna()
+            df_detections = df.dropna(how="any")
             # Loop through the annotations and add them to the COCO dataset
             for i in range(len(df_detections)):
                 x_min, y_min, x_max, y_max = df_detections[
@@ -891,7 +941,7 @@ class LabelingDataset:
     def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
         try:
             # Try to load existing dataset
-            dataset = fo.load_dataset(dataset_name)
+            dataset = fo.load_dataset(dataset_name, create_if_necessary=False)
             logger.info(f"Loaded existing dataset: {dataset_name}")
         except ValueError:
             # Create new dataset if it doesn't exist
@@ -900,8 +950,10 @@ class LabelingDataset:
 
         samples = []
 
+        data = self.data.dropna(how="any", subset=["x_min", "x_max", "y_min", "y_max"])
+
         for img_path, df_detections in tqdm(
-            self.data.groupby("file_name"), desc="Creating-fifytone-dataset"
+            data.groupby("file_name"), desc="Creating-fifytone-dataset"
         ):
             if not os.path.exists(img_path):
                 logger.warning(f"Warning: Image not found at {img_path}.Skipping")
@@ -909,41 +961,52 @@ class LabelingDataset:
 
             sample = fo.Sample(filepath=img_path)
 
-            if df_detections.dropna().empty:
+            if df_detections.dropna(how="all").empty:
                 logger.info(f"Image at {img_path} is a negative sample")
-                sample["is_positive"] = False
+                # sample["is_positive"] = False
                 samples.append(sample)
                 continue
 
-            # conf = bboxes['scores']
-            class_name = df_detections["class"].tolist()
+            class_name = df_detections["class_name"].tolist()
 
             # get bbox [x, y, w, h] in normalized coords [0,1]
             bboxes = df_detections[["x_min", "y_min"]].copy()
-            bboxes.loc[:, "x_min"] /= df_detections.loc[:, "width"]
-            bboxes.loc[:, "y_min"] /= df_detections.loc[:, "height"]
+            bboxes.loc[:, "x_min"] /= df_detections.loc[:, "image_width"]
+            bboxes.loc[:, "y_min"] /= df_detections.loc[:, "image_height"]
             bboxes["w"] = 0.0
             bboxes["h"] = 0.0
             bboxes.loc[:, "w"] = (
                 df_detections.loc[:, "x_max"] - df_detections.loc[:, "x_min"]
-            ) / df_detections.loc[:, "width"]
+            ) / df_detections.loc[:, "image_width"]
             bboxes.loc[:, "h"] = (
                 df_detections.loc[:, "y_max"] - df_detections.loc[:, "y_min"]
-            ) / df_detections.loc[:, "height"]
+            ) / df_detections.loc[:, "image_height"]
             bboxes = bboxes[["x_min", "y_min", "w", "h"]].to_numpy().tolist()
 
-            # Convert detections to FiftyOne format
-            fo_detections = []
-            for i, box in enumerate(bboxes):
-                fo_detection = fo.Detection(
-                    label=class_name[i],
-                    bounding_box=box,
-                    # confidence=det.get('confidence', None)
-                )
-                fo_detections.append(fo_detection)
+            scores = [np.nan] * len(df_detections)
+            if "score" in df_detections.columns:
+                scores = df_detections["score"].to_list()
 
-            sample["gt"] = fo.Detections(detections=fo_detections)
-            sample["is_positive"] = True
+            # add groundtruth
+            gt_fo_detections = []
+            pred_fo_detections = []
+            for i, box in enumerate(bboxes):
+                score = scores[i]
+                if not np.isnan(score):
+                    fo_detection = fo.Detection(
+                        label=class_name[i], bounding_box=box, confidence=score
+                    )
+                    pred_fo_detections.append(fo_detection)
+                else:
+                    fo_detection = fo.Detection(
+                        label=class_name[i],
+                        bounding_box=box,
+                    )
+                    gt_fo_detections.append(fo_detection)
+
+            sample["ground_truth"] = fo.Detections(detections=gt_fo_detections)
+            sample["predictions"] = fo.Detections(detections=pred_fo_detections)
+
             samples.append(sample)
 
         dataset.add_samples(samples)
@@ -1178,7 +1241,7 @@ class ClassificationDatasetBuilder:
         # self.detector: InferenceEngine = None
         self.source_dirs = None
         self.output_dir = None
-        self.perf_eval = PerformanceEvaluator(config=self.config)
+        self.perf_eval = PerformanceEvaluator()
         self.bbox_resize_factor = None
         self.feature_extractor = None
 
@@ -1538,8 +1601,8 @@ class ClassificationDatasetBuilder:
             load_results=self.config.load_results,
         )
 
-        if df_metrics.empty:
-            return None
+        # if df_metrics.empty:
+        #     return None
 
         mask_fp = df_metrics["pred_FP"] == True
         for file_name, df_det in tqdm(

@@ -15,7 +15,7 @@ from label_studio_sdk.client import LabelStudio
 from PIL import Image
 
 from .workers import ObjectDetectionSystem, GPSUtils
-from .models import ImageClassifier, YOLO
+from .models import ImageClassifier, YOLO, Detector, build_detector
 from ..common.processor import DetectionsPostprocessor, get_processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
@@ -83,7 +83,7 @@ class InferenceEngine(object):
         tiles: list[Tile] = None,
         return_tiles: bool = False,
         return_as_df: bool = False,
-    ) -> list[Detection] | list[Tile] | pd.DataFrame:
+    ) -> Sequence[list[Detection]] | list[Tile] | pd.DataFrame:
         """Multithreaded detector"""
 
         paths = images_paths
@@ -96,14 +96,16 @@ class InferenceEngine(object):
 
         detections = self.detector.run(images_paths=paths)
 
+        if len(detections) != len(paths):
+            raise Exception()
+
         if tiles is not None:
-            # if tiles are provided,
             for i, tile in enumerate(tiles):
                 tile.set_predictions(detections[i])
 
         if return_tiles:
             assert tiles is not None, (
-                "This is likely an error. tiles have not been set."
+                "This is likely an error. 'tiles' is not provided."
             )
             return tiles
 
@@ -240,23 +242,41 @@ class InferenceEngine(object):
         roi_keep_classes: list = ["gt"],
         detection_label_map: dict = {0: "wildlife"},
         feature_extractor_path: str = "facebook/dinov2-with-registers-small",
-        detection_model: YOLO = None,
+        model_path: str = None,
+        detection_model_type: str = "ultralytics",
+        text_instruction: str = "detect wildlife species",
         mlflow_model_alias: str = "demo",
         mlflow_model_name: str = "labeler",
         set_ls_client: bool = False,
         dot_env_path: str = None,
     ) -> tuple:
-        if (detection_model is None) and (pred_config.inference_service_url is None):
+        if (model_path is None) and (pred_config.inference_service_url is None):
             logger.info(
                 f"Loading model from mlflow name={mlflow_model_name}/alias={mlflow_model_alias} "
             )
-            detection_model, metadata = load_registered_model(
+            model, metadata = load_registered_model(
                 alias=mlflow_model_alias,
                 name=mlflow_model_name,
                 mlflow_tracking_url="http://localhost:5000",
                 load_unwrapped=True,
             )
             logger.info(f"model's metadata={metadata}")
+
+            detection_model = build_detector(
+                detection_model_type=metadata["detection_model_type"],
+                model_path=None,
+                model=model,
+                config=pred_config,
+                text_instruction=text_instruction,
+            )
+        else:
+            detection_model = build_detector(
+                detection_model_type=detection_model_type,
+                model_path=model_path,
+                model=None,
+                config=pred_config,
+                text_instruction=text_instruction,
+            )
 
         # build roi postprocessor
         feature_extractor = get_processor("feature_extractor")(
@@ -292,7 +312,7 @@ class InferenceEngine(object):
         detector = ObjectDetectionSystem(
             config=pred_config, detection_label_map=detection_label_map
         )
-        detector.set_model(model=detection_model, task="detect", path_weights=None)
+        detector.set_model(model=detection_model)
         detector.set_processor(roi_processor=roi_processor)
 
         engine = cls(config=pred_config)

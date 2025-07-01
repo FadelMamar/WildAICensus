@@ -7,8 +7,8 @@ call "D:\datalabeling\.venv\Scripts\activate"
 @REM call "C:\Users\Machine Learning\Desktop\workspace-wildAI\datalabeling\.venv-export\Scripts\activate"
 
 
-call set MODEL_NAME=labeler
-call set MODEL_ALIAS=pt
+@REM call set MODEL_NAME=labeler
+@REM call set MODEL_ALIAS=pt
 call set MLFLOW_TRACKING_URI=http://127.0.0.1:5000
 call set AWS_ACCESS_KEY_ID=minioadmin
 call set AWS_SECRET_ACCESS_KEY=minioadmin
