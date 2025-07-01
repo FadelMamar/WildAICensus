@@ -31,6 +31,7 @@ import torch
 from torchmetrics.functional.detection import complete_intersection_over_union
 import copy
 import os
+import traceback
 
 from .base import Tile, Detection
 from .dataset_loader import LabelingDataset
@@ -187,7 +188,7 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
         if len(boxes) == 0 or len(boxes_2) == 0:
             ious = np.zeros((len(detections_1), len(detections_2))) - 1.0
             return ious
-        
+
         boxes = torch.tensor(boxes)
         boxes_2 = torch.tensor(boxes_2)
         box_ious = complete_intersection_over_union(
@@ -207,7 +208,7 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
         Returns:
             Tuple[Tile, Tile]: Tiles with duplicates pruned.
         """
-        if len(tile1.predictions)==0 or len(tile2.predictions)==0:
+        if len(tile1.predictions) == 0 or len(tile2.predictions) == 0:
             return tile1, tile2
 
         ious = self._compute_iou(tile1.predictions, tile2.predictions)  # shape [N1, N2]
@@ -224,7 +225,7 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
         for i, j in zip(idxs1, idxs2):
             det1 = tile1.predictions[i]
             det2 = tile2.predictions[j]
-            
+
             if det1.is_empty or det2.is_empty:
                 # print(f"Skipping empty detection: {det1} or {det2}")
                 keep1[i] = False
@@ -391,6 +392,7 @@ def run_census(
     images_dir: list[str],
     engine: InferenceEngine,
     overlap_strategy: str,
+    model_tag: str,
     flight_specs: FlightSpecs,
     duplicate_removal_strategy: str,
     image_overlap_threshold: float = 0.0,
@@ -432,9 +434,10 @@ def run_census(
                 dataset=dataset,
                 dataset_name=fiftyone_dataset_name,
                 persistent=fiftyone_persistent,
-            ).create_load_dataset()
+            ).create_load_dataset(model_tag=model_tag)
             logger.info(f"FiftyOne dataset created: {fiftyone_dataset_name}")
         except Exception as e:
+            traceback.print_exc()
             logger.error(f"Error creating FiftyOne dataset: {e}")
 
     return census_system

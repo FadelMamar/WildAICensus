@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from dotenv import load_dotenv
 from label_studio_sdk.client import LabelStudio
 from ultralytics import YOLO
-from datalabeling.common.config import DataConfig, LabelConfig
+from datalabeling.common.config import DataConfig, LabelConfig, FlightSpecs
 from datalabeling.common.pipeline import (
     LabelstudioToYolo,
     ObbToDotaStep,
@@ -20,6 +20,7 @@ from datalabeling.common.pipeline import (
 )
 from datalabeling.common.io import load_datasets
 from datalabeling.ml.interface import InferenceEngine
+from datalabeling.common.census import run_census
 from datalabeling.common.config import TrainingConfig
 from datalabeling.ml.train import TrainingManager
 from datalabeling.common.config import EvaluationConfig, PredictionConfig
@@ -526,6 +527,76 @@ def validation():
         fo_dataset_persistent=True,
         load_results=True,
         pred_results_dir=r"D:\workspace\data\savmap_dataset_v2\images_tmp",
+    )
+
+    return None
+
+
+def run_census_cli(
+    images_dir,
+    model_path=None,
+    alias="demo",
+    name="labeler",
+    roi_classifier_path="base_models_weights/roi_classifier.ckpt",
+    overlap_strategy="GPSOverlapStrategy",
+    flight_height=180,
+    sensor_height=24,
+    focal_length=35,
+    duplicate_removal_strategy="CentroidProximityRemovalStrategy",
+    roi_cls_is_features=True,
+    roi_cls_label_map={0: "gt", 1: "tn"},
+    roi_keep_classes=["gt"],
+    detection_label_map={0: "wildlife"},
+    feature_extractor_path="facebook/dinov2-with-registers-small",
+    image_overlap_threshold=0.0,
+    detection_iou_threshold=0.8,
+    save_path="census_results.json",
+    fiftyone_dataset_name="census-demo-dataset",
+    fiftyone_persistent=True,
+):
+    config = PredictionConfig(
+        imgsz=800,
+        tilesize=800,
+        overlap_ratio=0.2,
+        confidence_threshold=0.2,
+        inference_service_url=None,
+        # min_area=100,
+        # max_area=None,
+        cls_imgsz=98,
+        flight_specs=FlightSpecs(
+            flight_height=flight_height,
+            sensor_height=sensor_height,
+            focal_length=focal_length,
+        ),
+        # device="cuda:0",
+    )
+    engine, _ = InferenceEngine.load_engine(
+        pred_config=config,
+        roi_classifier_path=roi_classifier_path,
+        roi_cls_is_features=roi_cls_is_features,
+        roi_cls_label_map=roi_cls_label_map,
+        roi_keep_classes=roi_keep_classes,
+        detection_label_map=detection_label_map,
+        feature_extractor_path=feature_extractor_path,
+        model_path=model_path,
+        mlflow_model_alias=alias,
+        mlflow_model_name=name,
+        buffer_size=24,
+        timeout=60,
+    )
+
+    census_system = run_census(
+        images_dir=[images_dir],
+        engine=engine,
+        model_tag=f"{name}/{alias}",
+        flight_specs=config.flight_specs,
+        overlap_strategy=overlap_strategy,
+        duplicate_removal_strategy=duplicate_removal_strategy,
+        image_overlap_threshold=image_overlap_threshold,
+        detection_iou_threshold=detection_iou_threshold,
+        save_path=save_path,
+        fiftyone_dataset_name=fiftyone_dataset_name,
+        fiftyone_persistent=fiftyone_persistent,
     )
 
     return None

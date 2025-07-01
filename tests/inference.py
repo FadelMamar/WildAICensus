@@ -40,7 +40,7 @@ config = PredictionConfig(
 ALIAS = "demo"
 NAME = "labeler"
 
-MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
+MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
 roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
@@ -187,9 +187,9 @@ def run_detector(
     #                                  config=config,
     #                                  )
 
-    detector.set_model(model=model)
+    detection_system.set_model(model=model)
     tiles = [Tile(image_path=p, flight_specs=config.flight_specs) for p in image_paths]
-    results = detector.run(tiles=tiles)
+    results = detection_system.run(tiles=tiles)
 
     return results
 
@@ -231,9 +231,7 @@ if __name__ == "__main__":
 
     # images = [image_path]
 
-    images = Path(
-        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2"
-    ).glob("*.JPG")
+    images = Path(r"D:\workspace\data\savmap_dataset_v2\raw\tmp").glob("*.JPG")
     images = list(images)[:20]
 
     # results = run_model(image_path)

@@ -1098,6 +1098,10 @@ class ObjectDetectionSystem:
         """
         tiles = list(tiles)
 
+        if len(tiles) == 0:
+            self.logger.warning("No tiles to process.")
+            return []
+
         # Initialize threads
         self.data_thread = DataLoadingThread(
             self.shared_buffers,
@@ -1125,7 +1129,9 @@ class ObjectDetectionSystem:
             print(self._is_alive())
 
         if out is None:
-            print("Pipeline failed. Postprocessing did not start...")
+            self.logger.warning(
+                "No detections computed. It's likely that the pipeline failed."
+            )
             return []
 
         detections = [o["final_detections"] for o in out]

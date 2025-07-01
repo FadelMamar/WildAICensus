@@ -40,9 +40,12 @@ class FiftyOneVisualizer:
 
     def create_load_dataset(
         self,
+        model_tag: str,
     ):
         self.dataset = self._labeled_dataset.to_fiftyone(
-            dataset_name=self.dataset_name, persistent=self.persistent
+            dataset_name=self.dataset_name,
+            model_tag=model_tag,
+            persistent=self.persistent,
         )
 
     def run(
