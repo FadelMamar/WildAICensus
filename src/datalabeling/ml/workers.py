@@ -756,9 +756,14 @@ class DetectionThread(threading.Thread):
 
             try:
                 # Run detection
-                t1 = time.perf_counter()
-                detection_results = self.run_detection(data)
-                dt = (time.perf_counter() - t1) / len(data)
+                try:
+                    t1 = time.perf_counter()
+                    detection_results = self.run_detection(data)
+                    dt = (time.perf_counter() - t1) / len(data)
+                except Exception as e:
+                    self.logger.error(f"Error running detection: {e}")
+                    self.shared_buffers.put(detections="ERROR")
+                    return
 
                 self.logger.info(f"Detection time: {dt:.3f}s")
 

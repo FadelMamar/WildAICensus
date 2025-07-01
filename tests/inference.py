@@ -40,7 +40,7 @@ config = PredictionConfig(
 ALIAS = "demo"  # -rt-batch8'
 NAME = "labeler"
 
-MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
+MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
 roi_classifier_path = None  # r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
@@ -240,7 +240,7 @@ if __name__ == "__main__":
 
     # t1_start = perf_counter()
 
-    # results = run_inference_engine(images)
+    results = run_inference_engine(images)
 
     # t1_stop = perf_counter()
     # print("Inference time: ", t1_stop - t1_start)
