@@ -36,6 +36,7 @@ from .base import Tile, Detection
 from .dataset_loader import LabelingDataset
 from .evaluation import ReportGenerator
 from ..ml.interface import InferenceEngine
+from .visualizer import FiftyOneVisualizer
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -380,6 +381,8 @@ def run_census(
     image_overlap_threshold: float = 0.0,
     detection_iou_threshold: float = 0.8,
     save_path: str = "census_results.json",
+    fiftyone_dataset_name: str = None,
+    fiftyone_persistent: bool = True,
 ) -> WildlifeCountingSystem:
     assert isinstance(images_dir, list), "images_dir must be a list of strings"
     for a in images_dir:
@@ -398,6 +401,17 @@ def run_census(
     )
     census_system.set_dataset(dataset)
     census_system.run(image_overlap_threshold, detection_iou_threshold, save_path)
+
+    if fiftyone_dataset_name is not None:
+        try:
+            FiftyOneVisualizer(
+                dataset=dataset,
+                dataset_name=fiftyone_dataset_name,
+                persistent=fiftyone_persistent,
+            ).create_load_dataset()
+            logger.info(f"FiftyOne dataset created: {fiftyone_dataset_name}")
+        except Exception as e:
+            logger.error(f"Error creating FiftyOne dataset: {e}")
 
     return census_system
 

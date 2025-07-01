@@ -168,6 +168,8 @@ def test_inference_and_save_predictions():
         image_overlap_threshold=0.0,
         detection_iou_threshold=0.8,
         save_path="census_results.json",
+        fiftyone_dataset_name="savmap_dataset_v2-raw-census-demo",
+        fiftyone_persistent=False,
     )
 
     return census_system
