@@ -12,6 +12,10 @@ from datalabeling.ml.interface import InferenceEngine
 from datalabeling.common.config import PredictionConfig, FlightSpecs
 # import uuid
 
+# EXAMPLE_DIR = r"D:\workspace\data\savmap_dataset_v2\raw\images"
+
+EXAMPLE_DIR = r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
+
 
 def make_detection(parent_image: str):
     """
@@ -69,7 +73,7 @@ def test_gps_overlap():
     Returns:
         dict: The overlap map between images.
     """
-    dataset = load_dataset_from_dirs(r"D:\workspace\data\savmap_dataset_v2\raw\images")
+    dataset = load_dataset_from_dirs(EXAMPLE_DIR)
     tiles = dataset.tiles
 
     print(dataset.get_stats())
@@ -93,7 +97,7 @@ def test_count_system():
     Returns:
         WildlifeCensusSystem: The system after running the pipeline.
     """
-    dataset = load_dataset_from_dirs(r"D:\workspace\data\savmap_dataset_v2\raw\images")
+    dataset = load_dataset_from_dirs(EXAMPLE_DIR)
 
     # Run GPSOverlapStrategy
     overlap_strategy = GPSOverlapStrategy()
@@ -139,8 +143,8 @@ def test_inference_and_save_predictions():
 
     ALIAS = "demo"
     NAME = "labeler"
-    MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
-    roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
+    MODEL_PATH = None #"D:/datalabeling/base_models_weights/best.pt"
+    roi_classifier_path = r"../base_models_weights/roi_classifier.ckpt"
     roi_cls_is_features = True
     roi_cls_label_map = {0: "gt", 1: "tn"}
     roi_keep_classes = ["gt"]
@@ -161,21 +165,22 @@ def test_inference_and_save_predictions():
     )
 
     census_system = run_census(
-        images_dir=[r"D:\workspace\data\savmap_dataset_v2\raw\images"],
+        images_dir=[EXAMPLE_DIR],
         engine=engine,
         overlap_strategy="GPSOverlapStrategy",
         duplicate_removal_strategy="CentroidProximityRemovalStrategy",
         image_overlap_threshold=0.0,
         detection_iou_threshold=0.8,
         save_path="census_results.json",
+        
     )
 
     return census_system
 
 
 if __name__ == "__main__":
-    # overlap_map = test_gps_overlap()
+    #overlap_map = test_gps_overlap()
 
-    # census_system = test_count_system()
+    census_system = test_count_system()
 
-    test_inference_and_save_predictions()
+    # test_inference_and_save_predictions()
