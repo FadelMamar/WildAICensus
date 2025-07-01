@@ -186,8 +186,8 @@ def run_detector(
     #                                  )
 
     detector.set_model(model=model)
-
-    results = detector.run(images_paths=image_paths)
+    tiles = [Tile(image_path=p, flight_specs=config.flight_specs) for p in image_paths]
+    results = detector.run(tiles=tiles)
 
     return results
 

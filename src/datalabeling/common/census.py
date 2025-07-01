@@ -397,6 +397,10 @@ def run_census(
     if engine is not None:
         dataset.add_predictions(engine, build=True)
 
+    for tile in dataset.tiles:
+        for det in tile.predictions:
+            assert det.geographic_footprint is not None
+
     census_system = WildlifeCountingSystem(
         get_overlap_strategy(overlap_strategy),
         get_duplicate_removal_strategy(duplicate_removal_strategy),

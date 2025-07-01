@@ -774,6 +774,8 @@ class PostProcessingThread(threading.Thread):
             tile = results_package["metadata"]["tile"]
             offset_info = results_package["offset_info"]
 
+            self.logger.debug(f"{len(raw_detections)} detections before postprocessing")
+
             filtered_detections = self.postprocess(
                 raw_detections, tile=tile, offset_info=offset_info
             )

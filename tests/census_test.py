@@ -52,7 +52,13 @@ def load_dataset_from_dirs(image_dir: str):
     """
     images_dirs = [image_dir]
 
-    dataset = LabelingDataset.from_dirs(images_dirs)
+    dataset = LabelingDataset.from_dirs(
+        images_dirs,
+        FlightSpecs(
+            flight_height=180,
+            sensor_height=24,
+        ),
+    )
     tiles = []
     for image_path in dataset.data["file_name"].unique():
         predictions = [make_detection(image_path) for _ in range(random.randint(1, 10))]
@@ -141,8 +147,8 @@ def test_inference_and_save_predictions():
 
     ALIAS = "demo"
     NAME = "labeler"
-    MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
-    roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
+    MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
+    roi_classifier_path = r"../base_models_weights/roi_classifier.ckpt"
     roi_cls_is_features = True
     roi_cls_label_map = {0: "gt", 1: "tn"}
     roi_keep_classes = ["gt"]
@@ -181,6 +187,6 @@ def test_inference_and_save_predictions():
 if __name__ == "__main__":
     # overlap_map = test_gps_overlap()
 
-    # census_system = test_count_system()
+    census_system = test_count_system()
 
-    test_inference_and_save_predictions()
+    # test_inference_and_save_predictions()
