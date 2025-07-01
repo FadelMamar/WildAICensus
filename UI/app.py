@@ -133,11 +133,8 @@ def main():
             if st.form_submit_button("Show Statistics"):
                 try:
                     with st.spinner("Computing statistics...", show_time=True):
-                        instances_count, images_count = get_project_statistics(
-                            stats_project_id
-                        )
-                    st.dataframe(instances_count, use_container_width=False)
-                    st.dataframe(images_count, use_container_width=False)
+                        stats = get_project_statistics(stats_project_id)
+                    st.write(stats, use_container_width=False)
 
                 except Exception as e:
                     st.error(f"Failed to fetch statistics: {str(e)}")
@@ -676,16 +673,20 @@ def get_gps_coords(
     return gps_coords
 
 
+def load_labelstudio_client() -> LabelStudio:
+    load_dotenv(DOT_ENV)
+    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+    assert API_KEY is not None, "Set 'LABEL_STUDIO_API_KEY' env variable"
+    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+    return labelstudio_client
+
+
 @st.cache_data
 def get_gps_coords_from_ls(
     config: TilingConfig, project_id: int, top_n=0, load_existing_metadata=True
 ) -> pd.DataFrame:
-    load_dotenv(DOT_ENV)
-
-    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
-    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
-    # print("API-Key",API_KEY)
-    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+    labelstudio_client = load_labelstudio_client()
 
     # check connection
     labelstudio_client.projects.get(id=project_id)
@@ -769,57 +770,22 @@ def upload_to_label_studio(project_id: int, annotator_kwargs: dict, top_n: int =
 def get_project_statistics(
     project_id: int, annotator_id=0
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    # instances_count, images_count = Annotator.get_project_stats(
-    #     LABEL_STUDIO_CLIENT, project_id=project_id, annotator_id=annotator_id
-    # )
+    labelstudio_client = load_labelstudio_client()
 
-    load_dotenv(DOT_ENV)
-    LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
-    API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
-    assert API_KEY is not None, "Set 'LABEL_STUDIO_API_KEY' env variable"
-    labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
-    project = labelstudio_client.projects.get(id=project_id)
+    # check connection
+    labelstudio_client.projects.get(id=project_id)
 
-    images_count = dict()
-    # Iterating
-    tasks = project.get_tasks()
-    # because there is
-    labels = []
+    # print(config)
 
-    for task in tasks:
-        try:
-            result = task["annotations"][annotator_id]["result"]
-        except Exception:
-            traceback.print_exc()
-            continue
-
-        img_labels = []
-        for annot in result:
-            img_labels = annot["value"]["rectanglelabels"] + img_labels
-        labels = labels + img_labels
-        # update stats holder
-        for label in set(img_labels):
-            try:
-                images_count[label] += 1
-            except:
-                images_count[label] = 1
-
-    instances_count = {f"{k}": labels.count(k) for k in set(labels)}
-    # print("Number of instances for each label is:\n",instances_count,end="\n\n")
-    # print("Number of images for each label is:\n",images_count)
-
-    instances_count = pd.DataFrame.from_dict(instances_count)
-    instances_count.rename(
-        columns={col: col + "_num_instances" for col in instances_count.columns},
-        inplace=True,
+    dataset = LabelingDataset.from_ls(
+        labelstudio_client=labelstudio_client,
+        project_id=project_id,
+        config=None,
+        top_n=0,
+        load_existing_metadata=False,
     )
 
-    images_count = pd.DataFrame.from_dict(images_count)
-    images_count.rename(
-        columns={col: col + "_num_images" for col in images_count.columns}, inplace=True
-    )
-
-    return instances_count, images_count
+    return dataset.get_stats()
 
 
 @st.cache_data
