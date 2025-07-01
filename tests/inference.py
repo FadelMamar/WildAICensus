@@ -37,10 +37,10 @@ config = PredictionConfig(
     # device="cuda:0",
 )
 
-ALIAS = "demo" 
+ALIAS = "demo"
 NAME = "labeler"
 
-MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
+MODEL_PATH = r"D:/datalabeling/base_models_weights/best.pt"
 roi_classifier_path = None  # r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
@@ -185,7 +185,7 @@ def run_detector(
     #                                  config=config,
     #                                  )
 
-    detector.set_model(model=model) 
+    detector.set_model(model=model)
 
     results = detector.run(images_paths=image_paths)
 
@@ -229,14 +229,15 @@ if __name__ == "__main__":
 
     # images = [image_path]
 
-    images = Path(
-        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
-    ).glob("*.JPG")
+    images = Path(r"D:\workspace\data\savmap_dataset_v2\raw\tmp").glob("*.JPG")
     images = list(images)[:20]
 
     # results = run_model(image_path)
 
     # results = run_detector(image_paths=images)
+
+    # print(results)
+    # print(len(results), len(images))
 
     # t1_start = perf_counter()
 
@@ -245,7 +246,7 @@ if __name__ == "__main__":
     # t1_stop = perf_counter()
     # print("Inference time: ", t1_stop - t1_start)
 
-    # print("detections:", detections)
+    print("detections:", results)
 
     # image = imread(img_path)
 

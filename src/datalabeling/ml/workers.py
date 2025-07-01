@@ -452,7 +452,6 @@ class DataLoadingThread(threading.Thread):
         Returns:
             tuple: (batch of patches, offset information)
         """
-        # PLACEHOLDER - REPLACE WITH YOUR PREPROCESSING
         self.logger.debug(f"Preprocessing: sample {self.count} has been loaded.")
 
         # load as RGB and extract patches
@@ -460,15 +459,11 @@ class DataLoadingThread(threading.Thread):
             tile=tile, patch_size=self.tile_size
         )
 
-        # print(offset_info,"\n\n")
-
         if batch_of_patches.max() > 1.0:
             batch_of_patches = batch_of_patches / 255.0
 
         if len(batch_of_patches) == 3:
             batch_of_patches.unsqueeze_(0)
-
-        # data = TensorDataset(batch_of_patches)
 
         return batch_of_patches, offset_info
 
@@ -500,6 +495,7 @@ class DataLoadingThread(threading.Thread):
                 },
                 data=batch_of_patches,
                 offset_info=offset_info,
+                number_patches=batch_of_patches.shape[0],
             )
             # push data
             self.shared_buffers.put(data=data_package)
@@ -672,6 +668,7 @@ class DetectionThread(threading.Thread):
         }
         return results
 
+    # TODO: increase number of images in dataloader
     def collect_batch(self):
         """
         Collect tensors into a batch using a hybrid time/size strategy.

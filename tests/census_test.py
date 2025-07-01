@@ -12,6 +12,8 @@ from datalabeling.ml.interface import InferenceEngine
 from datalabeling.common.config import PredictionConfig, FlightSpecs
 # import uuid
 
+EXAMPLE_IMAGE_DIR = r"D:\workspace\data\savmap_dataset_v2\raw\tmp"
+
 
 def make_detection(parent_image: str):
     """
@@ -69,7 +71,7 @@ def test_gps_overlap():
     Returns:
         dict: The overlap map between images.
     """
-    dataset = load_dataset_from_dirs(r"D:\workspace\data\savmap_dataset_v2\raw\images")
+    dataset = load_dataset_from_dirs(EXAMPLE_IMAGE_DIR)
     tiles = dataset.tiles
 
     print(dataset.get_stats())
@@ -93,7 +95,7 @@ def test_count_system():
     Returns:
         WildlifeCensusSystem: The system after running the pipeline.
     """
-    dataset = load_dataset_from_dirs(r"D:\workspace\data\savmap_dataset_v2\raw\images")
+    dataset = load_dataset_from_dirs(EXAMPLE_IMAGE_DIR)
 
     # Run GPSOverlapStrategy
     overlap_strategy = GPSOverlapStrategy()
@@ -161,8 +163,9 @@ def test_inference_and_save_predictions():
     )
 
     census_system = run_census(
-        images_dir=[r"D:\workspace\data\savmap_dataset_v2\raw\images"],
+        images_dir=[EXAMPLE_IMAGE_DIR],
         engine=engine,
+        flight_specs=config.flight_specs,
         overlap_strategy="GPSOverlapStrategy",
         duplicate_removal_strategy="CentroidProximityRemovalStrategy",
         image_overlap_threshold=0.0,
