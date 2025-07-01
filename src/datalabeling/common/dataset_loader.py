@@ -34,7 +34,7 @@ from .annotation_utils import (
 )
 from .base import Tile, Detection
 
-from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig
+from .config import DataConfig, LabelConfig, EvaluationConfig, TilingConfig, FlightSpecs
 from .io import load_yaml, DataHandler, get_images_from_dirs, get_local_path_ls
 from .processor import FeatureExtractor
 from ..ml.interface import InferenceEngine
@@ -436,7 +436,11 @@ class LabelingDataset:
         return
 
     def export_detections_gps(self, save_path: str = None) -> pd.DataFrame:
-        df_export = self.data[["class_name", "gps_loc", "file_name"]].copy()
+        df_export = (
+            self.data[["class_name", "gps_loc", "file_name"]]
+            .copy()
+            .dropna(subset=["gps_loc"])
+        )
 
         df_export[["Latitude", "Longitude", "Elevation"]] = (
             df_export["gps_loc"].apply(GPSUtils.to_decimal).apply(pd.Series)
@@ -469,17 +473,17 @@ class LabelingDataset:
         return data
 
     @classmethod
-    def from_paths(cls, paths: Sequence[str]):
-        tiles = [Tile(image_path=p) for p in paths]
+    def from_paths(cls, paths: Sequence[str], flight_specs: FlightSpecs):
+        tiles = [Tile(image_path=p, flight_specs=flight_specs) for p in paths]
         o = cls(tiles=tiles, data=None)
         o.build()
         o.data["is_annot"] = None
         return o
 
     @classmethod
-    def from_dirs(cls, images_dirs: Sequence[str]):
+    def from_dirs(cls, images_dirs: Sequence[str], flight_specs: FlightSpecs):
         paths = get_images_from_dirs(images_dirs=images_dirs)
-        return cls.from_paths(paths)
+        return cls.from_paths(paths, flight_specs)
 
     @classmethod
     def from_yolo(
@@ -543,7 +547,7 @@ class LabelingDataset:
         cls,
         project_id: int,
         labelstudio_client: LabelStudio,
-        top_n:int=0,
+        top_n: int = 0,
         config: TilingConfig = None,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,

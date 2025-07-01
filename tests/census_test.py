@@ -54,7 +54,13 @@ def load_dataset_from_dirs(image_dir: str):
     """
     images_dirs = [image_dir]
 
-    dataset = LabelingDataset.from_dirs(images_dirs)
+    dataset = LabelingDataset.from_dirs(
+        images_dirs,
+        FlightSpecs(
+            flight_height=180,
+            sensor_height=24,
+        ),
+    )
     tiles = []
     for image_path in dataset.data["file_name"].unique():
         predictions = [make_detection(image_path) for _ in range(random.randint(1, 10))]
@@ -73,7 +79,7 @@ def test_gps_overlap():
     Returns:
         dict: The overlap map between images.
     """
-    dataset = load_dataset_from_dirs(EXAMPLE_DIR)
+    dataset = load_dataset_from_dirs(EXAMPLE_IMAGE_DIR)
     tiles = dataset.tiles
 
     print(dataset.get_stats())
@@ -97,7 +103,7 @@ def test_count_system():
     Returns:
         WildlifeCensusSystem: The system after running the pipeline.
     """
-    dataset = load_dataset_from_dirs(EXAMPLE_DIR)
+    dataset = load_dataset_from_dirs(EXAMPLE_IMAGE_DIR)
 
     # Run GPSOverlapStrategy
     overlap_strategy = GPSOverlapStrategy()
@@ -143,7 +149,7 @@ def test_inference_and_save_predictions():
 
     ALIAS = "demo"
     NAME = "labeler"
-    MODEL_PATH = None #"D:/datalabeling/base_models_weights/best.pt"
+    MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
     roi_classifier_path = r"../base_models_weights/roi_classifier.ckpt"
     roi_cls_is_features = True
     roi_cls_label_map = {0: "gt", 1: "tn"}
@@ -165,8 +171,9 @@ def test_inference_and_save_predictions():
     )
 
     census_system = run_census(
-        images_dir=[EXAMPLE_DIR],
+        images_dir=[EXAMPLE_IMAGE_DIR],
         engine=engine,
+        flight_specs=config.flight_specs,
         overlap_strategy="GPSOverlapStrategy",
         duplicate_removal_strategy="CentroidProximityRemovalStrategy",
         image_overlap_threshold=0.0,

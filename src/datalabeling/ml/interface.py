@@ -122,20 +122,20 @@ class InferenceEngine(object):
             Sequence[list[Detection]] | list[Tile] | pd.DataFrame: Detections, tiles, or DataFrame depending on arguments.
         """
 
-        paths = images_paths
-        if images_paths is None:
-            paths = [t.image_path for t in tiles]
-        else:
-            paths = list(images_paths)
+        if tiles is None:
+            tiles = [
+                Tile(image_path=p, flight_specs=self.config.flight_specs)
+                for p in images_paths
+            ]
 
-        logger.info(f"Running inference on {len(paths)} images.")
+        logger.info(f"Running inference on {len(tiles)} tiles.")
 
-        detections = self.detector.run(images_paths=paths,img_loading_batch=8)
+        detections = self.detector.run(tiles=tiles)
 
-        if len(detections) != len(paths):
+        if len(detections) != len(tiles):
             raise ValueError(
                 "Number of detections does not match number of images. {} != {}".format(
-                    len(detections), len(paths)
+                    len(detections), len(tiles)
                 )
             )
 
@@ -151,8 +151,8 @@ class InferenceEngine(object):
 
         if return_as_df:
             results = {}
-            for i, image_path in enumerate(paths):
-                results.update({str(image_path): detections[i]})
+            for i, tile in enumerate(tiles):
+                results.update({str(tile.image_path): detections[i]})
             return self._format_results_as_dataframe(results)
 
         return detections

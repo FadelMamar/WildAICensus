@@ -37,6 +37,7 @@ from .dataset_loader import LabelingDataset
 from .evaluation import ReportGenerator
 from ..ml.interface import InferenceEngine
 from .visualizer import FiftyOneVisualizer
+from .config import FlightSpecs
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -377,6 +378,7 @@ def run_census(
     images_dir: list[str],
     engine: InferenceEngine,
     overlap_strategy: str,
+    flight_specs: FlightSpecs,
     duplicate_removal_strategy: str,
     image_overlap_threshold: float = 0.0,
     detection_iou_threshold: float = 0.8,
@@ -390,11 +392,11 @@ def run_census(
             f"images_dir must be a list of strings, got {type(a)}"
         )
 
-    dataset = LabelingDataset.from_dirs(images_dir)
+    dataset = LabelingDataset.from_dirs(images_dir, flight_specs)
 
     if engine is not None:
         dataset.add_predictions(engine, build=True)
-    
+
     for tile in dataset.tiles:
         for det in tile.predictions:
             assert det.geographic_footprint is not None

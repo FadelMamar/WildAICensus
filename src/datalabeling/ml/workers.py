@@ -286,7 +286,7 @@ class DataLoadingThread(threading.Thread):
     def __init__(
         self,
         shared_buffers: SharedBuffers,
-        data_source: Sequence[str],
+        data_source: Sequence[Tile],
         batchsize: int = 2,
         tile_size: int = 800,
         overlap_ratio: float = 0.2,
@@ -296,7 +296,7 @@ class DataLoadingThread(threading.Thread):
 
         Args:
             shared_buffers (SharedBuffers): Shared buffer object for communication.
-            data_source (Sequence[str]): Sequence of image paths to load.
+            data_source (Sequence[Tile]): Sequence of tiles to load.
             batchsize (int): Number of samples to load per batch.
             tile_size (int): Size of each tile to extract from images.
             overlap_ratio (float): Overlap ratio for tiling.
@@ -315,133 +315,6 @@ class DataLoadingThread(threading.Thread):
         self.count = 0
         self.batchsize = batchsize
 
-    # TODO: input type checking
-    def _checks(
-        self,
-    ):
-        """
-        Placeholder for input type checking or other checks.
-        """
-        pass
-
-    def _get_patches(self, image: torch.Tensor):
-        """
-        Extract patches from an image tensor using unfolding.
-
-        Args:
-            image (torch.Tensor): Image tensor to extract patches from.
-
-        Returns:
-            torch.Tensor: Tensor of image patches.
-        """
-        if image.dim() == 2:
-            image = image.unsqueeze(0)  # Add channel dimension
-            squeeze_output = True
-        else:
-            squeeze_output = False
-
-        C, H, W = image.shape
-
-        # Use unfold to create tiles
-        # First unfold along height dimension
-        unfolded_h = image.unfold(1, self.tile_size, self.stride)
-
-        # Then unfold along width dimension
-        tiles = unfolded_h.unfold(2, self.tile_size, self.stride)
-
-        # Reshape to get individual tiles
-        tiles = tiles.contiguous().view(C, -1, self.tile_size, self.tile_size)
-        tiles = tiles.permute(1, 0, 2, 3)
-
-        if squeeze_output:
-            tiles = tiles.squeeze(1)
-
-        return tiles
-
-    def _load_data(
-        self,
-    ) -> Tile | str:
-        """
-        Load and preprocess data from the source iterator.
-
-        Returns:
-            Tile or str: Tile object containing image data or "DONE" if no more data.
-        """
-
-        try:
-            image_path = next(self._source_iterator)
-            tile = Tile(image_path=image_path)
-            self.logger.debug(f"Loading: sample {self.count}")
-
-            self.count += 1
-
-            return tile
-
-        except StopIteration:
-            return "DONE"
-
-        except Exception:
-            self.logger.error("Un-catched error!")
-            traceback.print_exc()
-            return "ERROR"
-
-    def _get_patches_from_tile(
-        self, tile: Tile, patch_size: int
-    ) -> tuple[torch.Tensor, dict]:
-        """
-        Extract patches from a tile and compute offset information.
-
-        Args:
-            tile (Tile): Tile object containing image data.
-            patch_size (int): Size of each patch.
-
-        Returns:
-            tuple: (batch of RGB patches, offset information dictionary)
-        """
-
-        image = tile.load_image_data()
-        image = image.convert("RGB")
-        image = PILToTensor()(image)
-
-        if tile.width <= patch_size or tile.height <= patch_size:
-            self.logger.debug("image is too small for patch extraction")
-            offset_info = {
-                "y_offset": [
-                    0,
-                ],
-                "x_offset": [
-                    0,
-                ],
-                "y_end": [
-                    tile.height,
-                ],
-                "x_end": [
-                    tile.width,
-                ],
-                "file_name": str(tile.image_path),
-            }
-            return image, offset_info
-
-        tiles = self._get_patches(image)
-
-        C, H, W = image.shape
-        x_indices = torch.arange(W).reshape(1, -1).expand(H, W)
-        y_indices = torch.arange(H).reshape(-1, 1).expand(H, W)
-        x_indices = self._get_patches(x_indices)
-        y_indices = self._get_patches(y_indices)
-        x_min = y_indices.min(1, True)[0].min(2)[0].squeeze().cpu().numpy()
-        y_min = y_indices.min(1, True)[0].min(2)[0].squeeze().cpu().numpy()
-
-        offset_info = {
-            "y_offset": y_min.tolist(),
-            "x_offset": x_min.tolist(),
-            "y_end": (y_min + patch_size).tolist(),
-            "x_end": (x_min + patch_size).tolist(),
-            "file_name": str(tile.image_path),
-        }
-
-        return tiles, offset_info
-
     def preprocess_data(self, tile: Tile) -> tuple[torch.Tensor, dict]:
         """
         Preprocess raw data before detection by extracting and normalizing patches.
@@ -452,23 +325,18 @@ class DataLoadingThread(threading.Thread):
         Returns:
             tuple: (batch of patches, offset information)
         """
-        # PLACEHOLDER - REPLACE WITH YOUR PREPROCESSING
         self.logger.debug(f"Preprocessing: sample {self.count} has been loaded.")
 
         # load as RGB and extract patches
-        batch_of_patches, offset_info = self._get_patches_from_tile(
-            tile=tile, patch_size=self.tile_size
+        batch_of_patches, offset_info = tile._get_patches_and_offset_info(
+            patch_size=self.tile_size, stride=self.stride
         )
-
-        # print(offset_info,"\n\n")
 
         if batch_of_patches.max() > 1.0:
             batch_of_patches = batch_of_patches / 255.0
 
         if len(batch_of_patches) == 3:
             batch_of_patches.unsqueeze_(0)
-
-        # data = TensorDataset(batch_of_patches)
 
         return batch_of_patches, offset_info
 
@@ -479,20 +347,18 @@ class DataLoadingThread(threading.Thread):
         Returns:
             str: "DONE" if no more data, otherwise "OK".
         """
-        tile = self._load_data()
-
-        if tile == "DONE":
-            self.shared_buffers.put(data="DONE")
-            self.logger.debug(f"No more data to load. Loaded {self.count} samples.")
-            return "DONE"
-        elif tile == "ERROR":
-            self.shared_buffers.put(data="ERROR")
-            self.logger.error("Error loading data")
-            return "ERROR"
-
-        # Preprocess data
         try:
+            tile = next(self._source_iterator)
+            self.logger.debug(f"Loading: sample {self.count}")
+
+            if not isinstance(tile, Tile):
+                self.logger.error(f"Tile is not a 'Tile' object. Found {type(tile)}")
+                return "ERROR"
+
+            self.count += 1
+
             batch_of_patches, offset_info = self.preprocess_data(tile=tile)
+
             data_package = dict(
                 metadata={
                     "tile": tile,
@@ -500,12 +366,22 @@ class DataLoadingThread(threading.Thread):
                 },
                 data=batch_of_patches,
                 offset_info=offset_info,
+                number_patches=batch_of_patches.shape[0],
             )
             # push data
             self.shared_buffers.put(data=data_package)
             return "OK"
-        except:
+
+        except StopIteration:
+            self.shared_buffers.put(data="DONE")
+            self.logger.debug(f"No more data to load. Loaded {self.count} samples.")
+            return "DONE"
+
+        except Exception:
+            self.logger.error("Un-catched error!")
             traceback.print_exc()
+            self.shared_buffers.put(data="ERROR")
+            self.logger.error("Error loading data")
             return "ERROR"
 
     def run(self):
@@ -517,15 +393,13 @@ class DataLoadingThread(threading.Thread):
         while True:
             for _ in range(self.batchsize):
                 status = self._load_once()
-                if status == "DONE":
+                if status == "OK":
+                    continue
+                elif status == "DONE":
                     self.logger.info("DONE")
                     return
-                elif status == "OK":
-                    continue
-                elif status == "ERROR":
-                    return
                 else:
-                    self.logger.error("Unknown error")
+                    self.logger.error(f"Unknown error: {status}")
                     return
 
 
@@ -672,6 +546,7 @@ class DetectionThread(threading.Thread):
         }
         return results
 
+    # TODO: increase number of images in dataloader
     def collect_batch(self):
         """
         Collect tensors into a batch using a hybrid time/size strategy.
@@ -899,9 +774,7 @@ class PostProcessingThread(threading.Thread):
             tile = results_package["metadata"]["tile"]
             offset_info = results_package["offset_info"]
 
-            self.logger.debug(
-                f"{len(raw_detections)} detections before postprocessing"
-            )
+            self.logger.debug(f"{len(raw_detections)} detections before postprocessing")
 
             filtered_detections = self.postprocess(
                 raw_detections, tile=tile, offset_info=offset_info
@@ -1211,24 +1084,24 @@ class ObjectDetectionSystem:
         return None
 
     def run(
-        self, images_paths: Sequence[str], img_loading_batch: int = 4
+        self, tiles: Sequence[Tile], img_loading_batch: int = 4
     ) -> List[List[Detection]]:
         """
         Run the object detection system on a list of image paths.
 
         Args:
-            images_paths (Sequence[str]): List of image paths to process.
+            tiles (Sequence[Tile]): List of tiles to process.
             img_loading_batch (int): Batch size for image loading.
 
         Returns:
             List[List[Detection]]: List of detection results for each image.
         """
-        images_paths = list(images_paths)
+        tiles = list(tiles)
 
         # Initialize threads
         self.data_thread = DataLoadingThread(
             self.shared_buffers,
-            data_source=images_paths,
+            data_source=tiles,
             tile_size=self.config.tilesize,
             batchsize=img_loading_batch,
             overlap_ratio=self.config.overlap_ratio,

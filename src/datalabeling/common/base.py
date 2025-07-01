@@ -383,7 +383,7 @@ class Detection:
         gsd: ground sample distance (cm/px)
         """
         if self.gps_loc is None:
-            logger.info("No gps coordinate found in the detection")
+            logger.debug("No gps coordinate found in the detection")
             return
 
         try:
@@ -436,7 +436,8 @@ class Tile:
     latitude: float = None
     longitude: float = None
     altitude: float = None
-    flight_specs: FlightSpecs = field(default_factory=FlightSpecs)
+    flight_specs: FlightSpecs = None
+
     geographic_footprint: Optional[GeographicBounds] = None
     gsd: float = None  # cm/px
 
@@ -472,16 +473,23 @@ class Tile:
         exif = self._extract_exif()
 
         if self.flight_specs is None:
-            raise ValueError("Flight specs are not provided.")
+            logger.debug("Flight specs are not provided.")
+            return
+        elif isinstance(self.flight_specs, FlightSpecs):
+            pass
+        else:
+            raise ValueError(
+                f"Flight specs is either None or not a 'FlightSpecs' object. Found {type(self.flight_specs)}"
+            )
 
         sensor_height = self.flight_specs.sensor_height
         if sensor_height is None:
             sensor_height = SENSOR_HEIGHTS.get(exif["Model"])
             if sensor_height is None:
-                raise ValueError("Sensor height not found. Please provide it.")
+                logger.debug("Sensor height not found. Please provide it.")
 
         # self.gsd = self.flight_specs.gsd
-        if self.gsd is None:
+        if self.flight_specs is not None:
             self.gsd = ImageProcessor.get_gsd(
                 image_path=self.image_path,
                 image=self.image_data,
@@ -513,7 +521,9 @@ class Tile:
 
     def _extract_geographic_footprint(self):
         if self.tile_gps_loc is None:
-            logger.info("No gps coordinate found in the tile. Geographic footprint will not be set.")
+            logger.debug(
+                "No gps coordinate found in the tile. Geographic footprint will not be set."
+            )
             return
         xs = np.array([0, self.width])
         ys = np.array([0, self.height])
@@ -557,7 +567,7 @@ class Tile:
                 geopy.Point(self.latitude, self.longitude, self.altitude / 1e3)
             )
         else:
-            logger.info(f"Failed to extract GPS coordinates from {self.image_path}.")
+            logger.debug(f"Failed to extract GPS coordinates from {self.image_path}.")
 
         return None
 
@@ -629,7 +639,7 @@ class Tile:
     def update_detection_gps(
         self,
     ):
-        if self.tile_gps_loc is None:
+        if (self.tile_gps_loc is None) or (self.flight_specs is None):
             logger.info(f"No gps coordinate found in tile: {self.image_path}")
             return
 
@@ -665,7 +675,6 @@ class Tile:
                         gsd=self.gsd,
                     )
                 except Exception as e:
-                    # print(e)
                     logger.error(f"Failed to compute GPS location of detections. {e}")
                     det.gps_loc = None
 
@@ -732,6 +741,10 @@ class Tile:
                 Detection.empty(parent_image=self.image_path),
             ]
 
+        # if self.tile_gps_loc is None:
+        #    self._extract_gps_coords()
+        #    self._extract_geographic_footprint()
+
         return None
 
     def set_annotations(self, data: List[Detection]) -> None:
@@ -754,96 +767,102 @@ class Tile:
             return None
 
         assert df.to_numpy().min() >= 0
-        assert df[["x_min", "x_max"]].to_numpy().max() <= self.width, f"{df[['x_min', 'x_max']].to_numpy().max()} <= {self.width}"
-        assert df[["y_min", "y_max"]].to_numpy().max() <= self.height, f"{df[['y_min', 'y_max']].to_numpy().max()} <= {self.height}"
+        assert df[["x_min", "x_max"]].to_numpy().max() <= self.width, (
+            f"{df[['x_min', 'x_max']].to_numpy().max()} <= {self.width}"
+        )
+        assert df[["y_min", "y_max"]].to_numpy().max() <= self.height, (
+            f"{df[['y_min', 'y_max']].to_numpy().max()} <= {self.height}"
+        )
 
         return None
 
-    def as_batch(self, tile_size: int, stride: int) -> tuple[torch.Tensor, dict]:
-        if self.image_data is not None:
-            image = self.image_data
+    def _get_patches(self, image: torch.Tensor, patch_size: int, stride: int):
+        """
+        Extract patches from an image tensor using unfolding.
+
+        Args:
+            image (torch.Tensor): Image tensor to extract patches from.
+
+        Returns:
+            torch.Tensor: Tensor of image patches.
+        """
+        if image.dim() == 2:
+            image = image.unsqueeze(0)  # Add channel dimension
+            squeeze_output = True
         else:
-            assert self.image_path is not None, (
-                "'image_path' should be set if 'image_data' is None!"
-            )
-            image = Image.open(self.image_path).convert("RGB")
+            squeeze_output = False
 
-        def get_tiles(image: torch.Tensor):
-            if image.dim() == 2:
-                image = image.unsqueeze(0)  # Add channel dimension
-                squeeze_output = True
-            else:
-                squeeze_output = False
+        C, H, W = image.shape
 
-            C, H, W = image.shape
+        # Use unfold to create tiles
+        # First unfold along height dimension
+        unfolded_h = image.unfold(1, patch_size, stride)
 
-            # Calculate number of tiles in each dimension
-            num_tiles_h = (H - tile_size) // stride + 1
-            num_tiles_w = (W - tile_size) // stride + 1
+        # Then unfold along width dimension
+        tiles = unfolded_h.unfold(2, patch_size, stride)
 
-            # Use unfold to create tiles
-            # First unfold along height dimension
-            unfolded_h = image.unfold(
-                1, tile_size, stride
-            )  # Shape: (C, num_tiles_h, W, tile_size)
+        # Reshape to get individual tiles
+        tiles = tiles.contiguous().view(C, -1, patch_size, patch_size)
+        tiles = tiles.permute(1, 0, 2, 3)
 
-            # Then unfold along width dimension
-            tiles = unfolded_h.unfold(
-                2, tile_size, stride
-            )  # Shape: (C, num_tiles_h, num_tiles_w, tile_size, tile_size)
+        if squeeze_output:
+            tiles = tiles.squeeze(1)
 
-            # Reshape to get individual tiles
-            tiles = tiles.contiguous().view(
-                C, num_tiles_h * num_tiles_w, tile_size, tile_size
-            )
-            tiles = tiles.permute(
-                1, 0, 2, 3
-            )  # Shape: (num_tiles, C, tile_size, tile_size)
+        return tiles
 
-            if squeeze_output:
-                tiles = tiles.squeeze(1)
+    def _get_patches_and_offset_info(
+        self, patch_size: int, stride: int
+    ) -> tuple[torch.Tensor, dict]:
+        """
+        Extract patches from a tile and compute offset information.
 
-            return tiles, num_tiles_h, num_tiles_w
+        Args:
+            tile (Tile): Tile object containing image data.
+            patch_size (int): Size of each patch.
 
+        Returns:
+            tuple: (batch of RGB patches, offset information dictionary)
+        """
+
+        image = self.load_image_data()
+        image = image.convert("RGB")
         image = PILToTensor()(image)
 
-        tiles, num_tiles_h, num_tiles_w = get_tiles(image)
+        if self.width <= patch_size or self.height <= patch_size:
+            logger.debug("image is too small for patch extraction")
+            offset_info = {
+                "y_offset": [
+                    0,
+                ],
+                "x_offset": [
+                    0,
+                ],
+                "y_end": [
+                    self.height,
+                ],
+                "x_end": [
+                    self.width,
+                ],
+                "file_name": str(self.image_path),
+            }
+            return image, offset_info
+
+        tiles = self._get_patches(image, patch_size, stride)
 
         C, H, W = image.shape
         x_indices = torch.arange(W).reshape(1, -1).expand(H, W)
         y_indices = torch.arange(H).reshape(-1, 1).expand(H, W)
-        x_indices, _, _ = get_tiles(x_indices)
-        y_indices, _, _ = get_tiles(y_indices)
+        x_indices = self._get_patches(x_indices, patch_size, stride)
+        y_indices = self._get_patches(y_indices, patch_size, stride)
         x_min = y_indices.min(1, True)[0].min(2)[0].squeeze().cpu().numpy()
         y_min = y_indices.min(1, True)[0].min(2)[0].squeeze().cpu().numpy()
 
         offset_info = {
             "y_offset": y_min.tolist(),
             "x_offset": x_min.tolist(),
-            "y_end": (y_min + tile_size).tolist(),
-            "x_end": (x_min + tile_size).tolist(),
-            "file_name": [str(self.image_path)] * len(x_min),
+            "y_end": (y_min + patch_size).tolist(),
+            "x_end": (x_min + patch_size).tolist(),
+            "file_name": str(self.image_path),
         }
 
         return tiles, offset_info
-
-    def update_geographic_footprint_from_gps(self, width: int, height: int, gsd: float):
-        """
-        Update the detection's geographic_footprint using its gps_loc field, similar to Tile._extract_geographic_footprint.
-        Args:
-            width (int): Width of the image.
-            height (int): Height of the image.
-            gsd (float): Ground sample distance (cm/px).
-        Returns:
-            None
-        """
-        if self.gps_loc is None:
-            logger.info("No gps coordinate found in the detection")
-            return
-        # Parse gps_loc string to get latitude, longitude, altitude
-        try:
-            point = geopy.Point(self.gps_loc)
-        except Exception as e:
-            logger.warning(f"Could not parse gps_loc: {self.gps_loc}, error: {e}")
-            return
-        # ... existing code ...

@@ -37,7 +37,7 @@ config = PredictionConfig(
     # device="cuda:0",
 )
 
-ALIAS = "demo" 
+ALIAS = "demo"
 NAME = "labeler"
 
 MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
@@ -187,11 +187,9 @@ def run_detector(
     #                                  config=config,
     #                                  )
 
-    detection_system.set_model(model=model) 
-
-    results = detection_system.run(images_paths=image_paths)
-
-    print("Results:", len(results))
+    detector.set_model(model=model)
+    tiles = [Tile(image_path=p, flight_specs=config.flight_specs) for p in image_paths]
+    results = detector.run(tiles=tiles)
 
     return results
 
@@ -242,6 +240,9 @@ if __name__ == "__main__":
 
     # results = run_detector(image_paths=images)
 
+    # print(results)
+    # print(len(results), len(images))
+
     # t1_start = perf_counter()
 
     results = run_inference_engine(images)
@@ -249,7 +250,7 @@ if __name__ == "__main__":
     # t1_stop = perf_counter()
     # print("Inference time: ", t1_stop - t1_start)
 
-    # print("detections:", detections)
+    print("detections:", results)
 
     # image = imread(img_path)
 
