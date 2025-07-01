@@ -950,38 +950,46 @@ class LabelingDataset:
 
         return str(img_dir), str(annot_save_path)
 
-    def to_fiftyone(self, dataset_name: str, persistent: bool = False) -> fo.Dataset:
+    def to_fiftyone(
+        self, dataset_name: str, model_tag: str, persistent: bool = False
+    ) -> fo.Dataset:
         try:
             # Try to load existing dataset
             dataset = fo.load_dataset(dataset_name, create_if_necessary=False)
             logger.info(f"Loaded existing dataset: {dataset_name}")
         except ValueError:
-            # Create new dataset if it doesn't exist
             dataset = fo.Dataset(dataset_name, persistent=persistent)
             logger.info(f"Created new dataset: {dataset_name}")
 
-        samples = []
-
+        samples_to_add = []
         data = self.data.dropna(how="any", subset=["x_min", "x_max", "y_min", "y_max"])
 
         for img_path, df_detections in tqdm(
-            data.groupby("file_name"), desc="Creating-fifytone-dataset"
+            data.groupby("file_name"), desc="Creating-fiftyone-dataset"
         ):
+            img_path = str(img_path)
             if not os.path.exists(img_path):
-                logger.warning(f"Warning: Image not found at {img_path}.Skipping")
+                logger.warning(f"Warning: Image not found at {img_path}. Skipping")
                 continue
 
-            sample = fo.Sample(filepath=img_path)
+            # Check if sample already exists in dataset
+            try:
+                sample = dataset.match({"filepath": img_path}).first()
+            except Exception:
+                sample = None
+
+            if sample is None:
+                sample = fo.Sample(filepath=img_path)
+
+            sample["model_tag"] = model_tag
 
             if df_detections.dropna(how="all").empty:
                 logger.info(f"Image at {img_path} is a negative sample")
-                # sample["is_positive"] = False
-                samples.append(sample)
+                samples_to_add.append(sample)
                 continue
 
             class_name = df_detections["class_name"].tolist()
 
-            # get bbox [x, y, w, h] in normalized coords [0,1]
             bboxes = df_detections[["x_min", "y_min"]].copy()
             bboxes.loc[:, "x_min"] /= df_detections.loc[:, "image_width"]
             bboxes.loc[:, "y_min"] /= df_detections.loc[:, "image_height"]
@@ -990,7 +998,7 @@ class LabelingDataset:
             bboxes.loc[:, "w"] = (
                 df_detections.loc[:, "x_max"] - df_detections.loc[:, "x_min"]
             ) / df_detections.loc[:, "image_width"]
-            bboxes.loc[:, "h"] = (
+            bboxes["h"] = (
                 df_detections.loc[:, "y_max"] - df_detections.loc[:, "y_min"]
             ) / df_detections.loc[:, "image_height"]
             bboxes = bboxes[["x_min", "y_min", "w", "h"]].to_numpy().tolist()
@@ -999,7 +1007,6 @@ class LabelingDataset:
             if "score" in df_detections.columns:
                 scores = df_detections["score"].to_list()
 
-            # add groundtruth
             gt_fo_detections = []
             pred_fo_detections = []
             for i, box in enumerate(bboxes):
@@ -1019,10 +1026,10 @@ class LabelingDataset:
             sample["ground_truth"] = fo.Detections(detections=gt_fo_detections)
             sample["predictions"] = fo.Detections(detections=pred_fo_detections)
 
-            samples.append(sample)
+            samples_to_add.append(sample)
 
-        dataset.add_samples(samples)
-
+        # Add or update samples in the dataset
+        dataset.add_samples(samples_to_add, expand_schema=True)
         return dataset
 
 

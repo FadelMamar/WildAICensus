@@ -54,13 +54,14 @@ def main():
     # training_api_token = st.text_input("Training API Token", type="password")
 
     # Main tabs
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs(
         [
             "Upload Annotations",
             "Project Analytics",
             "Model Training",
             "GPS",
             "Inference",
+            "Census",
         ]
     )
 
@@ -600,6 +601,65 @@ def main():
                 # plot detections on folium map
                 folium_static(get_map_with_detections(locations=df_results_px))
 
+    with tab6:
+        st.header("Run Census Pipeline")
+
+        with st.form("run_census_form"):
+            images_dir = st.text_input("Images directory", value="D:/images").strip()
+            model_path = st.text_input(
+                "Model path", value="D:/datalabeling/base_models_weights/best.pt"
+            ).strip()
+            alias = st.text_input("Model alias", value="demo").strip()
+            name = st.text_input("Model name", value="labeler").strip()
+            roi_classifier_path = st.text_input(
+                "ROI classifier path", value="base_models_weights/roi_classifier.ckpt"
+            ).strip()
+            overlap_strategy = st.text_input(
+                "Overlap strategy", value="GPSOverlapStrategy"
+            ).strip()
+            flight_height = st.number_input("Flight height (m)", value=180.0)
+            sensor_height = st.number_input("Sensor height (mm)", value=24.0)
+            focal_length = st.number_input("Focal length (mm)", value=35.0)
+            duplicate_removal_strategy = st.text_input(
+                "Duplicate removal strategy", value="CentroidProximityRemovalStrategy"
+            ).strip()
+            image_overlap_threshold = st.number_input(
+                "Image overlap threshold", value=0.0
+            )
+            detection_iou_threshold = st.number_input(
+                "Detection IoU threshold", value=0.8
+            )
+            save_path = st.text_input("Save path", value="census_results.json").strip()
+            fiftyone_dataset_name = st.text_input(
+                "FiftyOne dataset name", value="demo-dataset"
+            ).strip()
+            fiftyone_persistent = st.checkbox("FiftyOne persistent", value=True)
+
+            if st.form_submit_button("Run Census"):
+                with st.spinner("Running census..."):
+                    result = run_census_subprocess(
+                        images_dir=images_dir,
+                        model_path=model_path,
+                        alias=alias,
+                        name=name,
+                        roi_classifier_path=roi_classifier_path,
+                        overlap_strategy=overlap_strategy,
+                        flight_height=flight_height,
+                        sensor_height=sensor_height,
+                        focal_length=focal_length,
+                        duplicate_removal_strategy=duplicate_removal_strategy,
+                        image_overlap_threshold=image_overlap_threshold,
+                        detection_iou_threshold=detection_iou_threshold,
+                        save_path=save_path,
+                        fiftyone_dataset_name=fiftyone_dataset_name,
+                        fiftyone_persistent=fiftyone_persistent,
+                    )
+                    st.write(result["stdout"])
+                    if result["stderr"]:
+                        st.error(result["stderr"])
+                    else:
+                        st.success("Census completed!")
+
 
 def get_inference_engine(annotator_kwargs: dict) -> InferenceEngine:
     config = PredictionConfig(
@@ -942,7 +1002,77 @@ def register_model(
         "returncode": result.returncode,
     }
 
-    pass
+
+def run_census_subprocess(
+    images_dir,
+    model_path,
+    alias,
+    name,
+    roi_classifier_path,
+    overlap_strategy,
+    flight_height,
+    sensor_height,
+    focal_length,
+    duplicate_removal_strategy,
+    image_overlap_threshold,
+    detection_iou_threshold,
+    save_path,
+    fiftyone_dataset_name,
+    fiftyone_persistent,
+):
+    import subprocess
+    from pathlib import Path
+    import streamlit as st
+
+    script_path = "helper-scripts/cli.bat"
+    args = [
+        f"--images_dir={images_dir}",
+        f"--model_path={model_path}",
+        f"--alias={alias}",
+        f"--name={name}",
+        f"--roi_classifier_path={roi_classifier_path}",
+        f"--overlap_strategy={overlap_strategy}",
+        f"--flight_height={flight_height}",
+        f"--sensor_height={sensor_height}",
+        f"--focal_length={focal_length}",
+        f"--duplicate_removal_strategy={duplicate_removal_strategy}",
+        f"--image_overlap_threshold={image_overlap_threshold}",
+        f"--detection_iou_threshold={detection_iou_threshold}",
+        f"--save_path={save_path}",
+        f"--fiftyone_dataset_name={fiftyone_dataset_name}",
+        f"--fiftyone_persistent={fiftyone_persistent}",
+    ]
+
+    cmd = ["call", script_path, "run_census_cli"] + args
+
+    cwd = Path(__file__).parent.parent
+    log_placeholder = st.empty()
+
+    # Use Popen for live output
+    process = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        shell=True,
+        cwd=cwd,
+        bufsize=1,
+        universal_newlines=True,
+    )
+
+    logs = ""
+    for line in process.stdout:
+        logs += line
+        log_placeholder.code(logs)  # Update the Streamlit code block with new logs
+
+    process.stdout.close()
+    returncode = process.wait()
+
+    return {
+        "stdout": logs,
+        "stderr": "",
+        "returncode": returncode,
+    }
 
 
 if __name__ == "__main__":

@@ -305,8 +305,8 @@ class InferenceEngine(object):
         mlflow_model_alias: str = "demo",
         mlflow_model_name: str = "labeler",
         set_ls_client: bool = False,
-        buffer_size=256,
-        timeout=300,
+        buffer_size=24,
+        timeout=60,
         dot_env_path: str = None,
     ) -> tuple:
         """

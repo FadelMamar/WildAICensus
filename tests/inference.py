@@ -237,9 +237,7 @@ if __name__ == "__main__":
 
     # images = [image_path]
 
-    images = Path(
-        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2"
-    ).glob("*.JPG")
+    images = Path(r"D:\workspace\data\savmap_dataset_v2\raw\tmp").glob("*.JPG")
     images = list(images)[:20]
 
     # results = run_model(image_path)

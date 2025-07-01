@@ -12,9 +12,9 @@ from datalabeling.ml.interface import InferenceEngine
 from datalabeling.common.config import PredictionConfig, FlightSpecs
 # import uuid
 
-# EXAMPLE_DIR = r"D:\workspace\data\savmap_dataset_v2\raw\images"
+EXAMPLE_DIR = r"D:\workspace\data\savmap_dataset_v2\raw\images"
 
-EXAMPLE_IMAGE_DIR = r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
+EXAMPLE_DIR = r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
 
 
 def make_detection(parent_image: str):
@@ -79,7 +79,7 @@ def test_gps_overlap():
     Returns:
         dict: The overlap map between images.
     """
-    dataset = load_dataset_from_dirs(EXAMPLE_IMAGE_DIR)
+    dataset = load_dataset_from_dirs(EXAMPLE_DIR)
     tiles = dataset.tiles
 
     print(dataset.get_stats())
@@ -103,7 +103,7 @@ def test_count_system():
     Returns:
         WildlifeCensusSystem: The system after running the pipeline.
     """
-    dataset = load_dataset_from_dirs(EXAMPLE_IMAGE_DIR)
+    dataset = load_dataset_from_dirs(EXAMPLE_DIR)
 
     # Run GPSOverlapStrategy
     overlap_strategy = GPSOverlapStrategy()
@@ -168,11 +168,14 @@ def test_inference_and_save_predictions():
         model_path=MODEL_PATH,
         mlflow_model_alias=ALIAS,
         mlflow_model_name=NAME,
+        buffer_size=24,
+        timeout=60,
     )
 
     census_system = run_census(
-        images_dir=[EXAMPLE_IMAGE_DIR],
+        images_dir=[EXAMPLE_DIR],
         engine=engine,
+        model_tag=f"{NAME}/{ALIAS}",
         flight_specs=config.flight_specs,
         overlap_strategy="GPSOverlapStrategy",
         duplicate_removal_strategy="CentroidProximityRemovalStrategy",
