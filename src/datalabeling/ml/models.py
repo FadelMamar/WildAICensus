@@ -766,9 +766,11 @@ class GroundingDinoDetector(Detector):
         image = self.load_image_and_resize(image, target_size=target_size)
         text = [[text]] * image.shape[0]
 
-        return self.transform(
+        inputs = self.transform(
             images=image, text=text, return_tensors="pt", do_rescale=False
-        ).to(self.device)
+        )
+        inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
+        return inputs
 
     def postprocess(
         self,
@@ -791,8 +793,8 @@ class GroundingDinoDetector(Detector):
         for result in results:
             o = dict(
                 bbox=result["boxes"].cpu().tolist(),
-                label=result["labels"],
-                score=result["scores"],
+                label=result["labels"].cpu().tolist(),
+                score=result["scores"].cpu().tolist(),
                 class_name=result["text_labels"],
             )
 
@@ -830,7 +832,7 @@ class GroundingDinoDetector(Detector):
         target_sizes = [(self.config.imgsz, self.config.imgsz)] * batchsize
         return self.postprocess(
             detections=results,
-            ids=inputs.input_ids,
+            ids=inputs["input_ids"],
             target_sizes=target_sizes,
             box_threshold=self.config.confidence_threshold,
             text_threshold=text_threshold,
