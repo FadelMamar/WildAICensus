@@ -161,7 +161,7 @@ def test_inference_and_save_predictions():
     )
 
     census_system = run_census(
-        images_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
+        images_dir=[r"D:\workspace\data\savmap_dataset_v2\raw\images"],
         engine=engine,
         overlap_strategy="GPSOverlapStrategy",
         duplicate_removal_strategy="CentroidProximityRemovalStrategy",
