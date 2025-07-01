@@ -15,7 +15,7 @@ class FlightSpecs:
 
     sensor_height: float = 24  # in mm
     focal_length: float = 35  # in mm
-    gsd: float = None  # in cm/px
+    # gsd: float = None  # in cm/px
     flight_height: float = 180  # in meters
 
 

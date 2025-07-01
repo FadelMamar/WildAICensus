@@ -193,7 +193,15 @@ class SharedBuffers:
                 return self._get_results(**kwargs)
 
         except queue.Empty:
-            self.logger.info("Queue is Empty or has been consumed.")
+            request = (
+                "data"
+                if data
+                else "detections"
+                if detections
+                else "filtered_detections"
+            )
+            msg = f"Queue is Empty or has been consumed. Request: {request}"
+            self.logger.info(msg)
             return "DONE"
 
         except Exception:
@@ -368,7 +376,7 @@ class DataLoadingThread(threading.Thread):
         try:
             image_path = next(self._source_iterator)
             tile = Tile(image_path=image_path)
-            self.logger.debug(f"Loading: sample {self.count} has been loaded.")
+            self.logger.info(f"Loading: sample {self.count}")
 
             self.count += 1
 
@@ -380,7 +388,7 @@ class DataLoadingThread(threading.Thread):
         except Exception:
             self.logger.error("Un-catched error!")
             traceback.print_exc()
-            return "DONE"
+            return "ERROR"
 
     def _get_patches_from_tile(
         self, tile: Tile, patch_size: int
@@ -482,42 +490,47 @@ class DataLoadingThread(threading.Thread):
             self.shared_buffers.put(data="DONE")
             self.logger.debug(f"No more data to load. Loaded {self.count} samples.")
             return "DONE"
+        elif tile == "ERROR":
+            self.shared_buffers.put(data="DONE")
+            self.logger.error("Error loading data")
+            return "ERROR"
 
         # Preprocess data
         try:
-            if isinstance(tile, Tile):
-                batch_of_patches, offset_info = self.preprocess_data(tile=tile)
-                data_package = dict(
-                    metadata={
-                        "tile": tile,
-                        "idx": self.count,
-                    },
-                    data=batch_of_patches,
-                    offset_info=offset_info,
-                )
-                # push data
-                self.shared_buffers.put(data=data_package)
-                return "OK"
+            batch_of_patches, offset_info = self.preprocess_data(tile=tile)
+            data_package = dict(
+                metadata={
+                    "tile": tile,
+                    "idx": self.count,
+                },
+                data=batch_of_patches,
+                offset_info=offset_info,
+            )
+            # push data
+            self.shared_buffers.put(data=data_package)
+            return "OK"
         except:
             traceback.print_exc()
-            return "DONE"
-
-        else:
-            return "DONE"
+            return "ERROR"
 
     def run(self):
         """
         Main thread execution loop for loading data batches.
         """
-        self.logger.info("Starting data loading thread")
+        self.logger.info("Starting...")
 
         while True:
             for _ in range(self.batchsize):
-                if self._load_once() == "DONE":
+                res = self._load_once()
+                if res == "DONE":
                     return
-                elif self._load_once() == "OK":
+                elif res == "OK":
                     continue
+                elif res == "ERROR":
+                    self.logger.error("Error loading data")
+                    return
                 else:
+                    self.logger.error("Unknown error")
                     return
 
 
@@ -620,10 +633,7 @@ class DetectionThread(threading.Thread):
             )
 
         else:
-            # Only call predict if self.model is set and batch is valid
-            if self.model is not None:
-                # Some Detector implementations may expect Image, not Tensor
-                # This is a placeholder; actual implementation may need conversion
+            if isinstance(self.model, Detector):
                 res = self.model.predict(batch)
             else:
                 raise ValueError("Detection model is not set.")
@@ -698,22 +708,22 @@ class DetectionThread(threading.Thread):
             data_package = self.shared_buffers.get(data=True)
 
             if data_package == "DONE":
-                self.logger.debug("No more data to process. DONE.")
                 break
-                # return "DONE", None, None
 
-            # if data_package == "empty":
-            #     self.logger.info("Buffer is empty.")
-            #     return "empty", None, None
+            elif data_package == "ERROR":
+                self.logger.error("Error collecting batch")
+                return "ERROR", None, None
 
-            if data_package is not None and isinstance(data_package, dict):
-                batch.append(data_package.get("data"))
-                offsets.append(data_package.get("offset_info"))
-                metadata.append(data_package.get("metadata"))
-            else:
-                continue
+            if not isinstance(data_package, dict):
+                self.logger.error("data_package is not a dict")
+                return "ERROR", None, None
+
+            batch.append(data_package.get("data"))
+            offsets.append(data_package.get("offset_info"))
+            metadata.append(data_package.get("metadata"))
 
         if len(batch) < 1:
+            self.logger.info("DONE.")
             return "DONE", None, None
 
         dataset = LoadingDataset(
@@ -726,7 +736,7 @@ class DetectionThread(threading.Thread):
         """
         Main thread execution loop for running detection on batches.
         """
-        self.logger.info("Starting detection thread")
+        self.logger.info("Starting...")
 
         # Load model
         assert self.model or self.config.inference_service_url, (
@@ -739,33 +749,33 @@ class DetectionThread(threading.Thread):
 
             if data == "DONE":
                 self.shared_buffers.put(detections="DONE")
-                break
+                return
+            elif data == "ERROR":
+                self.shared_buffers.put(detections="ERROR")
+                return
 
             try:
                 # Run detection
                 t1 = time.perf_counter()
                 detection_results = self.run_detection(data)
-                t_end = (time.perf_counter() - t1) / len(data)
+                dt = (time.perf_counter() - t1) / len(data)
 
-                self.logger.info(f"Detection time: {t_end:.3f}s")
+                self.logger.info(f"Detection time: {dt:.3f}s")
+
+                for i, results in detection_results.items():
+                    results_package = {
+                        "detections": results,
+                        "offset_info": offsets[i],
+                        "metadata": metadata[i],
+                        "detection_time": dt,
+                    }
+                self.shared_buffers.put(detections=results_package)
 
             except Exception as e:
                 traceback.print_exc()
                 self.logger.error("Graceful shutdown.")
-                self.shared_buffers.put(detections="DONE")
-                break
-                # raise ValueError()
-
-            # Put in queue
-
-            for i, results in detection_results.items():
-                results_package = {
-                    "detections": results,
-                    "offset_info": offsets[i],
-                    "metadata": metadata[i],
-                    "detection_time": t_end,
-                }
-                self.shared_buffers.put(detections=results_package)
+                self.shared_buffers.put(detections="ERROR")
+                return
 
 
 class PostProcessingThread(threading.Thread):
@@ -789,7 +799,7 @@ class PostProcessingThread(threading.Thread):
         """
         super().__init__(name="PostProcessingThread")
         self.shared_buffers = shared_buffers
-        self.outputs = list()
+        self.outputs = None
         self.logger = logging.getLogger(self.name)
         self.config = config
         self.label_map = label_map or dict()
@@ -821,13 +831,10 @@ class PostProcessingThread(threading.Thread):
         """
         # offset detections
         for i, pred in enumerate(detections):
-            pred.parent_image = tile.image_path
-            pred.image_gps_loc = tile.tile_gps_loc
             pred.gps_loc = None
             pred.to_absolute_coords(
                 x_offset=offset_info["x_offset"][i], y_offset=offset_info["y_offset"][i]
             )
-
         tile.set_predictions(detections)
         tile.filter_detections(
             method="nms",
@@ -835,17 +842,7 @@ class PostProcessingThread(threading.Thread):
             clamp=True,
             confidence_threshold=self.config.confidence_threshold,
         )
-        # Only update detection GPS if config has the required attributes
-        if (
-            hasattr(self.config, "sensor_height")
-            and hasattr(self.config, "flight_height")
-            and hasattr(self.config, "gsd")
-        ):
-            tile.update_detection_gps(
-                sensor_height=self.config.sensor_height,
-                flight_height=self.config.flight_height,
-                gsd=self.config.gsd,
-            )
+        tile.update_detection_gps()
 
         # post process roi
         if self.roi_processor:
@@ -872,44 +869,63 @@ class PostProcessingThread(threading.Thread):
         # Get detection results from buffer
         results_package = self.shared_buffers.get(detections=True)
 
+        # self.logger.warning(results_package)
+
         if results_package == "DONE":
             self.shared_buffers.put(filtered_detections="DONE")
-            self.logger.info("No more data to process")
-            return "DONE"
+            self.logger.info("DONE")
+            return
 
-        # Apply post-processing
-        raw_detections = results_package["detections"]
-        tile = results_package["metadata"]["tile"]
-        offset_info = results_package["offset_info"]
+        elif results_package == "ERROR":
+            self.shared_buffers.put(filtered_detections="ERROR")
+            self.logger.error("ERROR in loading detections.")
+            return
+
+        if not isinstance(results_package, dict):
+            self.logger.error("results_package is not a dict")
+            return
+
+        # initialize output buffer
+        if self.outputs is None:
+            self.outputs = []
 
         try:
             t1 = time.perf_counter()
+
+            # Apply post-processing
+            raw_detections = results_package["detections"]
+            tile = results_package["metadata"]["tile"]
+            offset_info = results_package["offset_info"]
+
             filtered_detections = self.postprocess(
                 raw_detections, tile=tile, offset_info=offset_info
             )
             t2 = time.perf_counter() - t1
-            self.logger.debug(f"Postprocessing took: {t2:.3f}s")
+            self.logger.info(f"Postprocessing took: {t2:.3f}s")
             results_package["final_detections"] = filtered_detections
             results_package["postprocess_time"] = t2
             self.outputs.append(results_package)
             self.shared_buffers.put(filtered_detections=results_package)
+
+            # self.logger.warning(results_package)
+
+            return "OK"
+
         except:
             traceback.print_exc()
-            self.shared_buffers.put(filtered_detections="DONE")
-            self.logger.info("Graceful shutdown of thread.")
-            return "DONE"
-
-        return None
+            self.shared_buffers.put(filtered_detections="ERROR")
+            self.logger.error("Graceful shutdown of thread.")
+            return
 
     def run(self):
-        """
-        Main thread execution loop for post-processing detection results.
-        """
-        self.logger.info("Starting post-processing thread")
-
+        self.logger.info("Starting...")
         while True:
             status = self._run_once()
-            if status == "DONE":
+            self.logger.debug(f"PostProcessingThread status: {status}")
+            if status == "OK":
+                continue
+            else:
+                self.logger.info("Exiting.")
                 break
 
 
@@ -1148,15 +1164,12 @@ class ObjectDetectionSystem:
         self.postprocess_thread.start()
         # self.detection_uploader.start()
 
-        self.logger.info("All threads started")
-
         self._join_workers()
 
     def _join_workers(self):
         """
         Stop all threads gracefully and wait for them to finish.
         """
-        # self.logger.info("Stopping Object Detection System")
 
         # Signal shutdown
         self.shared_buffers.shutdown()
@@ -1167,7 +1180,7 @@ class ObjectDetectionSystem:
         self.postprocess_thread.join()
         # self.detection_uploader.join()
 
-        self.logger.info("All threads stopped")
+        self.logger.info("All threads stopped.")
         return None
 
     def run(
@@ -1207,6 +1220,9 @@ class ObjectDetectionSystem:
         self._process_pipeline()
 
         out = self.outputs
+
+        if out is None:
+            raise RuntimeError("Pipeline failed...")
 
         detections = [o["final_detections"] for o in out]
 

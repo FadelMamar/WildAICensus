@@ -34,14 +34,14 @@ def compute_iou(bbox1: List[float], bbox2: List[float]) -> float:
 
     iou = complete_intersection_over_union(
         preds=bbox1, target=bbox2, aggregate=False
-    ).numpy()
+    ).item()
 
-    return iou.ravel()[0]
+    return iou
 
 
 @dataclass
 class GeographicBounds:
-    """Geographic bounding box for image footprint"""
+    """Geographic bounding box for image footprint in UTM coordinates"""
 
     north: float  # Max latitude
     south: float  # Min latitude
@@ -74,8 +74,8 @@ class GeographicBounds:
         """
 
         # Prepare boxes in [x_min, y_min, x_max, y_max] format
-        box_self = [self.west, self.south, self.east, self.north]
-        box_other = [other.west, other.south, other.east, other.north]
+        box_self = self.box(box_format="xyxy")
+        box_other = other.box(box_format="xyxy")
 
         return compute_iou(box_self, box_other)
 
@@ -93,6 +93,7 @@ class Detection:
     gps_loc: Optional[str] = None
     image_gps_loc: str = None
     parent_image: Optional[str] = None
+    image_id: Optional[str] = None
     timestamp: str = None
     distance_to_centroid: float = None
 
@@ -237,6 +238,11 @@ class Detection:
         self.x_max += x_offset
         self.y_min += y_offset
         self.y_max += y_offset
+
+    def update_values_from_tile(self, tile: "Tile"):  # TODO: add more values
+        self.parent_image = tile.image_path
+        self.image_gps_loc = tile.tile_gps_loc
+        self.image_id = tile.id
 
     @property
     def is_empty(self):
@@ -432,6 +438,7 @@ class Tile:
     altitude: float = None
     flight_specs: FlightSpecs = field(default_factory=FlightSpecs)
     geographic_footprint: Optional[GeographicBounds] = None
+    gsd: float = None  # cm/px
 
     predictions: List[Detection] = None
     annotations: List[Detection] = None
@@ -473,7 +480,7 @@ class Tile:
             if sensor_height is None:
                 raise ValueError("Sensor height not found. Please provide it.")
 
-        self.gsd = self.flight_specs.gsd
+        # self.gsd = self.flight_specs.gsd
         if self.gsd is None:
             self.gsd = ImageProcessor.get_gsd(
                 image_path=self.image_path,
@@ -621,9 +628,6 @@ class Tile:
 
     def update_detection_gps(
         self,
-        flight_height: float = None,
-        sensor_height: float = None,
-        gsd: float = None,
     ):
         if self.tile_gps_loc is None:
             logger.info("No gps coordinate found in the tile")
@@ -656,9 +660,9 @@ class Tile:
                         y_center=det.y,
                         image=image,
                         image_gps_loc=det.image_gps_loc,
-                        flight_height=flight_height or self.flight_specs.flight_height,
-                        sensor_height=sensor_height or self.flight_specs.sensor_height,
-                        gsd=gsd or self.gsd,
+                        flight_height=self.flight_specs.flight_height,
+                        sensor_height=self.flight_specs.sensor_height,
+                        gsd=self.gsd,
                     )
                 except Exception as e:
                     # print(e)
@@ -719,6 +723,8 @@ class Tile:
         assert isinstance(data, list), f"Expected 'list' but received {type(list)}"
 
         if len(data) > 0:
+            for det in data:
+                det.update_values_from_tile(self)
             self.predictions = data
 
         else:

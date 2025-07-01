@@ -23,7 +23,8 @@ import subprocess
 import joblib
 import tempfile
 import sys
-
+import folium
+from folium.plugins import MarkerCluster
 
 from ..ml.interface import InferenceEngine
 from ..ml.models import Detector, build_detector
@@ -799,18 +800,58 @@ class ReportGenerator:
             )
         pass
 
+    def save_map_with_detections(
+        self,
+        locations: pd.DataFrame,
+        map_style: str = "Esri.WorldImagery",
+        zoom_start=14,
+        save_path: str = None,
+    ) -> folium.Map:
+        m = folium.Map(
+            location=[locations["Latitude"].mean(), locations["Longitude"].mean()],
+            zoom_start=zoom_start,
+            # attr=map_style.replace('.',"-")
+        )
+
+        folium.TileLayer(
+            map_style,
+            name=map_style.replace(".", " "),
+            control=True,
+            attr=map_style.replace(".", "-"),
+        ).add_to(m)
+
+        marker_cluster = MarkerCluster().add_to(m)
+
+        for idx, row in locations.iterrows():
+            folium.Marker(
+                location=[row.Latitude, row.Longitude], popup=row.name
+            ).add_to(marker_cluster)
+
+        if save_path:
+            m.save(save_path)
+
+        return None
+
     def run(
         self,
         df_results: pd.DataFrame,
-        plot: bool = False,
+        dataset: LabelingDataset,
         save_plot: str = None,
+        save_map: str = "map.html",
     ) -> None:
         """Generate comprehensive performance report"""
 
-        stats, tp_fp_tn = self.get_stats(df_results)
+        stats = {}
+        if df_results is not None:
+            stats, tp_fp_tn = self.get_stats(df_results)
 
-        if save_plot is not None:
-            self.plot(df_results=df_results, tp_fp_tn=tp_fp_tn, save_plot=save_plot)
+            if save_plot is not None:
+                self.plot(df_results=df_results, tp_fp_tn=tp_fp_tn, save_plot=save_plot)
+
+        if dataset is not None:
+            self.save_map_with_detections(
+                dataset.export_detections_gps(), save_path=save_map
+            )
 
         return stats
 

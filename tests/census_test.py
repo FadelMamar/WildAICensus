@@ -1,7 +1,8 @@
 from datalabeling.common.census import (
     GPSOverlapStrategy,
     CentroidProximityRemovalStrategy,
-    WildlifeCensusSystem,
+    WildlifeCountingSystem,
+    run_census,
 )
 from datalabeling.common.base import Tile, Detection
 from datalabeling.common.dataset_loader import LabelingDataset
@@ -71,10 +72,14 @@ def test_gps_overlap():
     dataset = load_dataset_from_dirs(r"D:\workspace\data\savmap_dataset_v2\raw\images")
     tiles = dataset.tiles
 
+    print(dataset.get_stats())
+
     overlap_strategy = GPSOverlapStrategy()
     overlap_map = overlap_strategy.find_overlapping_images(
         tiles, min_overlap_threshold=0.0
     )
+
+    print(overlap_strategy.stats)
 
     return overlap_map
 
@@ -96,10 +101,14 @@ def test_count_system():
     # Run DuplicateRemovalStrategy
     finder = CentroidProximityRemovalStrategy()
 
-    # Run WildlifeCensusSystem
-    census_system = WildlifeCensusSystem(overlap_strategy, finder)
+    # Run WildlifeCountingSystem
+    census_system = WildlifeCountingSystem(overlap_strategy, finder)
     census_system.set_dataset(dataset)
-    census_system.run(image_overlap_threshold=0.0, detection_iou_threshold=0.8)
+    census_system.run(
+        image_overlap_threshold=0.0,
+        detection_iou_threshold=0.8,
+        filepath="census_results.json",
+    )
 
     return census_system
 
@@ -110,8 +119,6 @@ def test_inference_and_save_predictions():
     Returns:
         str: Path to the saved predictions CSV file.
     """
-    # Load dataset
-    dataset = load_dataset_from_dirs(r"D:\workspace\data\savmap_dataset_v2\raw\images")
 
     # Run inference engine on the dataset
     config = PredictionConfig(
@@ -124,12 +131,12 @@ def test_inference_and_save_predictions():
         flight_specs=FlightSpecs(
             flight_height=180,
             sensor_height=24,
-            gsd=None,
         ),
         nms_iou=0.5,
         verbose=False,
         cls_imgsz=98,
     )
+
     ALIAS = "demo"
     NAME = "labeler"
     MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
@@ -152,13 +159,18 @@ def test_inference_and_save_predictions():
         mlflow_model_alias=ALIAS,
         mlflow_model_name=NAME,
     )
-    dataset.add_predictions(engine, build=True)
 
-    # Save predictions to CSV
-    save_path = os.path.join(os.getcwd(), "predictions.csv")
-    dataset.save_data_csv(save_path)
-    print(f"Predictions saved to: {save_path}")
-    return save_path
+    census_system = run_census(
+        images_dir=r"D:\workspace\data\savmap_dataset_v2\raw\images",
+        engine=engine,
+        overlap_strategy="GPSOverlapStrategy",
+        duplicate_removal_strategy="CentroidProximityRemovalStrategy",
+        image_overlap_threshold=0.0,
+        detection_iou_threshold=0.8,
+        save_path="census_results.json",
+    )
+
+    return census_system
 
 
 if __name__ == "__main__":

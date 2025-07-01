@@ -327,7 +327,6 @@ class LabelingDataset:
             self.build(force_rebuild=True)
         return None
 
-    # TODO: review logic
     def get_stats(
         self,
     ):
@@ -339,11 +338,11 @@ class LabelingDataset:
             stats["pred_instance_distribution"] = (
                 data["class_name"].value_counts().to_dict()
             )
-            stats["pred_predicted_positive"] = (
+            stats["pred_number_positive"] = (
                 data[bbox_columns].dropna(how="any")["file_name"].nunique()
             )
-            stats["pred_predicted_negative"] = (
-                data["file_name"].nunique() - stats["pred_predicted_positive"]
+            stats["pred_number_negative"] = (
+                data["file_name"].nunique() - stats["pred_number_positive"]
             )
 
         # gt
@@ -363,22 +362,13 @@ class LabelingDataset:
             stats["gt_number"] = 0
             stats["gt_instance_distribution"] = {}
 
-        # predictions
-        data_pred = self.data.loc[self.data["is_annot"] == False, :]
-        if len(data_pred) > 0:
-            stats["pred_number"] = data_pred["is_annot"].sum()
-            stats["pred_instance_distribution"] = (
-                data_pred["class_name"].value_counts().to_dict()
-            )
-
-        else:
-            stats["pred_number"] = 0
-            stats["pred_instance_distribution"] = {}
-
         # unlabeled
         stats["unlabeled_number"] = sum(
             self.data["is_annot"].apply(lambda x: x is None)
         )
+
+        # total
+        stats["total_number"] = len(self.data)
 
         return stats
 
@@ -427,18 +417,11 @@ class LabelingDataset:
         return None
 
     def update_detection_gps(
-        self, sensor_height: float, flight_height: float, gsd: float
+        self,
     ):
-        if gsd is None:
-            logger.warning(
-                "gsd=None, it might break the pipeline if the ``FocalLength`` is not available in the Exif of the image."
-            )
-
         for tile in self.tiles:
             try:
-                tile.update_detection_gps(
-                    sensor_height=sensor_height, flight_height=flight_height, gsd=gsd
-                )
+                tile.update_detection_gps()
             except Exception as e:
                 logger.error(e)
 

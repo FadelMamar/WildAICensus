@@ -13,6 +13,7 @@ Design Patterns Used:
 - Command Pattern: For batch processing operations
 """
 
+from pathlib import Path
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass, field
@@ -33,6 +34,8 @@ import os
 
 from .base import Tile, Detection
 from .dataset_loader import LabelingDataset
+from .evaluation import ReportGenerator
+from ..ml.interface import InferenceEngine
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -71,8 +74,7 @@ class GPSOverlapStrategy(OverlapStrategy):
     def __init__(
         self,
     ):
-        self.stats = None
-        pass
+        super().__init__()
 
     def _compute_iou(self, images: List[Tile]) -> np.ndarray:
         """Compute Intersection over Union (IoU) between all pairs of image tiles.
@@ -86,9 +88,9 @@ class GPSOverlapStrategy(OverlapStrategy):
         boxes = torch.tensor(boxes)
         box_ious = complete_intersection_over_union(
             preds=boxes, target=boxes, aggregate=False
-        )
+        ).numpy()
 
-        return box_ious.numpy()
+        return box_ious
 
     def find_overlapping_images(
         self, images: List[Tile], min_overlap_threshold: float = 0.0
@@ -223,8 +225,12 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
             else:
                 keep2[j] = False
 
-        tile1.predictions = [det for i, det in enumerate(tile1.predictions) if keep1[i]]
-        tile2.predictions = [det for j, det in enumerate(tile2.predictions) if keep2[j]]
+        tile1.set_predictions(
+            [det for i, det in enumerate(tile1.predictions) if keep1[i]]
+        )
+        tile2.set_predictions(
+            [det for j, det in enumerate(tile2.predictions) if keep2[j]]
+        )
         return tile1, tile2
 
     def remove_duplicates(
@@ -256,7 +262,7 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
         return list(image_path_to_tile.values())
 
 
-class WildlifeCensusSystem:
+class WildlifeCountingSystem:
     """Main system for wildlife detection and counting"""
 
     def __init__(
@@ -266,6 +272,7 @@ class WildlifeCensusSystem:
     ):
         self.overlap_strategy = overlap_strategy
         self.duplicate_removal_strategy = duplicate_removal_strategy
+        self.report_generator = ReportGenerator()
         self.images: List[Tile] = []
         self.overlap_map: Dict[str, List[str]] = {}
 
@@ -304,7 +311,8 @@ class WildlifeCensusSystem:
         self.dataset.build(force_rebuild=True)
         self.stats["dataset_pruned_stats"] = self.dataset.get_stats()
 
-        self.export_results(filepath=filepath)
+        file_path = filepath or "census_results.json"
+        self.export_results(filepath=file_path)
 
     def get_statistics(self) -> Dict[str, any]:
         """Get comprehensive statistics about the detection process"""
@@ -323,75 +331,75 @@ class WildlifeCensusSystem:
                 },
             },
             "statistics": self.get_statistics(),
-            "detections": self.dataset.data.to_dict(orient="list"),
         }
 
-        if not os.path.exists(os.path.dirname(filepath)):
-            os.makedirs(os.path.dirname(filepath))
+        if not Path(filepath).exists():
+            Path(filepath).resolve().parent.mkdir(parents=True, exist_ok=True)
 
         with open(filepath, "w") as f:
             json.dump(results, f, indent=2)
 
-        logger.info(f"Results exported to {filepath}")
+        data_path = Path(filepath).with_suffix(".csv").with_stem("dataset")
+        self.dataset.save_data_csv(str(data_path))
+
+        detections_path = Path(filepath).with_suffix(".csv").with_stem("detections")
+        detections = self.dataset.export_detections_gps(save_path=str(detections_path))
+
+        map_path = Path(filepath).with_suffix(".html").with_stem("map")
+        self.report_generator.save_map_with_detections(
+            detections,
+            save_path=str(map_path),
+        )
+
+        logger.info(f"Results exported to {filepath}, {data_path}, {map_path}")
 
 
-class DuplicatePredictionFinder:
-    """
-    Responsible for finding groups of duplicate predictions given a list of Tile objects with predictions.
-    Provides methods to find duplicate groups and get unique predictions using a specified strategy.
-    """
-
-    def __init__(self, tiles: List[Tile], overlap_strategy: OverlapStrategy):
-        """
-        Initialize the DuplicatePredictionFinder.
-        Args:
-            tiles (List[Tile]): List of Tile objects with predictions.
-            overlap_strategy (OverlapStrategy): Strategy to compute overlap between tiles.
-        """
-        # ... existing code ...
-
-    def find_duplicate_groups(
-        self, spatial_threshold: float = 0.8
-    ) -> List[List[Detection]]:
-        """
-        Returns a list of lists, where each sublist is a group of duplicate Detection objects
-        (across overlapping images, same class, and IoU >= threshold).
-        Only detections in overlapping images are considered as potential duplicates.
-        Args:
-            spatial_threshold (float): IoU threshold for considering detections as duplicates.
-        Returns:
-            List[List[Detection]]: List of groups of duplicate detections.
-        """
-        # ... existing code ...
-
-    def get_unique_predictions(
-        self, strategy: DuplicateRemovalStrategy
-    ) -> List[Detection]:
-        """
-        Get unique predictions using the provided DuplicateRemovalStrategy.
-        Args:
-            strategy (DuplicateRemovalStrategy): Strategy to remove duplicates.
-        Returns:
-            List[Detection]: List of unique detections.
-        """
-        # ... existing code ...
+def get_overlap_strategy(overlap_strategy: str) -> OverlapStrategy:
+    if overlap_strategy == "GPSOverlapStrategy":
+        return GPSOverlapStrategy()
+    else:
+        raise ValueError(f"Invalid overlap strategy: {overlap_strategy}")
 
 
-def find_neighbor_duplicates(
-    tiles: List[Tile], overlap_map: Dict[str, List[str]], iou_threshold: float = 0.8
-) -> list:
-    """
-    For every image (Tile), consider its neighbors' predictions (from overlap_map).
-    For each prediction in the image, check all predictions in neighbor images.
-    If class matches and IoU > threshold, save the pair (detection, neighbor_detection) in a list.
-    Args:
-        tiles (List[Tile]): List of Tile objects.
-        overlap_map (Dict[str, List[str]]): Map of image IDs to their overlapping neighbor image IDs.
-        iou_threshold (float): IoU threshold for considering detections as duplicates.
-    Returns:
-        list: List of (detection, neighbor_detection) tuples where duplicates are found.
-    """
-    # ... existing code ...
+def get_duplicate_removal_strategy(
+    duplicate_removal_strategy: str,
+) -> DuplicateRemovalStrategy:
+    if duplicate_removal_strategy == "CentroidProximityRemovalStrategy":
+        return CentroidProximityRemovalStrategy()
+    else:
+        raise ValueError(
+            f"Invalid duplicate removal strategy: {duplicate_removal_strategy}"
+        )
+
+
+def run_census(
+    images_dir: list[str],
+    engine: InferenceEngine,
+    overlap_strategy: str,
+    duplicate_removal_strategy: str,
+    image_overlap_threshold: float = 0.0,
+    detection_iou_threshold: float = 0.8,
+    save_path: str = "census_results.json",
+) -> WildlifeCountingSystem:
+    assert isinstance(images_dir, list), "images_dir must be a list of strings"
+    for a in images_dir:
+        assert isinstance(a, str), (
+            f"images_dir must be a list of strings, got {type(a)}"
+        )
+
+    dataset = LabelingDataset.from_dirs(images_dir)
+
+    if engine is not None:
+        dataset.add_predictions(engine, build=True)
+
+    census_system = WildlifeCountingSystem(
+        get_overlap_strategy(overlap_strategy),
+        get_duplicate_removal_strategy(duplicate_removal_strategy),
+    )
+    census_system.set_dataset(dataset)
+    census_system.run(image_overlap_threshold, detection_iou_threshold, save_path)
+
+    return census_system
 
 
 if __name__ == "__main__":

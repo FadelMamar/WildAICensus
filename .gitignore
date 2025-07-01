@@ -49,3 +49,4 @@ output
 ppd_runs
 runs*
 uv.lock
+*.sql

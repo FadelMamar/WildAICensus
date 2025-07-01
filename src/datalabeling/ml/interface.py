@@ -133,7 +133,7 @@ class InferenceEngine(object):
         detections = self.detector.run(images_paths=paths)
 
         if len(detections) != len(paths):
-            raise Exception()
+            raise ValueError("Number of detections does not match number of images.")
 
         if tiles is not None:
             for i, tile in enumerate(tiles):

@@ -28,7 +28,6 @@ config = PredictionConfig(
     flight_specs=FlightSpecs(
         flight_height=180,
         sensor_height=24,
-        gsd=None,
     ),
     nms_iou=0.5,
     verbose=False,
@@ -48,6 +47,8 @@ roi_cls_label_map = {0: "gt", 1: "tn"}
 roi_keep_classes = ["gt"]
 detection_label_map = {0: "wildlife"}
 feature_extractor_path = "facebook/dinov2-with-registers-small"
+timeout = 15
+buffer_size = 64
 
 
 def run_inference_engine(image_paths: list[str]):
@@ -62,7 +63,8 @@ def run_inference_engine(image_paths: list[str]):
         model_path=MODEL_PATH,
         mlflow_model_alias=ALIAS,
         mlflow_model_name=NAME,
-        timeout=20,
+        timeout=timeout,
+        buffer_size=buffer_size,
     )
 
     detections = engine.inference(images_paths=image_paths, return_as_df=True)
@@ -163,7 +165,7 @@ def run_model(path: str):
 def run_detector(
     image_paths: list,
 ):
-    t1_start = perf_counter()
+    # t1_start = perf_counter()
 
     detector = ObjectDetectionSystem(
         config=config, buffer_size=32, timeout=15, detection_label_map={0: "wildlife"}
@@ -221,9 +223,9 @@ def run_annotator(
 if __name__ == "__main__":
     # image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_512_640_1152.jpg"
     # image_path = r"D:\workspace\data\savmap_dataset_v2\raw\tmp\0a4a499660dc4e7c986779f8b6786f87.JPG"
-    # image_path = img = r"D:\workspace\data\general_dataset\original-data\train\images\0af7b1ea3a107e511353adbaba10c2e55a0bddf2.JPG"
+    image_path = r"D:\workspace\data\general_dataset\original-data\train\images\0af7b1ea3a107e511353adbaba10c2e55a0bddf2.JPG"
 
-    image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_1024_640_1664.jpg"
+    # image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_1024_640_1664.jpg"
 
     images = [image_path]
 
@@ -238,7 +240,7 @@ if __name__ == "__main__":
 
     # t1_start = perf_counter()
 
-    results = run_inference_engine(images)
+    # results = run_inference_engine(images)
 
     # t1_stop = perf_counter()
     # print("Inference time: ", t1_stop - t1_start)
