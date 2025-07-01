@@ -1118,7 +1118,13 @@ class ImageProcessor:
             return easting, northing
             # Convert back to lat/lon
         else:
-            lat, lon = utm.to_latlon(easting, northing, zone_num, zone_let)
+            try:
+                lat, lon = utm.to_latlon(easting, northing, zone_num, zone_let)
+            except Exception as e:
+                raise ValueError(
+                    f"Invalid UTM coordinates: {easting}, {northing}, {zone_num}, {zone_let}" + f"or Invalid input values {x}, {y}, {lat_center}, {lon_center}, {W}, {H}, {gsd}."
+                )
+
             return lat, lon
 
 

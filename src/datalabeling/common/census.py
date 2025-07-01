@@ -181,8 +181,13 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
             np.ndarray: IoU matrix between detections.
         """
 
-        boxes = [det.geo_box for det in detections_1]
-        boxes_2 = [det.geo_box for det in detections_2]
+        boxes = [det.geo_box for det in detections_1 if not det.is_empty]
+        boxes_2 = [det.geo_box for det in detections_2 if not det.is_empty]
+
+        if len(boxes) == 0 or len(boxes_2) == 0:
+            ious = np.zeros((len(detections_1), len(detections_2))) - 1.0
+            return ious
+        
         boxes = torch.tensor(boxes)
         boxes_2 = torch.tensor(boxes_2)
         box_ious = complete_intersection_over_union(
@@ -202,7 +207,7 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
         Returns:
             Tuple[Tile, Tile]: Tiles with duplicates pruned.
         """
-        if not tile1.predictions or not tile2.predictions:
+        if len(tile1.predictions)==0 or len(tile2.predictions)==0:
             return tile1, tile2
 
         ious = self._compute_iou(tile1.predictions, tile2.predictions)  # shape [N1, N2]
@@ -219,9 +224,17 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
         for i, j in zip(idxs1, idxs2):
             det1 = tile1.predictions[i]
             det2 = tile2.predictions[j]
+            
+            if det1.is_empty or det2.is_empty:
+                # print(f"Skipping empty detection: {det1} or {det2}")
+                keep1[i] = False
+                keep2[j] = False
+                continue
+
             # Only process if both are still marked to keep
             if not (keep1[i] and keep2[j]):
                 continue
+
             if det1.distance_to_centroid > det2.distance_to_centroid:
                 keep1[i] = False
             else:
@@ -399,6 +412,11 @@ def run_census(
 
     for tile in dataset.tiles:
         for det in tile.predictions:
+            # logger.info(det)
+            if det.is_empty:
+                continue
+            assert det.gps_loc is not None
+            assert det.image_gps_loc is not None
             assert det.geographic_footprint is not None
 
     census_system = WildlifeCountingSystem(

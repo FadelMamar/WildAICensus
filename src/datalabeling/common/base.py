@@ -243,6 +243,27 @@ class Detection:
         self.parent_image = tile.image_path
         self.image_gps_loc = tile.tile_gps_loc
         self.image_id = tile.id
+        self.set_geographic_footprint_from_gps(gsd=tile.gsd, image_width=tile.width, image_height=tile.height)
+
+        # if np.isnan(self.x_min) or np.isnan(self.y_min) or np.isnan(self.x_max) or np.isnan(self.y_max):
+        if self.is_empty:
+            logger.debug(f"Skipping empty detection with NaN values: {self.to_dict()}")
+        else:
+            self.update_detection_gps(gsd=tile.gsd,image=tile.load_image_data(), 
+                                  image_gps_loc=tile.tile_gps_loc,
+                                flight_height=tile.flight_specs.flight_height,
+                                sensor_height=tile.flight_specs.sensor_height)
+    
+    def update_detection_gps(self, gsd: float,image:Image.Image, image_gps_loc:str,flight_height:float,sensor_height:float) -> None:
+        self.gps_loc = compute_detection_gps(
+                            x_center=self.x,
+                            y_center=self.y,
+                            image=image,
+                            image_gps_loc=image_gps_loc,
+                            flight_height=flight_height,
+                            sensor_height=sensor_height,
+                            gsd=gsd,
+                        )
 
     @property
     def is_empty(self):
@@ -385,6 +406,9 @@ class Detection:
         if self.gps_loc is None:
             logger.debug("No gps coordinate found in the detection")
             return
+        
+        if self.is_empty:
+            return None
 
         try:
             latitude, longitude, altitude = self.gps_as_decimals
