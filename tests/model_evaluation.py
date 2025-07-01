@@ -9,6 +9,21 @@ from datalabeling.ml.interface import InferenceEngine
 from datalabeling.common.dataset_loader import LabelingDataset
 from ultralytics import YOLO
 from pathlib import Path
+from label_studio_sdk.client import LabelStudio
+from dotenv import load_dotenv
+import os
+
+load_dotenv(dotenv_path="../.env")
+
+# # label studio client
+LABEL_STUDIO_URL = os.getenv("LABEL_STUDIO_URL")
+API_KEY = os.getenv("LABEL_STUDIO_API_KEY")
+labelstudio_client = LabelStudio(base_url=LABEL_STUDIO_URL, api_key=API_KEY)
+
+# os.environ["LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT"] = "D:\\"
+# os.environ["LOCAL_FILES_DOCUMENT_ROOT"] = "D:\\"
+# os.environ["LOCAL_FILES_DOCUMENT_ROOT"] = "D:\\"
+
 
 
 def run_perf_evaluator():
@@ -34,27 +49,33 @@ def run_perf_evaluator():
 
     engine, _ = InferenceEngine.load_engine(
         pred_config=config,
-        roi_classifier_path=None,  # r"..\base_models_weights\roi_classifier.ckpt",
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
         roi_cls_is_features=True,
         roi_cls_label_map={0: "gt", 1: "tn"},
         roi_keep_classes=["gt"],
         detection_label_map={0: "wildlife"},
         feature_extractor_path="facebook/dinov2-with-registers-small",
-        detection_model=YOLO(r"..\base_models_weights\best.pt"),
-        mlflow_model_alias="demo",
+        # detection_model=YOLO(r"..\base_models_weights\best.pt"),
+        mlflow_model_alias="yolo12s-v1",
         mlflow_model_name="labeler",
     )
 
     perf_eval = PerformanceEvaluator()
 
-    images_dirs = [
-        r"D:\workspace\data\savmap_dataset_v2\images_tmp",
-    ]
+    # images_dirs = [
+    #     r"D:\workspace\data\savmap_dataset_v2\images_tmp",
+    # ]
 
     load_results = False
+    
+    pred_results_dir=".tmp"
+    Path(pred_results_dir).mkdir(exist_ok=True,
+                       parents=True)
 
     # creating dataset and adding predictions
-    dataset = LabelingDataset.from_dirs(images_dirs)
+    # dataset = LabelingDataset.from_dirs(images_dirs)
+    dataset = LabelingDataset.from_ls(project_id=91,
+                                      labelstudio_client=labelstudio_client)
     if not load_results:
         dataset.add_predictions(engine=engine, build=True)
 
@@ -62,7 +83,7 @@ def run_perf_evaluator():
     df_metrics_per_img = perf_eval.run(
         dataset=dataset,
         tp_iou_threshold=eval_config.tp_iou_threshold,
-        pred_results_dir=r"D:\workspace\data\savmap_dataset_v2\images_tmp",
+        pred_results_dir=pred_results_dir,
         load_results=load_results,
     )
 
@@ -73,8 +94,8 @@ def run_perf_evaluator():
     # df_hard_negatives = sample_selector.run(df_metrics_per_img)
 
     # report generation
-    reporter = ReportGenerator()
-    stats, fig = reporter.run(df_metrics_per_img, plot=True)
+    # reporter = ReportGenerator()
+    # stats, fig = reporter.run(df_metrics_per_img, plot=False)
 
     return df_metrics_per_img  # , df_hard_negatives
 
@@ -116,8 +137,8 @@ def calibration():
 
 
 if __name__ == "__main__":
-    # df_metrics_per_img = run_perf_evaluator()
+    df_metrics_per_img = run_perf_evaluator()
 
-    calibration()
+    # calibration()
 
     pass

@@ -101,7 +101,7 @@ if __name__ == "__main__":
     training_cfg.run_name = "yolo11s-custom-fptp"
 
     training_cfg.lr0 = 3e-4
-    training_cfg.lrf = 1.s
+    training_cfg.lrf = 1e-1
     training_cfg.patience = 20
 
     training_cfg.object_detector_arch = "yolo"  # "yolo", "rtdetr", "custom_yolo"

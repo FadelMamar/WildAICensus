@@ -474,9 +474,9 @@ class LabelingDataset:
     def from_ls(
         cls,
         project_id: int,
-        top_n=0,
+        labelstudio_client: LabelStudio,
+        top_n:int=0,
         config: TilingConfig = None,
-        labelstudio_client: LabelStudio = None,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,
         max_workers: int = 1,
@@ -498,13 +498,27 @@ class LabelingDataset:
 
         def load_unique_task(task) -> Tile | None:
             img_url = unquote(task.data["image"])
+            # img_url = task.data["image"]
 
             try:
                 image_path = get_local_path(
                     img_url,
                     download_resources=ls_download_resources,
-                    hostname=os.getenv("LABEL_STUDIO_URL"),
+                    # hostname=os.getenv("LABEL_STUDIO_URL"),
                 )
+                
+                if not Path(image_path).exists():
+                    root = os.environ.get("LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT") or os.environ.get("LOCAL_FILES_DOCUMENT_ROOT")
+                    logger.info(f"{image_path} ## {img_url}")
+                    # logger.info(os.environ["LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT"])
+                    # logger.info(os.environ["LOCAL_FILES_DOCUMENT_ROOT"])
+                    
+                    image_path = img_url.split("/data/local-files/?d=")[-1]
+                    image_path = os.path.join(root,image_path)
+                    
+                    if not Path(image_path).exists():
+                        logger.info(image_path)
+                        raise FileNotFoundError()
 
                 # get tile gps_coords and offsets if given
                 if tile_metadata is not None:
