@@ -617,7 +617,7 @@ def build_detector(
         )
 
     else:
-        raise NotImplementedError()
+        raise NotImplementedError(f"Detector type '{detection_model_type}' is not implemented.")
 
 
 class UltralyticsDetector(Detector):
