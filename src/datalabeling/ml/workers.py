@@ -7,7 +7,7 @@ Created on Fri May 30 13:00:13 2025
 
 import threading
 import queue
-from multiprocessing import Queue
+from queue import Queue
 import logging
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 from itertools import chain
@@ -30,6 +30,7 @@ import aiohttp
 import uuid
 import datetime
 import sqlite3
+
 
 from .models import Detector, UltralyticsDetector, GroundingDinoDetector
 from ..common.config import PredictionConfig
@@ -690,7 +691,7 @@ class DetectionThread(threading.Thread):
         metadata = []
         start_time = time.time()
 
-        while len(batch) < 4:
+        while len(batch) < 1:
             # Calculate remaining wait time
             elapsed = time.time() - start_time
             remaining_time = self.max_wait_time - elapsed
@@ -719,14 +720,14 @@ class DetectionThread(threading.Thread):
 
         if len(batch) == 0:
             return "DONE", None, None
-        
+
         dataset = LoadingDataset(
             data=batch,
         )
 
         return dataset, offsets, metadata
-    
-    def end_thread(self,msg):
+
+    def end_thread(self, msg):
         """
         End the thread gracefully by putting a shutdown message in the shared buffer.
 
@@ -748,27 +749,21 @@ class DetectionThread(threading.Thread):
         )
 
         while True:
-            # get data
-            data, offsets, metadata = self.collect_batch()
-
-            if data == "DONE":
-                self.end_thread("DONE")
-                return
-            elif data == "ERROR":
-                self.end_thread("ERROR")
-                return
-
             try:
-                # Run detection
-                try:
-                    t1 = time.perf_counter()
-                    detection_results = self.run_detection(data)
-                    dt = (time.perf_counter() - t1) / len(data)
-                except Exception as e:
-                    traceback.print_exc()
+                # get data
+                data, offsets, metadata = self.collect_batch()
+
+                if data == "DONE":
+                    self.end_thread("DONE")
+                    return
+                elif data == "ERROR":
                     self.end_thread("ERROR")
                     return
 
+                # Run detection
+                t1 = time.perf_counter()
+                detection_results = self.run_detection(data)
+                dt = (time.perf_counter() - t1) / len(data)
                 self.logger.info(f"Detection time: {dt:.3f}s")
 
                 for i, results in detection_results.items():
@@ -779,7 +774,6 @@ class DetectionThread(threading.Thread):
                         "detection_time": dt,
                     }
                 self.shared_buffers.put(detections=results_package)
-
 
             except Exception as e:
                 traceback.print_exc()
@@ -814,8 +808,8 @@ class PostProcessingThread(threading.Thread):
         self.label_map = label_map or dict()
         self.count = 0
         self.roi_processor = None
-    
-    def end_thread(self,msg):
+
+    def end_thread(self, msg):
         """
         End the thread gracefully by putting a shutdown message in the shared buffer.
 
@@ -916,7 +910,9 @@ class PostProcessingThread(threading.Thread):
                 raw_detections, tile=tile, offset_info=offset_info
             )
 
-            self.logger.info(f"{len(filtered_detections)} detections after postprocessing")
+            self.logger.info(
+                f"{len(filtered_detections)} detections after postprocessing"
+            )
 
             t2 = time.perf_counter() - t1
             self.logger.debug(f"Postprocessing took: {t2:.3f}s")
@@ -934,12 +930,17 @@ class PostProcessingThread(threading.Thread):
     def run(self):
         self.logger.info("Starting...")
         while True:
-            status = self._run_once()
-            self.logger.debug(f"PostProcessingThread status: {status}")
-            if status == "OK":
-                continue
-            else:
-                self.end_thread(status)
+            try:
+                status = self._run_once()
+                self.logger.debug(f"PostProcessingThread status: {status}")
+                if status == "OK":
+                    continue
+                else:
+                    self.end_thread(status)
+                    return
+            except Exception as e:
+                traceback.print_exc()
+                self.end_thread("ERROR")
                 return
 
 
@@ -1164,6 +1165,17 @@ class ObjectDetectionSystem:
 
         return None
 
+    def _is_alive(self):
+        """
+        Check if the object detection system is alive.
+        """
+        running_threads = {
+            "data_thread": self.data_thread.is_alive(),
+            "detection_thread": self.detection_thread.is_alive(),
+            "postprocess_thread": self.postprocess_thread.is_alive(),
+        }
+        return running_threads
+
     def _process_pipeline(self):
         """
         Start all threads in the object detection system.
@@ -1181,8 +1193,6 @@ class ObjectDetectionSystem:
         self.detection_thread.start()
         self.postprocess_thread.start()
         # self.detection_uploader.start()
-
-        
 
         self._join_workers()
 
@@ -1241,8 +1251,15 @@ class ObjectDetectionSystem:
 
         out = self.outputs
 
+        if sum(self._is_alive().values()):
+            print(self._is_alive())
+        else:
+            print("Pipeline failed. Postprocessing did not start...")
+            return []
+
         if out is None:
-            raise RuntimeError("Pipeline failed. Postprocessing did not start...")
+            print("Pipeline failed. Postprocessing did not start...")
+            return []
 
         detections = [o["final_detections"] for o in out]
 
