@@ -553,6 +553,7 @@ def run_census_cli(
     save_path="census_results.json",
     fiftyone_dataset_name="census-demo-dataset",
     fiftyone_persistent=True,
+    detection_model_type="ultralytics",
 ):
     config = PredictionConfig(
         imgsz=800,
@@ -579,6 +580,7 @@ def run_census_cli(
         detection_label_map=detection_label_map,
         feature_extractor_path=feature_extractor_path,
         model_path=model_path,
+        detection_model_type=detection_model_type,
         mlflow_model_alias=alias,
         mlflow_model_name=name,
         buffer_size=24,
