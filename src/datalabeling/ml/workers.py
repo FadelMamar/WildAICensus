@@ -12,17 +12,11 @@ import logging
 from typing import Any, Dict, List, Optional, Tuple, Sequence
 from itertools import chain
 import time
-from ultralytics import YOLO
 import torch
-from torch.utils.data import DataLoader, TensorDataset, ConcatDataset, Dataset
+from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import PILToTensor
-from PIL import Image
-import os
-import json
-import base64
-import requests
+
 import traceback
-from ultralytics.engine.results import Results as UltralyticsResults
 from tqdm import tqdm
 from torchvision.ops import nms
 import asyncio
@@ -32,10 +26,9 @@ import datetime
 import sqlite3
 
 
-from .models import Detector, UltralyticsDetector, GroundingDinoDetector
+from .models import Detector
 from ..common.config import PredictionConfig
 from ..common.base import Tile, Detection
-from ..common.annotation_utils import GPSUtils, compute_detection_gps
 from ..common.processor import DetectionsPostprocessor
 
 logging.basicConfig(
