@@ -40,15 +40,20 @@ config = PredictionConfig(
 ALIAS = "demo"
 NAME = "labeler"
 
-MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
+# MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
+# detection_model_type = "ultralytics"  # "hf-groundingdino"  # "ultralytics"  # "hf-groundingdino"
+
+detection_model_type="hf-groundingdino"
+MODEL_PATH="IDEA-Research/grounding-dino-tiny"
+
 roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
 roi_keep_classes = ["gt"]
 detection_label_map = {0: "wildlife"}
 feature_extractor_path = "facebook/dinov2-with-registers-small"
-timeout = 15
-buffer_size = 64
+timeout = 60
+buffer_size = 32
 
 
 def run_inference_engine(image_paths: list[str]):
@@ -61,6 +66,7 @@ def run_inference_engine(image_paths: list[str]):
         detection_label_map=detection_label_map,
         feature_extractor_path=feature_extractor_path,
         model_path=MODEL_PATH,
+        detection_model_type=detection_model_type,
         mlflow_model_alias=ALIAS,
         mlflow_model_name=NAME,
         timeout=timeout,
@@ -170,26 +176,26 @@ def run_detector(
     # t1_start = perf_counter()
 
     detection_system = ObjectDetectionSystem(
-        config=config, buffer_size=32, timeout=15, detection_label_map={0: "wildlife"}
+        config=config, buffer_size=32, timeout=60, detection_label_map={0: "wildlife"}
     )
     # detector.set_processor(roi_processor=processor)
 
-    model = build_detector(
-        detection_model_type="ultralytics",
-        model_path=MODEL_PATH,
-        model=None,
-        config=config,
-    )
+    # model = build_detector(
+    #     detection_model_type="ultralytics",
+    #     model_path=MODEL_PATH,
+    #     model=None,
+    #     config=config,
+    # )
 
-    # model = build_detector(detection_model_type="hf-groundingdino",
-    #                                  model_path="IDEA-Research/grounding-dino-tiny",
-    #                                  model=None,
-    #                                  config=config,
-    #                                  )
+    model = build_detector(detection_model_type="hf-groundingdino",
+                                     model_path="IDEA-Research/grounding-dino-tiny",
+                                     model=None,
+                                     config=config,
+                                     )
 
-    detector.set_model(model=model)
+    detection_system.set_model(model=model)
     tiles = [Tile(image_path=p, flight_specs=config.flight_specs) for p in image_paths]
-    results = detector.run(tiles=tiles)
+    results = detection_system.run(tiles=tiles)
 
     return results
 

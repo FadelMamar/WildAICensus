@@ -14,7 +14,7 @@ from datalabeling.common.config import PredictionConfig, FlightSpecs
 
 # EXAMPLE_DIR = r"D:\workspace\data\savmap_dataset_v2\raw\images"
 
-EXAMPLE_DIR = r"D:\PhD\Data per camp\tmp" #r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
+EXAMPLE_IMAGE_DIR = r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
 
 
 def make_detection(parent_image: str):
@@ -150,7 +150,7 @@ def test_inference_and_save_predictions():
     ALIAS = "demo"
     NAME = "labeler"
     MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
-    roi_classifier_path = r"../base_models_weights/roi_classifier.ckpt"
+    roi_classifier_path = None # r"../base_models_weights/roi_classifier.ckpt"
     roi_cls_is_features = True
     roi_cls_label_map = {0: "gt", 1: "tn"}
     roi_keep_classes = ["gt"]
@@ -180,7 +180,7 @@ def test_inference_and_save_predictions():
         detection_iou_threshold=0.8,
         save_path="census_results.json",
         fiftyone_dataset_name="savmap_dataset_v2-raw-census-demo",
-        fiftyone_persistent=True,
+        fiftyone_persistent=False,
     )
 
     return census_system
