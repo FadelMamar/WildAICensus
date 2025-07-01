@@ -607,7 +607,8 @@ def main():
         with st.form("run_census_form"):
             images_dir = st.text_input("Images directory", value="D:/images").strip()
             model_path = st.text_input(
-                "Model path", value="D:/datalabeling/base_models_weights/best.pt"
+                "Model path",
+                help="IDEA-Research/grounding-dino-tiny if using hf-groundingdino",
             ).strip()
             alias = st.text_input("Model alias", value="demo").strip()
             name = st.text_input("Model name", value="labeler").strip()
@@ -634,12 +635,18 @@ def main():
                 "FiftyOne dataset name", value="demo-dataset"
             ).strip()
             fiftyone_persistent = st.checkbox("FiftyOne persistent", value=True)
+            detection_model_type = st.text_input(
+                "Detection model type",
+                value="ultralytics",
+                help="ultralytics or hf-groundingdino",
+            ).strip()
 
             if st.form_submit_button("Run Census"):
                 with st.spinner("Running census..."):
                     result = run_census_subprocess(
                         images_dir=images_dir,
-                        model_path=model_path,
+                        model_path=None if len(model_path) == 0 else model_path,
+                        detection_model_type=detection_model_type,
                         alias=alias,
                         name=name,
                         roi_classifier_path=roi_classifier_path,
@@ -1017,6 +1024,7 @@ def run_census_subprocess(
     image_overlap_threshold,
     detection_iou_threshold,
     save_path,
+    detection_model_type,
     fiftyone_dataset_name,
     fiftyone_persistent,
 ):
@@ -1041,6 +1049,7 @@ def run_census_subprocess(
         f"--save_path={save_path}",
         f"--fiftyone_dataset_name={fiftyone_dataset_name}",
         f"--fiftyone_persistent={fiftyone_persistent}",
+        f"--detection_model_type={detection_model_type}",
     ]
 
     cmd = ["call", script_path, "run_census_cli"] + args
