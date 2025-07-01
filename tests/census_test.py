@@ -14,7 +14,7 @@ from datalabeling.common.config import PredictionConfig, FlightSpecs
 
 # EXAMPLE_DIR = r"D:\workspace\data\savmap_dataset_v2\raw\images"
 
-EXAMPLE_DIR = r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
+EXAMPLE_DIR = r"D:\PhD\Data per camp\tmp" #r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 2\Rep 1"
 
 
 def make_detection(parent_image: str):
@@ -128,7 +128,7 @@ def test_inference_and_save_predictions():
     config = PredictionConfig(
         imgsz=800,
         tilesize=800,
-        batch_size=4,
+        batch_size=32,
         overlap_ratio=0.2,
         confidence_threshold=0.2,
         inference_service_url=None,
@@ -173,15 +173,15 @@ def test_inference_and_save_predictions():
         detection_iou_threshold=0.8,
         save_path="census_results.json",
         fiftyone_dataset_name="savmap_dataset_v2-raw-census-demo",
-        fiftyone_persistent=False,
+        fiftyone_persistent=True,
     )
 
     return census_system
 
 
 if __name__ == "__main__":
-    #overlap_map = test_gps_overlap()
+    # overlap_map = test_gps_overlap()
 
-    census_system = test_count_system()
+    # census_system = test_count_system()
 
-    # test_inference_and_save_predictions()
+    test_inference_and_save_predictions()

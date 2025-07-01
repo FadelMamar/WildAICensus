@@ -40,8 +40,8 @@ config = PredictionConfig(
 ALIAS = "demo" 
 NAME = "labeler"
 
-MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
-roi_classifier_path = None  # r"..\base_models_weights\roi_classifier.ckpt"
+MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
+roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
 roi_keep_classes = ["gt"]
@@ -68,6 +68,8 @@ def run_inference_engine(image_paths: list[str]):
     )
 
     detections = engine.inference(images_paths=image_paths, return_as_df=True)
+
+    print("Results:", detections)
 
     return detections
 
@@ -167,7 +169,7 @@ def run_detector(
 ):
     # t1_start = perf_counter()
 
-    detector = ObjectDetectionSystem(
+    detection_system = ObjectDetectionSystem(
         config=config, buffer_size=32, timeout=15, detection_label_map={0: "wildlife"}
     )
     # detector.set_processor(roi_processor=processor)
@@ -185,9 +187,11 @@ def run_detector(
     #                                  config=config,
     #                                  )
 
-    detector.set_model(model=model) 
+    detection_system.set_model(model=model) 
 
-    results = detector.run(images_paths=image_paths)
+    results = detection_system.run(images_paths=image_paths)
+
+    print("Results:", len(results))
 
     return results
 
@@ -230,7 +234,7 @@ if __name__ == "__main__":
     # images = [image_path]
 
     images = Path(
-        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
+        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2"
     ).glob("*.JPG")
     images = list(images)[:20]
 
