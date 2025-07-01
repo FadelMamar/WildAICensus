@@ -383,7 +383,7 @@ class Detection:
         gsd: ground sample distance (cm/px)
         """
         if self.gps_loc is None:
-            logger.info("No gps coordinate found in the detection")
+            logger.debug("No gps coordinate found in the detection")
             return
 
         try:
@@ -639,7 +639,7 @@ class Tile:
     def update_detection_gps(
         self,
     ):
-        if self.tile_gps_loc is None:
+        if (self.tile_gps_loc is None) or (self.flight_specs is None):
             logger.info(f"No gps coordinate found in tile: {self.image_path}")
             return
 
@@ -675,7 +675,6 @@ class Tile:
                         gsd=self.gsd,
                     )
                 except Exception as e:
-                    # print(e)
                     logger.error(f"Failed to compute GPS location of detections. {e}")
                     det.gps_loc = None
 
@@ -811,7 +810,7 @@ class Tile:
 
         return tiles
 
-    def _get_patches_from_tile(
+    def _get_patches_and_offset_info(
         self, patch_size: int, stride: int
     ) -> tuple[torch.Tensor, dict]:
         """
