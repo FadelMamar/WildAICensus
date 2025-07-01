@@ -131,7 +131,7 @@ class InferenceEngine(object):
 
         logger.info(f"Running inference on {len(paths)} images.")
 
-        detections = self.detector.run(images_paths=paths)
+        detections = self.detector.run(images_paths=paths,img_loading_batch=8)
 
         if len(detections) != len(paths):
             raise ValueError("Number of detections does not match number of images. {} != {}".format(len(detections), len(paths)))
