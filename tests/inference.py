@@ -37,10 +37,11 @@ config = PredictionConfig(
     # device="cuda:0",
 )
 
-ALIAS = "demo"  # -rt-batch8'
+ALIAS = "demo" 
 NAME = "labeler"
 
-MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
+# MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
+MODEL_PATH = None
 roi_classifier_path = None  # r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
@@ -185,7 +186,7 @@ def run_detector(
     #                                  config=config,
     #                                  )
 
-    detector.set_model(model=model)
+    detector.set_model(model=model) 
 
     results = detector.run(images_paths=image_paths)
 
@@ -223,16 +224,16 @@ def run_annotator(
 if __name__ == "__main__":
     # image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_512_640_1152.jpg"
     # image_path = r"D:\workspace\data\savmap_dataset_v2\raw\tmp\0a4a499660dc4e7c986779f8b6786f87.JPG"
-    image_path = r"D:\workspace\data\general_dataset\original-data\train\images\0af7b1ea3a107e511353adbaba10c2e55a0bddf2.JPG"
+    # image_path = r"D:\workspace\data\general_dataset\original-data\train\images\0af7b1ea3a107e511353adbaba10c2e55a0bddf2.JPG"
 
     # image_path = r"D:\workspace\data\savmap_dataset_v2\annotated_py_paul\yolo_format\images\00a033fefe644429a1e0fcffe88f8b39_0_4_0_1024_640_1664.jpg"
 
-    images = [image_path]
+    # images = [image_path]
 
-    # images = Path(
-    #     r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
-    # ).glob("*.JPG")
-    # images = list(images)[:20]
+    images = Path(
+        r"D:\PhD\Data per camp\Dry season\Kapiri\Camp 3\Rep 2 - tiled"
+    ).glob("*.JPG")
+    images = list(images)[:20]
 
     # results = run_model(image_path)
 
@@ -240,7 +241,7 @@ if __name__ == "__main__":
 
     # t1_start = perf_counter()
 
-    # results = run_inference_engine(images)
+    results = run_inference_engine(images)
 
     # t1_stop = perf_counter()
     # print("Inference time: ", t1_stop - t1_start)
