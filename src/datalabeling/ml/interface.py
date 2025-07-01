@@ -15,13 +15,12 @@ from label_studio_sdk.client import LabelStudio
 from PIL import Image
 
 from .workers import ObjectDetectionSystem
-from .models import ImageClassifier, YOLO, Detector, build_detector
+from .models import ImageClassifier, Detector, build_detector
 from ..common.processor import DetectionsPostprocessor, get_processor
 from ..common.config import PredictionConfig
 from ..common.base import Detection, Tile
 from ..common.mlflow_utils import load_registered_model
 from ..common.annotation_utils import GPSUtils
-
 
 logger = logging.getLogger(__name__)
 
@@ -134,7 +133,11 @@ class InferenceEngine(object):
         detections = self.detector.run(images_paths=paths,img_loading_batch=8)
 
         if len(detections) != len(paths):
-            raise ValueError("Number of detections does not match number of images. {} != {}".format(len(detections), len(paths)))
+            raise ValueError(
+                "Number of detections does not match number of images. {} != {}".format(
+                    len(detections), len(paths)
+                )
+            )
 
         if tiles is not None:
             for i, tile in enumerate(tiles):

@@ -1250,9 +1250,6 @@ class ObjectDetectionSystem:
 
         if sum(self._is_alive().values()):
             print(self._is_alive())
-        else:
-            print("Pipeline failed. Postprocessing did not start...")
-            return []
 
         if out is None:
             print("Pipeline failed. Postprocessing did not start...")
