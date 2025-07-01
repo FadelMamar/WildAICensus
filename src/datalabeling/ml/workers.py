@@ -98,7 +98,7 @@ class SharedBuffers:
     - Add more buffers if needed for your specific use case
     """
 
-    def __init__(self, max_size: int = 64, timeout: int = 120):
+    def __init__(self, max_size: int = 64, timeout: int = 15):
         """
         Initialize shared memory buffers for inter-thread communication.
 
@@ -200,7 +200,7 @@ class SharedBuffers:
                 if detections
                 else "filtered_detections"
             )
-            msg = f"Queue is Empty or has been consumed. Request: {request}"
+            msg = f"{request} Queue is Empty or has been consumed."
             self.logger.info(msg)
             return "DONE"
 
@@ -377,7 +377,7 @@ class DataLoadingThread(threading.Thread):
         try:
             image_path = next(self._source_iterator)
             tile = Tile(image_path=image_path)
-            self.logger.info(f"Loading: sample {self.count}")
+            self.logger.debug(f"Loading: sample {self.count}")
 
             self.count += 1
 
@@ -492,7 +492,7 @@ class DataLoadingThread(threading.Thread):
             self.logger.debug(f"No more data to load. Loaded {self.count} samples.")
             return "DONE"
         elif tile == "ERROR":
-            self.shared_buffers.put(data="DONE")
+            self.shared_buffers.put(data="ERROR")
             self.logger.error("Error loading data")
             return "ERROR"
 
@@ -520,15 +520,15 @@ class DataLoadingThread(threading.Thread):
         """
         self.logger.info("Starting...")
 
-        while not self.shared_buffers.is_shutdown:
+        while True:
             for _ in range(self.batchsize):
-                res = self._load_once()
-                if res == "DONE":
+                status = self._load_once()
+                if status == "DONE":
+                    self.logger.info("DONE")
                     return
-                elif res == "OK":
+                elif status == "OK":
                     continue
-                elif res == "ERROR":
-                    self.logger.error("Error loading data")
+                elif status == "ERROR":
                     return
                 else:
                     self.logger.error("Unknown error")
@@ -657,13 +657,7 @@ class DetectionThread(threading.Thread):
             dict: Mapping from image index to detection results.
         """
 
-        batchsize = (
-            self.config.batch_size
-            if self.config.inference_service_url
-            else self.config.batch_size
-        )
-
-        loader = DataLoader(data, batch_size=batchsize, shuffle=False)
+        loader = DataLoader(data, batch_size=self.config.batch_size, shuffle=False)
 
         if self.config.verbose:
             loader = tqdm(loader, desc="sliced_inference")
@@ -696,7 +690,7 @@ class DetectionThread(threading.Thread):
         metadata = []
         start_time = time.time()
 
-        while len(batch) < self.config.batch_size * 2:
+        while len(batch) < 4:
             # Calculate remaining wait time
             elapsed = time.time() - start_time
             remaining_time = self.max_wait_time - elapsed
@@ -723,15 +717,24 @@ class DetectionThread(threading.Thread):
             offsets.append(data_package.get("offset_info"))
             metadata.append(data_package.get("metadata"))
 
-        if len(batch) < 1:
-            self.logger.info("DONE.")
+        if len(batch) == 0:
             return "DONE", None, None
-
+        
         dataset = LoadingDataset(
             data=batch,
         )
 
         return dataset, offsets, metadata
+    
+    def end_thread(self,msg):
+        """
+        End the thread gracefully by putting a shutdown message in the shared buffer.
+
+        Args:
+            msg (str): Shutdown message to put in the buffer.
+        """
+        self.shared_buffers.put(detections=msg)
+        self.logger.info(f"Thread ended with message: {msg}")
 
     def run(self):
         """
@@ -744,15 +747,15 @@ class DetectionThread(threading.Thread):
             "Provide detection model or url to inference service"
         )
 
-        while not self.shared_buffers.is_shutdown:
+        while True:
             # get data
             data, offsets, metadata = self.collect_batch()
 
             if data == "DONE":
-                self.shared_buffers.put(detections="DONE")
+                self.end_thread("DONE")
                 return
             elif data == "ERROR":
-                self.shared_buffers.put(detections="ERROR")
+                self.end_thread("ERROR")
                 return
 
             try:
@@ -762,8 +765,8 @@ class DetectionThread(threading.Thread):
                     detection_results = self.run_detection(data)
                     dt = (time.perf_counter() - t1) / len(data)
                 except Exception as e:
-                    self.logger.error(f"Error running detection: {e}")
-                    self.shared_buffers.put(detections="ERROR")
+                    traceback.print_exc()
+                    self.end_thread("ERROR")
                     return
 
                 self.logger.info(f"Detection time: {dt:.3f}s")
@@ -777,10 +780,10 @@ class DetectionThread(threading.Thread):
                     }
                 self.shared_buffers.put(detections=results_package)
 
+
             except Exception as e:
                 traceback.print_exc()
-                self.logger.error("Graceful shutdown.")
-                self.shared_buffers.put(detections="ERROR")
+                self.end_thread("ERROR")
                 return
 
 
@@ -811,6 +814,16 @@ class PostProcessingThread(threading.Thread):
         self.label_map = label_map or dict()
         self.count = 0
         self.roi_processor = None
+    
+    def end_thread(self,msg):
+        """
+        End the thread gracefully by putting a shutdown message in the shared buffer.
+
+        Args:
+            msg (str): Shutdown message to put in the buffer.
+        """
+        self.shared_buffers.put(filtered_detections=msg)
+        self.logger.info(f"Thread ended with message: {msg}")
 
     def set_processor(self, roi_processor: DetectionsPostprocessor):
         """
@@ -878,18 +891,14 @@ class PostProcessingThread(threading.Thread):
         # self.logger.warning(results_package)
 
         if results_package == "DONE":
-            self.shared_buffers.put(filtered_detections="DONE")
-            self.logger.info("DONE")
-            return
+            return "DONE"
 
         elif results_package == "ERROR":
-            self.shared_buffers.put(filtered_detections="ERROR")
-            self.logger.error("ERROR in loading detections.")
-            return
+            return "ERROR"
 
         if not isinstance(results_package, dict):
             self.logger.error("results_package is not a dict")
-            return
+            return "ERROR"
 
         # initialize output buffer
         if self.outputs is None:
@@ -906,33 +915,32 @@ class PostProcessingThread(threading.Thread):
             filtered_detections = self.postprocess(
                 raw_detections, tile=tile, offset_info=offset_info
             )
+
+            self.logger.info(f"{len(filtered_detections)} detections after postprocessing")
+
             t2 = time.perf_counter() - t1
-            self.logger.info(f"Postprocessing took: {t2:.3f}s")
+            self.logger.debug(f"Postprocessing took: {t2:.3f}s")
             results_package["final_detections"] = filtered_detections
             results_package["postprocess_time"] = t2
             self.outputs.append(results_package)
             self.shared_buffers.put(filtered_detections=results_package)
-
-            # self.logger.warning(results_package)
-
             return "OK"
 
         except:
             traceback.print_exc()
-            self.shared_buffers.put(filtered_detections="ERROR")
-            self.logger.error("Graceful shutdown of thread.")
+            self.end_thread("ERROR")
             return
 
     def run(self):
         self.logger.info("Starting...")
-        while not self.shared_buffers.is_shutdown:
+        while True:
             status = self._run_once()
             self.logger.debug(f"PostProcessingThread status: {status}")
             if status == "OK":
                 continue
             else:
-                self.logger.info("Exiting.")
-                break
+                self.end_thread(status)
+                return
 
 
 # TODO
@@ -1164,11 +1172,17 @@ class ObjectDetectionSystem:
 
         self._set_handlers()
 
+        # self.data_thread.daemon = True
+        # self.detection_thread.daemon = True
+        # self.postprocess_thread.daemon = True
+
         # Start threads in order
         self.data_thread.start()
         self.detection_thread.start()
         self.postprocess_thread.start()
         # self.detection_uploader.start()
+
+        
 
         self._join_workers()
 
@@ -1178,7 +1192,7 @@ class ObjectDetectionSystem:
         """
 
         # Signal shutdown
-        self.shared_buffers.shutdown()
+        # self.shared_buffers.shutdown()
 
         # Wait for threads to finish
         self.data_thread.join()
@@ -1186,7 +1200,7 @@ class ObjectDetectionSystem:
         self.postprocess_thread.join()
         # self.detection_uploader.join()
 
-        self.logger.info("All threads stopped.")
+        # self.logger.info("All threads stopped.")
         return None
 
     def run(
@@ -1228,7 +1242,7 @@ class ObjectDetectionSystem:
         out = self.outputs
 
         if out is None:
-            raise RuntimeError("Pipeline failed...")
+            raise RuntimeError("Pipeline failed. Postprocessing did not start...")
 
         detections = [o["final_detections"] for o in out]
 

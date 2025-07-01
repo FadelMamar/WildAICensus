@@ -133,7 +133,7 @@ class InferenceEngine(object):
         detections = self.detector.run(images_paths=paths)
 
         if len(detections) != len(paths):
-            raise ValueError("Number of detections does not match number of images.")
+            raise ValueError("Number of detections does not match number of images. {} != {}".format(len(detections), len(paths)))
 
         if tiles is not None:
             for i, tile in enumerate(tiles):
@@ -338,6 +338,12 @@ class InferenceEngine(object):
                 load_unwrapped=True,
             )
             logger.info(f"model's metadata={metadata}")
+
+            logger.info(f"{model.__class__.__name__} loaded successfully.")
+
+            pred_config.batch_size = metadata.get("batch", pred_config.batch_size)
+            pred_config.tilesize = metadata.get("tilesize", pred_config.tilesize)
+            pred_config.imgsz = pred_config.tilesize
 
             detection_model = build_detector(
                 detection_model_type=metadata["detection_model_type"],

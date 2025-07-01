@@ -89,7 +89,7 @@ class Detection:
     label: int
     class_name: str
     id: Optional[str] = None
-    score: Optional[float] = None
+    score: Optional[float] = np.nan
     gps_loc: Optional[str] = None
     image_gps_loc: str = None
     parent_image: Optional[str] = None
@@ -513,7 +513,7 @@ class Tile:
 
     def _extract_geographic_footprint(self):
         if self.tile_gps_loc is None:
-            logger.info("No gps coordinate found in the tile")
+            logger.info("No gps coordinate found in the tile. Geographic footprint will not be set.")
             return
         xs = np.array([0, self.width])
         ys = np.array([0, self.height])
@@ -556,8 +556,8 @@ class Tile:
             self.tile_gps_loc = str(
                 geopy.Point(self.latitude, self.longitude, self.altitude / 1e3)
             )
-
-        logger.debug("gps extraction of tile failed")
+        else:
+            logger.info(f"Failed to extract GPS coordinates from {self.image_path}.")
 
         return None
 
@@ -630,7 +630,7 @@ class Tile:
         self,
     ):
         if self.tile_gps_loc is None:
-            logger.info("No gps coordinate found in the tile")
+            logger.info(f"No gps coordinate found in tile: {self.image_path}")
             return
 
         assert isinstance(self.tile_gps_loc, str), (
