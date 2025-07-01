@@ -68,7 +68,7 @@ def run_perf_evaluator(load_results=False):
 
     engine, _ = InferenceEngine.load_engine(
         pred_config=config,
-        roi_classifier_path=None,  # r"..\base_models_weights\roi_classifier.ckpt",
+        roi_classifier_path=r"..\base_models_weights\roi_classifier.ckpt",
         roi_cls_is_features=True,
         roi_cls_label_map={0: "gt", 1: "tn"},
         roi_keep_classes=["gt"],

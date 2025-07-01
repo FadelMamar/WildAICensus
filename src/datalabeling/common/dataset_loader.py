@@ -542,9 +542,9 @@ class LabelingDataset:
     def from_ls(
         cls,
         project_id: int,
-        top_n=0,
+        labelstudio_client: LabelStudio,
+        top_n:int=0,
         config: TilingConfig = None,
-        labelstudio_client: LabelStudio = None,
         tile_metadata: dict = None,
         load_existing_metadata: bool = False,
         max_workers: int = 1,

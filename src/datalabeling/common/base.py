@@ -754,8 +754,8 @@ class Tile:
             return None
 
         assert df.to_numpy().min() >= 0
-        assert df[["x_min", "x_max"]].to_numpy().max() <= self.width
-        assert df[["y_min", "y_max"]].to_numpy().max() <= self.height
+        assert df[["x_min", "x_max"]].to_numpy().max() <= self.width, f"{df[['x_min', 'x_max']].to_numpy().max()} <= {self.width}"
+        assert df[["y_min", "y_max"]].to_numpy().max() <= self.height, f"{df[['y_min', 'y_max']].to_numpy().max()} <= {self.height}"
 
         return None
 
