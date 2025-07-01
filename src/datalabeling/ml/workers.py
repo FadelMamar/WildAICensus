@@ -114,7 +114,7 @@ class SharedBuffers:
 
         # Thread synchronization
         self._shutdown_event = threading.Event()
-        self.is_closed = self._shutdown_event.is_set()
+        self.is_shutdown = self._shutdown_event.is_set()
         self.logger = logging.getLogger("SharedBuffers")
 
         self.queue_kwargs = dict(block=True, timeout=timeout)
@@ -281,6 +281,7 @@ class SharedBuffers:
         Signal all DataLoading threads to shutdown gracefully.
         """
         self._shutdown_event.set()
+        self.is_shutdown = True
 
 
 class DataLoadingThread(threading.Thread):
@@ -519,7 +520,7 @@ class DataLoadingThread(threading.Thread):
         """
         self.logger.info("Starting...")
 
-        while True:
+        while not self.shared_buffers.is_shutdown:
             for _ in range(self.batchsize):
                 res = self._load_once()
                 if res == "DONE":
@@ -743,7 +744,7 @@ class DetectionThread(threading.Thread):
             "Provide detection model or url to inference service"
         )
 
-        while True:
+        while not self.shared_buffers.is_shutdown:
             # get data
             data, offsets, metadata = self.collect_batch()
 
@@ -756,20 +757,14 @@ class DetectionThread(threading.Thread):
 
             try:
                 # Run detection
-                t1 = time.perf_counter()
                 try:
+                    t1 = time.perf_counter()
                     detection_results = self.run_detection(data)
-                except ModuleNotFoundError:
-                    traceback.print_exc()
-                    self.logger.error("Module not found. Check your environment.")
-                    self.shared_buffers.put(detections="ERROR")
-                    return
+                    dt = (time.perf_counter() - t1) / len(data)
                 except Exception as e:
-                    traceback.print_exc()
                     self.logger.error(f"Error running detection: {e}")
                     self.shared_buffers.put(detections="ERROR")
-
-                dt = (time.perf_counter() - t1) / len(data)
+                    return
 
                 self.logger.info(f"Detection time: {dt:.3f}s")
 
@@ -930,7 +925,7 @@ class PostProcessingThread(threading.Thread):
 
     def run(self):
         self.logger.info("Starting...")
-        while True:
+        while not self.shared_buffers.is_shutdown:
             status = self._run_once()
             self.logger.debug(f"PostProcessingThread status: {status}")
             if status == "OK":

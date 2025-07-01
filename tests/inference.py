@@ -40,8 +40,7 @@ config = PredictionConfig(
 ALIAS = "demo" 
 NAME = "labeler"
 
-# MODEL_PATH = r"../runs/mlflow/140168774036374062/045bfab3be854d68a0227eae07da35cc/artifacts/weights/best.pt"  # "D:/datalabeling/base_models_weights/best.pt"
-MODEL_PATH = None
+MODEL_PATH = None  # "D:/datalabeling/base_models_weights/best.pt"
 roi_classifier_path = None  # r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
