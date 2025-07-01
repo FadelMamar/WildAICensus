@@ -17,11 +17,17 @@ import uuid
 logger = logging.getLogger(__name__)
 
 from .annotation_utils import compute_detection_gps, GPSUtils, ImageProcessor
-from .config import SENSOR_HEIGHTS
+from .config import SENSOR_HEIGHTS, FlightSpecs
 
 
 def compute_iou(bbox1: List[float], bbox2: List[float]) -> float:
-    """Compute Intersection over Union (IoU) between two bounding boxes"""
+    """Compute Intersection over Union (IoU) between two bounding boxes.
+    Args:
+        bbox1 (List[float]): Bounding box in [x_min, y_min, x_max, y_max] format.
+        bbox2 (List[float]): Bounding box in [x_min, y_min, x_max, y_max] format.
+    Returns:
+        float: IoU value between the two bounding boxes.
+    """
 
     bbox1 = torch.tensor([bbox1])
     bbox2 = torch.tensor([bbox2])
@@ -31,14 +37,6 @@ def compute_iou(bbox1: List[float], bbox2: List[float]) -> float:
     ).numpy()
 
     return iou.ravel()[0]
-
-
-@dataclass
-class FlightSpecs:
-    sensor_height: float = 24  # in mm
-    focal_length: float = 35  # in mm
-    gsd: float = None  # in cm/px
-    flight_height: float = 180  # in meters
 
 
 @dataclass
@@ -52,17 +50,28 @@ class GeographicBounds:
 
     @property
     def area(self) -> float:
-        """Calculate area in square degrees"""
+        """Calculate area in square degrees covered by the bounding box."""
         return (self.east - self.west) * (self.north - self.south)
 
     def box(self, box_format="xyxy") -> List[float]:
+        """Return the bounding box as a list in the specified format.
+        Args:
+            box_format (str): Format of the box. Only 'xyxy' is supported.
+        Returns:
+            List[float]: Bounding box coordinates.
+        """
         if box_format == "xyxy":
             return [self.west, self.south, self.east, self.north]
         else:
             raise ValueError("only 'xyxy' supproted.")
 
     def overlap_ratio(self, other: "GeographicBounds") -> float:
-        """Calculate overlap ratio (IoU) with another bounds using torchmetrics IntersectionOverUnion"""
+        """Calculate overlap ratio (IoU) with another bounds using torchmetrics IntersectionOverUnion.
+        Args:
+            other (GeographicBounds): Another geographic bounds object.
+        Returns:
+            float: Overlap ratio (IoU) between the two bounds.
+        """
 
         # Prepare boxes in [x_min, y_min, x_max, y_max] format
         box_self = [self.west, self.south, self.east, self.north]
@@ -79,17 +88,18 @@ class Detection:
     y_max: int
     label: int
     class_name: str
-    id: str = None
-    score: float = None
-    gps_loc: str = None
+    id: Optional[str] = None
+    score: Optional[float] = None
+    gps_loc: Optional[str] = None
     image_gps_loc: str = None
-    parent_image: str = None
+    parent_image: Optional[str] = None
     timestamp: str = None
     distance_to_centroid: float = None
 
-    geographic_footprint: GeographicBounds = None
+    geographic_footprint: Optional[GeographicBounds] = None
 
     def __post_init__(self):
+        """Post-initialization to set unique ID and compute distance to centroid."""
         if self.id is None:
             self.id = str(uuid.uuid4())
 
@@ -98,6 +108,7 @@ class Detection:
     def _get_distance_to_centroid(
         self,
     ) -> None:
+        """Compute the distance from the detection to the centroid of the parent image."""
         if self.parent_image is None:
             return None
 
@@ -110,11 +121,11 @@ class Detection:
         return None
 
     def iou(self, other: "Detection") -> float:
-        """Compute Intersection over Union (IoU) between two bounding boxes"""
+        """Compute Intersection over Union (IoU) between this and another detection's bounding box."""
         return compute_iou(self.bbox(box_format="xyxy"), other.bbox(box_format="xyxy"))
 
     def geo_iou(self, other: "Detection") -> float:
-        """Compute Intersection over Union (IoU) between two bounding boxes"""
+        """Compute Intersection over Union (IoU) between this and another detection's geographic footprint."""
         return self.geographic_footprint.overlap_ratio(other.geographic_footprint)
 
     @property
@@ -123,6 +134,7 @@ class Detection:
 
     @classmethod
     def empty(cls, parent_image: str = None):
+        """Create an empty detection object for a given parent image."""
         return cls(
             x_min=np.nan,
             x_max=np.nan,
@@ -141,6 +153,15 @@ class Detection:
         image_gps_loc: str = None,
         gps_loc: str = None,
     ):
+        """Create a Detection object from a COCO-format dictionary.
+        Args:
+            coco (dict): COCO-format annotation.
+            parent_image (str): Path to the parent image.
+            image_gps_loc (str, optional): GPS location of the image.
+            gps_loc (str, optional): GPS location of the detection.
+        Returns:
+            Detection: The created Detection object.
+        """
         bbox = coco["bbox"]
         label = coco["category_id"]
         class_ = coco["category_name"]
@@ -163,6 +184,13 @@ class Detection:
 
     @classmethod
     def from_ls(cls, detections: list, image_path: str):
+        """Create a list of Detection objects from Label Studio format annotations.
+        Args:
+            detections (list): List of Label Studio detection dicts.
+            image_path (str): Path to the image.
+        Returns:
+            list: List of Detection objects.
+        """
         det_objects = []
         for detection in detections:
             for det in detection["result"]:
@@ -200,7 +228,11 @@ class Detection:
         return det_objects
 
     def to_absolute_coords(self, x_offset: int, y_offset: int) -> None:
-        """Convert relative coordinates to absolute image coordinates."""
+        """Convert relative coordinates to absolute image coordinates by applying offsets.
+        Args:
+            x_offset (int): Offset to add to x coordinates.
+            y_offset (int): Offset to add to y coordinates.
+        """
         self.x_min += x_offset
         self.x_max += x_offset
         self.y_min += y_offset
@@ -382,7 +414,7 @@ class Tile:
     image_path: str
     image_data: Image.Image = None
 
-    id: str = None
+    id: Optional[str] = None
 
     width: int = None
     height: int = None
@@ -390,7 +422,7 @@ class Tile:
     x_offset: int = None
     y_offset: int = None
 
-    parent_image: str = None
+    parent_image: Optional[str] = None
     date: str = None
     parent_image_date: str = None
 
@@ -399,7 +431,7 @@ class Tile:
     longitude: float = None
     altitude: float = None
     flight_specs: FlightSpecs = field(default_factory=FlightSpecs)
-    geographic_footprint: GeographicBounds = None
+    geographic_footprint: Optional[GeographicBounds] = None
 
     predictions: List[Detection] = None
     annotations: List[Detection] = None
@@ -788,3 +820,24 @@ class Tile:
         }
 
         return tiles, offset_info
+
+    def update_geographic_footprint_from_gps(self, width: int, height: int, gsd: float):
+        """
+        Update the detection's geographic_footprint using its gps_loc field, similar to Tile._extract_geographic_footprint.
+        Args:
+            width (int): Width of the image.
+            height (int): Height of the image.
+            gsd (float): Ground sample distance (cm/px).
+        Returns:
+            None
+        """
+        if self.gps_loc is None:
+            logger.info("No gps coordinate found in the detection")
+            return
+        # Parse gps_loc string to get latitude, longitude, altitude
+        try:
+            point = geopy.Point(self.gps_loc)
+        except Exception as e:
+            logger.warning(f"Could not parse gps_loc: {self.gps_loc}, error: {e}")
+            return
+        # ... existing code ...

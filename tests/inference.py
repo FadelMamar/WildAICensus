@@ -1,4 +1,4 @@
-from datalabeling.common.config import PredictionConfig
+from datalabeling.common.config import PredictionConfig, FlightSpecs
 from datalabeling.ml.interface import InferenceEngine
 from datalabeling.ml.models import (
     UltralyticsDetector,
@@ -25,9 +25,11 @@ config = PredictionConfig(
     overlap_ratio=0.2,
     confidence_threshold=0.2,
     inference_service_url=None,  # "http://localhost:4141/predict",  # None "http://localhost:4141/predict"
-    flight_height=180,
-    sensor_height=24,
-    gsd=None,
+    flight_specs=FlightSpecs(
+        flight_height=180,
+        sensor_height=24,
+        gsd=None,
+    ),
     nms_iou=0.5,
     verbose=False,
     # min_area=100,
@@ -40,7 +42,7 @@ ALIAS = "demo"  # -rt-batch8'
 NAME = "labeler"
 
 MODEL_PATH = "D:/datalabeling/base_models_weights/best.pt"
-roi_classifier_path = r"..\base_models_weights\roi_classifier.ckpt"
+roi_classifier_path = None  # r"..\base_models_weights\roi_classifier.ckpt"
 roi_cls_is_features = True
 roi_cls_label_map = {0: "gt", 1: "tn"}
 roi_keep_classes = ["gt"]
@@ -60,6 +62,7 @@ def run_inference_engine(image_paths: list[str]):
         model_path=MODEL_PATH,
         mlflow_model_alias=ALIAS,
         mlflow_model_name=NAME,
+        timeout=20,
     )
 
     detections = engine.inference(images_paths=image_paths, return_as_df=True)

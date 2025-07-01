@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import List, Optional, Sequence
 import torch
@@ -10,7 +10,19 @@ SENSOR_HEIGHTS = dict(ZenmuseP1=24)
 
 
 @dataclass
+class FlightSpecs:
+    """Configuration for flight specifications, including sensor and flight parameters."""
+
+    sensor_height: float = 24  # in mm
+    focal_length: float = 35  # in mm
+    gsd: float = None  # in cm/px
+    flight_height: float = 180  # in meters
+
+
+@dataclass
 class TilingConfig:
+    """Configuration for tiling images, including root/destination paths and tiling parameters."""
+
     root: str
     dest: str
 
@@ -34,6 +46,8 @@ class TilingConfig:
 
 @dataclass
 class DataConfig:
+    """Configuration for dataset paths, slicing, and saving options."""
+
     root_dir: str = "D:\\"
     save_dir: Optional[Path] = None
     results_filename: str = "detection_results.csv"
@@ -69,6 +83,7 @@ class DataConfig:
     def __post_init__(
         self,
     ):
+        """Set destination paths for labels and images if dest_dir is provided."""
         if self.dest_dir is not None:
             self.dest_path_labels = str(Path(self.dest_dir) / "labels")
             self.dest_path_images = str(Path(self.dest_dir) / "images")
@@ -79,6 +94,8 @@ class DataConfig:
 
 @dataclass
 class PredictionConfig:
+    """Configuration for prediction/inference, including tiling, thresholds, and device settings."""
+
     imgsz: int = 960
     tilesize: int = 960
     overlap_ratio: float = 0.2
@@ -89,9 +106,7 @@ class PredictionConfig:
     nms_iou: float = 0.5
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
 
-    flight_height: int = 180
-    sensor_height: float = 24
-    gsd: float = None  # cm/px
+    flight_specs: FlightSpecs = field(default_factory=FlightSpecs)
 
     batch_size: int = 8
 
@@ -106,6 +121,7 @@ class PredictionConfig:
     inference_service_url: str = None
 
     def __post_init__(self):
+        """Validate that required attributes are not None after initialization."""
         for a in [
             self.batch_size,
             self.nms_iou,
@@ -120,6 +136,8 @@ class PredictionConfig:
 
 @dataclass
 class TrainingConfig:
+    """Configuration for model training, including model type, data, and training hyperparameters."""
+
     # model type
     is_single_cls: bool = False
     is_rtdetr: bool = False

@@ -42,6 +42,18 @@ logger = logging.getLogger(__name__)
 def load_ultralytics_model_class(
     object_detector_arch: str, path: str, task: str = "detect", **kwargs
 ):
+    """
+    Load an Ultralytics model class based on the architecture.
+
+    Args:
+        object_detector_arch (str): Architecture type (e.g., 'rtdetr', 'yolo', 'custom_yolo').
+        path (str): Path to model weights or config.
+        task (str, optional): Task type (default 'detect').
+        **kwargs: Additional keyword arguments for custom YOLO.
+
+    Returns:
+        Model instance.
+    """
     if object_detector_arch == "rtdetr":
         return RTDETR(path)
     if object_detector_arch == "yolo":
@@ -61,6 +73,14 @@ class TrainingManager:
         herdnet_loss: list = None,
         herdnet_training_backend: str = "original",
     ):
+        """
+        Initialize the TrainingManager for model training.
+
+        Args:
+            args (TrainingConfig): Training configuration.
+            herdnet_loss (list, optional): List of loss functions for HerdNet.
+            herdnet_training_backend (str, optional): Backend for HerdNet training.
+        """
         self.args = args
         self.herdnet_loss = herdnet_loss
         self.herdnet_training_backend = herdnet_training_backend
@@ -78,6 +98,12 @@ class TrainingManager:
         self.model = self._load_model()
 
     def _load_model(self):
+        """
+        Load the appropriate model based on the configuration.
+
+        Returns:
+            Model instance.
+        """
         if self.args.mlflow_model_alias is not None:
             name = self.args.run_name
             alias = self.args.mlflow_model_alias
@@ -103,6 +129,12 @@ class TrainingManager:
             raise NotImplementedError
 
     def _load_ultralytics_model(self):
+        """
+        Load an Ultralytics model based on the configuration.
+
+        Returns:
+            Model instance.
+        """
         model = None
 
         path = self.args.path_weights
@@ -123,6 +155,12 @@ class TrainingManager:
     def _load_classifier_model(
         self,
     ):
+        """
+        Load a classifier model based on the configuration.
+
+        Returns:
+            Model instance.
+        """
         if self.args.cls_training_backend == "ultralytics":
             return self._load_ultralytics_model()
 
@@ -147,6 +185,12 @@ class TrainingManager:
     def _load_herdnet(
         self,
     ):
+        """
+        Load a HerdNet model based on the configuration.
+
+        Returns:
+            Model instance.
+        """
         if self.herdnet_loss is None:
             ce_weights = (
                 torch.Tensor(self.args.herdnet_ce_weight).to(self.args.device)
@@ -217,6 +261,9 @@ class TrainingManager:
         return self.model.to(self.args.device)
 
     def run(self):
+        """
+        Run the training process based on the model type and backend.
+        """
         if self.args.model_type == "detector":
             self._run_ultralytics()
 
@@ -235,6 +282,12 @@ class TrainingManager:
     def _train_classifier_sklearn(
         self,
     ):
+        """
+        Train a classifier using scikit-learn on extracted features.
+
+        Returns:
+            Trained classifier model.
+        """
         logger.info("Training classifier using extracted features...")
 
         # data
@@ -259,6 +312,9 @@ class TrainingManager:
     def _run_classifier(
         self,
     ):
+        """
+        Run the classifier training process based on the backend.
+        """
         if self.args.cls_training_backend == "ultralytics":
             self._train_ultralytics(data_cfg=self.args.cls_data_dir)
 
@@ -332,6 +388,9 @@ class TrainingManager:
         trainer.fit(self.model, datamodule=datamodule)
 
     def _run_ultralytics(self):
+        """
+        Run the Ultralytics training process, including pretraining and continual learning if enabled.
+        """
         assert self.args.task in ["detect", "obb", "segment"]
         self.model.info()
 
@@ -354,6 +413,9 @@ class TrainingManager:
     def _run_herdnet_original(
         self,
     ):
+        """
+        Run the original HerdNet training process.
+        """
         from animaloc.train import Trainer
 
         # setting up working dir
@@ -417,6 +479,9 @@ class TrainingManager:
         )
 
     def _run_herdnet_pl(self):
+        """
+        Run the PyTorch Lightning HerdNet training process.
+        """
         # lowerng matrix multiplication precision
         if torch.cuda.is_available():
             torch.set_float32_matmul_precision("high")
@@ -512,6 +577,27 @@ class TrainingManager:
         detect_anomaly: bool = False,
         accelerator: str = "auto",
     ) -> L.LightningModule:
+        """
+        Train HerdNet using PyTorch Lightning.
+
+        Args:
+            herdnet_trainer (L.LightningModule): HerdNet trainer instance.
+            lr (float): Learning rate.
+            epochs (int): Number of epochs.
+            freeze_ratio (float): Ratio of layers to freeze.
+            empty_ratio (float): Ratio of empty samples.
+            normalization (tuple): Normalization method.
+            mean (tuple): Mean for normalization.
+            std (tuple): Std for normalization.
+            workdir (str): Working directory.
+            num_sanity_val_steps (int, optional): Number of sanity validation steps.
+            check_val_every_n_epoch (int, optional): Validation frequency.
+            detect_anomaly (bool, optional): Enable anomaly detection.
+            accelerator (str, optional): Accelerator type.
+
+        Returns:
+            L.LightningModule: Trained HerdNet trainer.
+        """
         # loggers and callbacks
         mlf_logger = MLFlowLogger(
             experiment_name=self.args.project_name,
@@ -595,6 +681,15 @@ class TrainingManager:
     def _train_ultralytics(
         self, data_cfg=None, imgsz=None, batchsize=None, resume=False
     ):
+        """
+        Train a model using the Ultralytics framework.
+
+        Args:
+            data_cfg: Data configuration.
+            imgsz: Image size.
+            batchsize: Batch size.
+            resume (bool, optional): Resume training from checkpoint.
+        """
         args = self.args
 
         assert args.val in ["True", "False"]
@@ -657,6 +752,9 @@ class TrainingManager:
         )
 
     def _pretraining(self):
+        """
+        Run pretraining phase for the model if enabled in configuration.
+        """
         args = self.args
         assert os.path.exists(args.ptr_data_config_yaml), (
             "provide --ptr-data-config-yaml"
@@ -675,6 +773,12 @@ class TrainingManager:
         )
 
     def _hard_negative_learning(self, img_glob_pattern: str = "*"):
+        """
+        Run hard negative sampling learning strategy.
+
+        Args:
+            img_glob_pattern (str, optional): Glob pattern for images.
+        """
         args = self.args
         assert args.hn_save_dir, "Provide --hn-save-dir"
         logger.info(
@@ -705,6 +809,12 @@ class TrainingManager:
         )
 
     def _continual_learning(self, img_glob_pattern: str = "*"):
+        """
+        Run continual learning strategy for the model.
+
+        Args:
+            img_glob_pattern (str, optional): Glob pattern for images.
+        """
         args = self.args
         assert os.path.exists(args.cl_data_config_yaml), "Provide --cl-data-config-yaml"
         logger.info("\n\n------------ Continual Learning ----------\n")

@@ -39,6 +39,20 @@ class HerdnetTrainer(L.LightningModule):
         epochs: int = None,
         lrf: float = 1e-1,
     ):
+        """
+        Initialize the HerdnetTrainer LightningModule.
+
+        Args:
+            data_config_yaml (str): Path to data config YAML file.
+            lr (float): Learning rate.
+            model (torch.nn.Module): Model to train.
+            weight_decay (float): Weight decay for optimizer.
+            work_dir (str): Working directory for outputs.
+            eval_radius (int, optional): Evaluation radius for metrics.
+            classification_threshold (float, optional): Threshold for classification.
+            epochs (int, optional): Number of epochs.
+            lrf (float, optional): Learning rate factor.
+        """
         super().__init__()
 
         self.save_hyperparameters(
@@ -93,6 +107,14 @@ class HerdnetTrainer(L.LightningModule):
     def batch_metrics(
         self, metric: PointsMetrics, batchsize: int, output: dict
     ) -> None:
+        """
+        Feed batch metrics to the provided metric object.
+
+        Args:
+            metric (PointsMetrics): Metrics object to update.
+            batchsize (int): Batch size.
+            output (dict): Output dictionary with predictions and ground truth.
+        """
         if batchsize >= 1:
             for i in range(batchsize):
                 gt = {k: v[i] for k, v in output["gt"].items()}
@@ -106,6 +128,16 @@ class HerdnetTrainer(L.LightningModule):
     def prepare_feeding(
         self, targets: dict[str, torch.Tensor], output: list[torch.Tensor]
     ) -> dict:
+        """
+        Prepare ground truth and predictions for feeding into metrics.
+
+        Args:
+            targets (dict): Ground truth targets.
+            output (list): Model predictions.
+
+        Returns:
+            dict: Dictionary with ground truth and predictions.
+        """
         try:  # batchsize==1
             gt_coords = [p[::-1] for p in targets["points"].cpu().tolist()]
             gt_labels = targets["labels"].cpu().tolist()
@@ -121,6 +153,17 @@ class HerdnetTrainer(L.LightningModule):
         return dict(gt=gt, preds=preds, est_count=counts)
 
     def shared_step(self, stage, batch, batch_idx):
+        """
+        Shared step for training, validation, and test.
+
+        Args:
+            stage (str): Stage ('train', 'val', or 'test').
+            batch: Batch data.
+            batch_idx: Batch index.
+
+        Returns:
+            Loss or None depending on stage.
+        """
         # compute losses
         if stage == "train":
             images, targets = batch
@@ -143,6 +186,12 @@ class HerdnetTrainer(L.LightningModule):
             return None
 
     def log_metrics(self, stage: str):
+        """
+        Log metrics for the given stage.
+
+        Args:
+            stage (str): Stage ('val' or 'test').
+        """
         assert stage != "train", "metrics only logged for val and test."
 
         iter_metrics = self.metrics[stage]
@@ -182,36 +231,88 @@ class HerdnetTrainer(L.LightningModule):
     def on_validation_epoch_end(
         self,
     ):
+        """
+        Called at the end of validation epoch to log metrics.
+        """
         self.log_metrics(stage="val")
 
     def on_test_epoch_end(
         self,
     ):
+        """
+        Called at the end of test epoch to log metrics.
+        """
         self.log_metrics(stage="test")
 
     def on_validation_epoch_start(
         self,
     ):
+        """
+        Called at the start of validation epoch to flush metrics.
+        """
         self.metrics["val"].flush()
 
     def on_test_epoch_start(
         self,
     ):
+        """
+        Called at the start of test epoch to flush metrics.
+        """
         self.metrics["test"].flush()
 
     def training_step(self, batch, batch_idx):
+        """
+        Training step for LightningModule.
+
+        Args:
+            batch: Batch data.
+            batch_idx: Batch index.
+
+        Returns:
+            Loss value.
+        """
         loss = self.shared_step("train", batch, batch_idx)
         return loss
 
     def validation_step(self, batch, batch_idx):
+        """
+        Validation step for LightningModule.
+
+        Args:
+            batch: Batch data.
+            batch_idx: Batch index.
+
+        Returns:
+            Loss value.
+        """
         loss = self.shared_step("val", batch, batch_idx)
         return loss
 
     def test_step(self, batch, batch_idx):
+        """
+        Test step for LightningModule.
+
+        Args:
+            batch: Batch data.
+            batch_idx: Batch index.
+
+        Returns:
+            Loss value.
+        """
         loss = self.shared_step("test", batch, batch_idx)
         return loss
 
     def predict_step(self, batch, batch_idx):
+        """
+        Prediction step for LightningModule.
+
+        Args:
+            batch: Batch data.
+            batch_idx: Batch index.
+
+        Returns:
+            Output dictionary.
+        """
         images = batch
         predictions, _ = self.model(images)
 
@@ -221,6 +322,12 @@ class HerdnetTrainer(L.LightningModule):
         return output
 
     def configure_optimizers(self):
+        """
+        Configure optimizers and learning rate schedulers for LightningModule.
+
+        Returns:
+            Tuple of optimizer and scheduler.
+        """
         optimizer = torch.optim.Adam(
             params=self.model.parameters(),
             lr=self.hparams.lr,
@@ -581,7 +688,7 @@ class UltralyticsDetector(Detector):
                         label=label,
                         class_name=result.names.get(label),
                         score=score,
-                        parent_image=result.path,
+                        parent_image=None,
                     )
                 )
 

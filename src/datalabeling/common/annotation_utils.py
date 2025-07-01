@@ -1044,6 +1044,14 @@ class ImageProcessor:
         ##-- Extract exif
         exif = GPSUtils.get_exif(file_name=image_path, image=image)
 
+        if image:
+            _, image_height = image.size
+        else:
+            try:
+                image_height = exif["ExifImageHeight"]
+            except:
+                image_height = Image.open(image_path).size[1]
+
         if focal_length is None:
             focal_length = exif["FocalLength"]
 
@@ -1058,7 +1066,6 @@ class ImageProcessor:
 
         ##-- Compute gsd
         focal_length *= 0.1  # in cm
-        image_height = exif["ExifImageHeight"]  # in px
         sensor_height *= 0.1  # in cm
         flight_height *= 1e2  # in cm
 

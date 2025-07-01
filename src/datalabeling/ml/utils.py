@@ -43,6 +43,12 @@ __all__ = [
 
 
 def remove_label_cache(data_config_yaml: str):
+    """
+    Remove the labels.cache files from the dataset directories specified in the YOLO data config YAML.
+
+    Args:
+        data_config_yaml (str): Path to the YOLO data config YAML file.
+    """
     # Remove labels.cache
     with open(data_config_yaml, "r") as file:
         yolo_config = yaml.load(file, Loader=yaml.FullLoader)
@@ -65,15 +71,16 @@ def remove_label_cache(data_config_yaml: str):
 
 
 def sample_pos_neg(images_paths: list, ratio: float, seed: int = 41):
-    """_summary_
+    """
+    Sample positive and negative image paths based on the ratio of empty to non-empty samples.
 
     Args:
-        images_paths (list): images paths
-        ratio (float): ratio defined as num_empty/num_non_empty
-        seed (int, optional): random seed. Defaults to 41.
+        images_paths (list): List of image paths.
+        ratio (float): Ratio defined as num_empty/num_non_empty.
+        seed (int, optional): Random seed. Defaults to 41.
 
     Returns:
-        list: selected paths to images
+        list: Selected image paths.
     """
 
     # build dataframe
@@ -109,20 +116,19 @@ def get_data_cfg_paths_for_cl(
     split: str = "train",
     pattern_glob: str = "*",
 ):
-    """_summary_
+    """
+    Generate and save a YOLO data config YAML for continual learning with sampled images.
 
     Args:
-        ratio (float): _description_
-        data_config_yaml (str): _description_
-        cl_save_dir (str): _description_
-        seed (int, optional): _description_. Defaults to 41.
-        split (str, optional): _description_. Defaults to 'train'.
-
-    Raises:
-        NotImplementedError: _description_
+        ratio (float): Ratio for sampling.
+        data_config_yaml (str): Path to YOLO data config YAML.
+        cl_save_dir (str): Directory to save sampled images and config.
+        seed (int, optional): Random seed. Defaults to 41.
+        split (str, optional): Dataset split. Defaults to 'train'.
+        pattern_glob (str, optional): Glob pattern for images. Defaults to '*'.
 
     Returns:
-        _type_: _description_
+        str: Path to the saved config YAML.
     """
 
     yolo_config = load_yaml(data_config_yaml)
@@ -179,14 +185,17 @@ def get_data_cfg_paths_for_HN(
     model: YOLO,
     split: str = "train",
 ):
-    """_summary_
+    """
+    Generate and save a YOLO data config YAML for hard negative mining.
 
     Args:
-        args (Arguments): _description_
-        data_config_yaml (str): _description_
+        args (TrainingConfig): Training configuration.
+        data_config_yaml (str): Path to YOLO data config YAML.
+        model (YOLO): YOLO model instance.
+        split (str, optional): Dataset split. Defaults to 'train'.
 
     Returns:
-        _type_: _description_
+        str: Path to the saved config YAML.
     """
 
     from .interface import InferenceEngine, PredictionConfig

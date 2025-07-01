@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 class OverlapStrategy(ABC):
-    """Abstract strategy for detecting overlapping images"""
+    """Abstract strategy for detecting overlapping images."""
 
     def __init__(
         self,
@@ -52,12 +52,21 @@ class OverlapStrategy(ABC):
     def find_overlapping_images(
         self, images: List[Tile], min_overlap_threshold: float = 0.0
     ) -> Dict[str, List[str]]:
-        """Find overlapping images and return mapping of image_id -> overlapping_image_ids"""
+        """Find overlapping images and return mapping of image_id -> overlapping_image_ids.
+        Args:
+            images (List[Tile]): List of Tile objects.
+            min_overlap_threshold (float): Minimum IoU threshold to consider images as overlapping.
+        Returns:
+            Dict[str, List[str]]: Mapping from image ID to list of overlapping image IDs.
+        """
         pass
 
 
 class GPSOverlapStrategy(OverlapStrategy):
-    """GPS-based overlap detection using geographic footprints"""
+    """
+    GPS-based overlap detection using geographic footprints.
+    Provides methods to find overlapping images and compute statistics on the overlap map.
+    """
 
     def __init__(
         self,
@@ -66,7 +75,12 @@ class GPSOverlapStrategy(OverlapStrategy):
         pass
 
     def _compute_iou(self, images: List[Tile]) -> np.ndarray:
-        """Compute Intersection over Union (IoU) between two bounding boxes"""
+        """Compute Intersection over Union (IoU) between all pairs of image tiles.
+        Args:
+            images (List[Tile]): List of Tile objects.
+        Returns:
+            np.ndarray: IoU matrix between all pairs of tiles.
+        """
 
         boxes = [img.geo_box for img in images]
         boxes = torch.tensor(boxes)
@@ -79,6 +93,13 @@ class GPSOverlapStrategy(OverlapStrategy):
     def find_overlapping_images(
         self, images: List[Tile], min_overlap_threshold: float = 0.0
     ) -> Dict[str, List[str]]:
+        """Find overlapping images using precomputed IoU matrix.
+        Args:
+            images (List[Tile]): List of Tile objects.
+            min_overlap_threshold (float): Minimum IoU threshold to consider images as overlapping.
+        Returns:
+            Dict[str, List[str]]: Map of image IDs to their overlapping neighbor image IDs.
+        """
         overlap_map = defaultdict(list)
         ious = self._compute_iou(images=images)
         for i, img1 in enumerate(tqdm(images, desc="Finding overlapping images")):
@@ -93,14 +114,11 @@ class GPSOverlapStrategy(OverlapStrategy):
         return overlap_map
 
     def overlap_map_stats(self, overlap_map: dict) -> dict:
-        """
-        Compute statistics on the overlap_map.
-        Returns a dictionary with:
-        - num_images: number of images (keys in the map)
-        - avg_neighbors: average number of neighbors per image
-        - max_neighbors: maximum number of neighbors for any image
-        - min_neighbors: minimum number of neighbors for any image
-        - neighbor_counts: list of neighbor counts for each image
+        """Compute statistics on the overlap_map.
+        Args:
+            overlap_map (dict): Map of image IDs to their overlapping neighbor image IDs.
+        Returns:
+            dict: Statistics including number of images, average, max, min neighbors, and neighbor counts list.
         """
         num_images = len(overlap_map)
         neighbor_counts = [len(neighs) for neighs in overlap_map.values()]
@@ -117,7 +135,7 @@ class GPSOverlapStrategy(OverlapStrategy):
 
 
 class DuplicateRemovalStrategy(ABC):
-    """Abstract strategy for removing duplicate detections"""
+    """Abstract strategy for removing duplicate detections."""
 
     @abstractmethod
     def remove_duplicates(
@@ -126,6 +144,14 @@ class DuplicateRemovalStrategy(ABC):
         overlap_map: Dict[str, List[str]],
         iou_threshold: float = 0.8,
     ) -> List[Tile]:
+        """Remove duplicate detections from tiles based on overlap map and IoU threshold.
+        Args:
+            tiles (List[Tile]): List of Tile objects.
+            overlap_map (Dict[str, List[str]]): Overlap mapping between tiles.
+            iou_threshold (float): IoU threshold for considering duplicates.
+        Returns:
+            List[Tile]: List of tiles with duplicates removed.
+        """
         pass
 
 
@@ -143,7 +169,13 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
     def _compute_iou(
         self, detections_1: List[Detection], detections_2: List[Detection]
     ) -> np.ndarray:
-        """Compute Intersection over Union (IoU) between two bounding boxes"""
+        """Compute Intersection over Union (IoU) between two lists of detections.
+        Args:
+            detections_1 (List[Detection]): First list of detections.
+            detections_2 (List[Detection]): Second list of detections.
+        Returns:
+            np.ndarray: IoU matrix between detections.
+        """
 
         boxes = [det.geo_box for det in detections_1]
         boxes_2 = [det.geo_box for det in detections_2]
@@ -158,6 +190,14 @@ class CentroidProximityRemovalStrategy(DuplicateRemovalStrategy):
     def _prune_duplicates_between_tiles(
         self, tile1: Tile, tile2: Tile, iou_threshold: float = 0.8
     ) -> Tuple[Tile, Tile]:
+        """Prune duplicate detections between two tiles based on IoU and class name.
+        Args:
+            tile1 (Tile): First tile.
+            tile2 (Tile): Second tile.
+            iou_threshold (float): IoU threshold for considering duplicates.
+        Returns:
+            Tuple[Tile, Tile]: Tiles with duplicates pruned.
+        """
         if not tile1.predictions or not tile2.predictions:
             return tile1, tile2
 
@@ -236,7 +276,10 @@ class WildlifeCensusSystem:
         self.stats["dataset_raw_stats"] = self.dataset.get_stats()
 
     def run(
-        self, image_overlap_threshold: float = 0.0, detection_iou_threshold: float = 0.8
+        self,
+        image_overlap_threshold: float = 0.0,
+        detection_iou_threshold: float = 0.8,
+        filepath="census_results.json",
     ):
         """Process image overlaps and remove duplicate detections"""
 
@@ -259,9 +302,10 @@ class WildlifeCensusSystem:
         # updating dataset with removed duplicates
         self.dataset.tiles = tiles
         self.dataset.build(force_rebuild=True)
-        # self.stats["dataset_pruned_stats"] = self.dataset.get_stats()
+        self.stats["dataset_pruned_stats"] = self.dataset.get_stats()
 
-    @property
+        self.export_results(filepath=filepath)
+
     def get_statistics(self) -> Dict[str, any]:
         """Get comprehensive statistics about the detection process"""
         return self.stats
@@ -289,6 +333,65 @@ class WildlifeCensusSystem:
             json.dump(results, f, indent=2)
 
         logger.info(f"Results exported to {filepath}")
+
+
+class DuplicatePredictionFinder:
+    """
+    Responsible for finding groups of duplicate predictions given a list of Tile objects with predictions.
+    Provides methods to find duplicate groups and get unique predictions using a specified strategy.
+    """
+
+    def __init__(self, tiles: List[Tile], overlap_strategy: OverlapStrategy):
+        """
+        Initialize the DuplicatePredictionFinder.
+        Args:
+            tiles (List[Tile]): List of Tile objects with predictions.
+            overlap_strategy (OverlapStrategy): Strategy to compute overlap between tiles.
+        """
+        # ... existing code ...
+
+    def find_duplicate_groups(
+        self, spatial_threshold: float = 0.8
+    ) -> List[List[Detection]]:
+        """
+        Returns a list of lists, where each sublist is a group of duplicate Detection objects
+        (across overlapping images, same class, and IoU >= threshold).
+        Only detections in overlapping images are considered as potential duplicates.
+        Args:
+            spatial_threshold (float): IoU threshold for considering detections as duplicates.
+        Returns:
+            List[List[Detection]]: List of groups of duplicate detections.
+        """
+        # ... existing code ...
+
+    def get_unique_predictions(
+        self, strategy: DuplicateRemovalStrategy
+    ) -> List[Detection]:
+        """
+        Get unique predictions using the provided DuplicateRemovalStrategy.
+        Args:
+            strategy (DuplicateRemovalStrategy): Strategy to remove duplicates.
+        Returns:
+            List[Detection]: List of unique detections.
+        """
+        # ... existing code ...
+
+
+def find_neighbor_duplicates(
+    tiles: List[Tile], overlap_map: Dict[str, List[str]], iou_threshold: float = 0.8
+) -> list:
+    """
+    For every image (Tile), consider its neighbors' predictions (from overlap_map).
+    For each prediction in the image, check all predictions in neighbor images.
+    If class matches and IoU > threshold, save the pair (detection, neighbor_detection) in a list.
+    Args:
+        tiles (List[Tile]): List of Tile objects.
+        overlap_map (Dict[str, List[str]]): Map of image IDs to their overlapping neighbor image IDs.
+        iou_threshold (float): IoU threshold for considering detections as duplicates.
+    Returns:
+        list: List of (detection, neighbor_detection) tuples where duplicates are found.
+    """
+    # ... existing code ...
 
 
 if __name__ == "__main__":

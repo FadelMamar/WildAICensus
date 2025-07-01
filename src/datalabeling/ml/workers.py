@@ -49,6 +49,12 @@ class LoadingDataset(Dataset):
         # offset_info: Sequence[dict],
         # metadata: Sequence[dict],
     ):
+        """
+        Initialize the LoadingDataset with a sequence of tensors.
+
+        Args:
+            data (Sequence[torch.Tensor]): Sequence of tensors to be concatenated into the dataset.
+        """
         super().__init__()
 
         data = list(data)
@@ -64,9 +70,21 @@ class LoadingDataset(Dataset):
                 index += 1
 
     def __len__(self):
+        """
+        Return the number of samples in the dataset.
+        """
         return self.data.shape[0]
 
     def __getitem__(self, index):
+        """
+        Retrieve a sample and its corresponding index from the dataset.
+
+        Args:
+            index (int): Index of the sample to retrieve.
+
+        Returns:
+            tuple: (sample tensor, index tensor)
+        """
         return self.data[index], torch.Tensor([self.indices_map[index]]).int()
 
 
@@ -81,6 +99,13 @@ class SharedBuffers:
     """
 
     def __init__(self, max_size: int = 64, timeout: int = 120):
+        """
+        Initialize shared memory buffers for inter-thread communication.
+
+        Args:
+            max_size (int): Maximum size for each queue.
+            timeout (int): Timeout for queue operations in seconds.
+        """
         super(SharedBuffers, self)  # .__init__(name="SharedBuffers")
 
         self.raw_data_buffer = Queue(maxsize=max_size)
@@ -99,6 +124,14 @@ class SharedBuffers:
     def put(
         self, data: Any = None, detections: Any = None, filtered_detections: Any = None
     ):
+        """
+        Put data, detections, or filtered detections into the appropriate buffer.
+
+        Args:
+            data (Any): Raw data to put in the buffer.
+            detections (Any): Detection results to put in the buffer.
+            filtered_detections (Any): Post-processed detection results to put in the buffer.
+        """
         kwargs = self.queue_kwargs
         try:
             if data:
@@ -117,9 +150,9 @@ class SharedBuffers:
             # self.logger.error("Queue is Full and timeout was exceeded.")
             raise ValueError("Queue is Full and timeout was exceeded.")
 
-        except:
+        except Exception as e:
             traceback.print_exc()
-            raise ValueError()
+            raise ValueError(f"msg:{e}")
 
     def get(
         self,
@@ -127,6 +160,17 @@ class SharedBuffers:
         detections: bool = False,
         filtered_detections: bool = False,
     ):
+        """
+        Retrieve an item from the specified buffer.
+
+        Args:
+            data (bool): If True, get raw data.
+            detections (bool): If True, get detection results.
+            filtered_detections (bool): If True, get filtered detection results.
+
+        Returns:
+            Any: The requested item from the buffer, or "DONE" if empty.
+        """
         kwargs = self.queue_kwargs
 
         assert (data + detections + filtered_detections) == 1, (
@@ -162,28 +206,72 @@ class SharedBuffers:
     def is_full_data_queue(
         self,
     ):
+        """
+        Check if the raw data buffer is full.
+
+        Returns:
+            bool: True if the raw data buffer is full, False otherwise.
+        """
         return self.raw_data_buffer.full()
 
     def _put_data(self, data: dict, **kwargs):
+        """
+        Put raw data into the raw data buffer.
+
+        Args:
+            data (dict): Data to put in the buffer.
+        """
         self.raw_data_buffer.put(data, **kwargs)
 
     def _get_data(self, **kwargs):
+        """
+        Get raw data from the raw data buffer.
+
+        Returns:
+            Any: Data from the buffer.
+        """
         return self.raw_data_buffer.get(**kwargs)
 
     def _put_detections(self, detections, **kwargs):
+        """
+        Put detection results into the detection results buffer.
+
+        Args:
+            detections: Detection results to put in the buffer.
+        """
         self.detection_results_buffer.put(detections, **kwargs)
 
     def _get_detections(self, **kwargs):
+        """
+        Get detection results from the detection results buffer.
+
+        Returns:
+            Any: Detection results from the buffer.
+        """
         return self.detection_results_buffer.get(**kwargs)
 
     def _put_results(self, results, **kwargs):
+        """
+        Put filtered detection results into the final results buffer.
+
+        Args:
+            results: Filtered detection results to put in the buffer.
+        """
         self.final_results_buffer.put(results, **kwargs)
 
     def _get_results(self, **kwargs):
+        """
+        Get filtered detection results from the final results buffer.
+
+        Returns:
+            Any: Filtered detection results from the buffer.
+        """
         return self.final_results_buffer.get(**kwargs)
 
     def shutdown(self):
-        """Signal all DataLoading thread to shutdown gracefully"""
+        """
+        Signal all DataLoading threads to shutdown gracefully.
+        """
         self._shutdown_event.set()
 
 
@@ -200,6 +288,16 @@ class DataLoadingThread(threading.Thread):
         tile_size: int = 800,
         overlap_ratio: float = 0.2,
     ):
+        """
+        Initialize the DataLoadingThread.
+
+        Args:
+            shared_buffers (SharedBuffers): Shared buffer object for communication.
+            data_source (Sequence[str]): Sequence of image paths to load.
+            batchsize (int): Number of samples to load per batch.
+            tile_size (int): Size of each tile to extract from images.
+            overlap_ratio (float): Overlap ratio for tiling.
+        """
         super(DataLoadingThread, self).__init__(name="DataLoadingThread")
 
         self.shared_buffers = shared_buffers
@@ -218,9 +316,21 @@ class DataLoadingThread(threading.Thread):
     def _checks(
         self,
     ):
+        """
+        Placeholder for input type checking or other checks.
+        """
         pass
 
     def _get_patches(self, image: torch.Tensor):
+        """
+        Extract patches from an image tensor using unfolding.
+
+        Args:
+            image (torch.Tensor): Image tensor to extract patches from.
+
+        Returns:
+            torch.Tensor: Tensor of image patches.
+        """
         if image.dim() == 2:
             image = image.unsqueeze(0)  # Add channel dimension
             squeeze_output = True
@@ -249,10 +359,10 @@ class DataLoadingThread(threading.Thread):
         self,
     ) -> Tile | str:
         """
-        Load and preprocess data from your source
+        Load and preprocess data from the source iterator.
 
         Returns:
-            Tile or str: Tile object containing image data or "DONE" if no more data
+            Tile or str: Tile object containing image data or "DONE" if no more data.
         """
 
         try:
@@ -275,14 +385,15 @@ class DataLoadingThread(threading.Thread):
     def _get_patches_from_tile(
         self, tile: Tile, patch_size: int
     ) -> tuple[torch.Tensor, dict]:
-        """Extract patches from the tile
+        """
+        Extract patches from a tile and compute offset information.
 
         Args:
-            tile (Tile): tile object containing image data
-            patch_size (int): patch size
+            tile (Tile): Tile object containing image data.
+            patch_size (int): Size of each patch.
 
         Returns:
-            tuple[torch.Tensor, dict]: batch of RGB patches, offset information
+            tuple: (batch of RGB patches, offset information dictionary)
         """
 
         image = tile.load_image_data()
@@ -328,12 +439,15 @@ class DataLoadingThread(threading.Thread):
 
         return tiles, offset_info
 
-    def preprocess_data(self, tile: Tile) -> Tuple[TensorDataset, Dict]:
+    def preprocess_data(self, tile: Tile) -> tuple[torch.Tensor, dict]:
         """
-        Preprocess raw data before detection
-        - Extract patches from the tile
-        - Normalize: image = image / 255.0
-        - Color conversion: BGR -> RGB
+        Preprocess raw data before detection by extracting and normalizing patches.
+
+        Args:
+            tile (Tile): Tile object to preprocess.
+
+        Returns:
+            tuple: (batch of patches, offset information)
         """
         # PLACEHOLDER - REPLACE WITH YOUR PREPROCESSING
         self.logger.debug(f"Preprocessing: sample {self.count} has been loaded.")
@@ -355,31 +469,46 @@ class DataLoadingThread(threading.Thread):
 
         return batch_of_patches, offset_info
 
-    def _load_once(self):
+    def _load_once(self) -> str:
+        """
+        Load and preprocess a single data sample, then put it in the shared buffer.
+
+        Returns:
+            str: "DONE" if no more data, otherwise "OK".
+        """
         tile = self._load_data()
 
         if tile == "DONE":
             self.shared_buffers.put(data="DONE")
-            self.logger.info(f"No more data to load. Loaded {self.count} samples.")
+            self.logger.debug(f"No more data to load. Loaded {self.count} samples.")
             return "DONE"
 
         # Preprocess data
-        batch_of_patches, offset_info = self.preprocess_data(tile=tile)
-        data_package = dict(
-            metadata={
-                "tile": tile,
-                "idx": self.count,
-            },
-            data=batch_of_patches,
-            offset_info=offset_info,
-        )
+        try:
+            if isinstance(tile, Tile):
+                batch_of_patches, offset_info = self.preprocess_data(tile=tile)
+                data_package = dict(
+                    metadata={
+                        "tile": tile,
+                        "idx": self.count,
+                    },
+                    data=batch_of_patches,
+                    offset_info=offset_info,
+                )
+                # push data
+                self.shared_buffers.put(data=data_package)
+                return "OK"
+        except:
+            traceback.print_exc()
+            return "DONE"
 
-        # push data
-        self.shared_buffers.put(data=data_package)
-        return "OK"
+        else:
+            return "DONE"
 
     def run(self):
-        """Main thread execution loop"""
+        """
+        Main thread execution loop for loading data batches.
+        """
         self.logger.info("Starting data loading thread")
 
         while True:
@@ -402,6 +531,13 @@ class DetectionThread(threading.Thread):
         shared_buffers: SharedBuffers,
         config: PredictionConfig,
     ):
+        """
+        Initialize the DetectionThread.
+
+        Args:
+            shared_buffers (SharedBuffers): Shared buffer object for communication.
+            config (PredictionConfig): Prediction configuration.
+        """
         super().__init__(name="DetectionThread")
         self.shared_buffers = shared_buffers
         self.model: Detector = None
@@ -416,18 +552,36 @@ class DetectionThread(threading.Thread):
         self,
         model: Detector,
     ):
-        if self.config.inference_service_url:
-            assert model is None, "model should be None if using inference service"
-            self.logger.info(f"Using deployment @ {self.config.inference_service_url}")
-            return None
+        """
+        Set the detection model for the thread.
 
-        assert isinstance(model, Detector), "Provide a valid Detector model"
+        Args:
+            model (Detector): Detection model to use.
+        """
+        if self.config.inference_service_url:
+            if model is not None:
+                raise ValueError("model should be None if using inference service")
+            self.logger.info(f"Using deployment @ {self.config.inference_service_url}")
+            return
+
+        if not isinstance(model, Detector):
+            raise ValueError("Provide a valid Detector model")
         self.model = model
         self.model.warmup(imgsz=(self.config.tilesize, self.config.tilesize))
 
         self.logger.info("Model loaded successfully")
 
     def _pad_if_needed(self, batch: torch.Tensor, out_shape: tuple) -> torch.Tensor:
+        """
+        Pad the batch tensor with zeros if its shape is less than the expected output shape.
+
+        Args:
+            batch (torch.Tensor): Input batch tensor.
+            out_shape (tuple): Desired output shape.
+
+        Returns:
+            torch.Tensor: Padded batch tensor.
+        """
         # if batch size is less than expected, pad with zeros
 
         assert len(out_shape) == len(batch.shape)
@@ -444,6 +598,15 @@ class DetectionThread(threading.Thread):
         return batch
 
     def _predict(self, batch: torch.Tensor):
+        """
+        Run prediction on a batch of images using the detection model or inference service.
+
+        Args:
+            batch (torch.Tensor): Batch of images to predict on.
+
+        Returns:
+            list: Prediction results for each image in the batch.
+        """
         num_images = batch.shape[0]
         batch = self._pad_if_needed(
             batch, out_shape=(self.config.batch_size, *batch.shape[1:])
@@ -457,9 +620,13 @@ class DetectionThread(threading.Thread):
             )
 
         else:
-            res = self.model.predict(
-                batch,
-            )
+            # Only call predict if self.model is set and batch is valid
+            if self.model is not None:
+                # Some Detector implementations may expect Image, not Tensor
+                # This is a placeholder; actual implementation may need conversion
+                res = self.model.predict(batch)
+            else:
+                raise ValueError("Detection model is not set.")
 
         res = res[:num_images]
 
@@ -467,10 +634,16 @@ class DetectionThread(threading.Thread):
 
     def run_detection(
         self,
-        data: LoadingDataset,
+        data,
     ) -> dict:
         """
-        Run object detection on input data
+        Run object detection on input data and collect results per image.
+
+        Args:
+            data (LoadingDataset): Dataset to run detection on.
+
+        Returns:
+            dict: Mapping from image index to detection results.
         """
 
         batchsize = (
@@ -500,8 +673,13 @@ class DetectionThread(threading.Thread):
         }
         return results
 
-    def collect_batch(self) -> LoadingDataset:
-        """Collect tensors into a batch using hybrid time/size strategy"""
+    def collect_batch(self):
+        """
+        Collect tensors into a batch using a hybrid time/size strategy.
+
+        Returns:
+            tuple: (dataset, offsets, metadata) or ("DONE", None, None) if no more data.
+        """
         batch = []
         offsets = []
         metadata = []
@@ -520,7 +698,7 @@ class DetectionThread(threading.Thread):
             data_package = self.shared_buffers.get(data=True)
 
             if data_package == "DONE":
-                self.logger.info("No more data to process. DONE.")
+                self.logger.debug("No more data to process. DONE.")
                 break
                 # return "DONE", None, None
 
@@ -528,9 +706,12 @@ class DetectionThread(threading.Thread):
             #     self.logger.info("Buffer is empty.")
             #     return "empty", None, None
 
-            batch.append(data_package.pop("data"))
-            offsets.append(data_package.pop("offset_info"))
-            metadata.append(data_package.pop("metadata"))
+            if data_package is not None and isinstance(data_package, dict):
+                batch.append(data_package.get("data"))
+                offsets.append(data_package.get("offset_info"))
+                metadata.append(data_package.get("metadata"))
+            else:
+                continue
 
         if len(batch) < 1:
             return "DONE", None, None
@@ -542,12 +723,14 @@ class DetectionThread(threading.Thread):
         return dataset, offsets, metadata
 
     def run(self):
-        """Main thread execution loop"""
+        """
+        Main thread execution loop for running detection on batches.
+        """
         self.logger.info("Starting detection thread")
 
         # Load model
         assert self.model or self.config.inference_service_url, (
-            "Provide detection model or url to inference service i.e. YOLO"
+            "Provide detection model or url to inference service"
         )
 
         while True:
@@ -564,7 +747,7 @@ class DetectionThread(threading.Thread):
                 detection_results = self.run_detection(data)
                 t_end = (time.perf_counter() - t1) / len(data)
 
-                self.logger.debug(f"Mean Detection time: {t_end:.3f}s")
+                self.logger.info(f"Detection time: {t_end:.3f}s")
 
             except Exception as e:
                 traceback.print_exc()
@@ -596,6 +779,14 @@ class PostProcessingThread(threading.Thread):
         config: PredictionConfig,
         label_map: dict = None,
     ):
+        """
+        Initialize the PostProcessingThread.
+
+        Args:
+            shared_buffers (SharedBuffers): Shared buffer object for communication.
+            config (PredictionConfig): Prediction configuration.
+            label_map (dict, optional): Label map for detections.
+        """
         super().__init__(name="PostProcessingThread")
         self.shared_buffers = shared_buffers
         self.outputs = list()
@@ -606,11 +797,28 @@ class PostProcessingThread(threading.Thread):
         self.roi_processor = None
 
     def set_processor(self, roi_processor: DetectionsPostprocessor):
+        """
+        Set the ROI processor for post-processing detections.
+
+        Args:
+            roi_processor (DetectionsPostprocessor): ROI processor to use.
+        """
         self.roi_processor = roi_processor
 
     def postprocess(
         self, detections: List[Detection], tile: Tile, offset_info: dict
     ) -> List[Detection]:
+        """
+        Post-process detection results, update tile information, and apply ROI processor if available.
+
+        Args:
+            detections (List[Detection]): List of detection results.
+            tile (Tile): Tile object associated with detections.
+            offset_info (dict): Offset information for detections.
+
+        Returns:
+            List[Detection]: Post-processed detections.
+        """
         # offset detections
         for i, pred in enumerate(detections):
             pred.parent_image = tile.image_path
@@ -627,11 +835,17 @@ class PostProcessingThread(threading.Thread):
             clamp=True,
             confidence_threshold=self.config.confidence_threshold,
         )
-        tile.update_detection_gps(
-            sensor_height=self.config.sensor_height,
-            flight_height=self.config.flight_height,
-            gsd=self.config.gsd,
-        )
+        # Only update detection GPS if config has the required attributes
+        if (
+            hasattr(self.config, "sensor_height")
+            and hasattr(self.config, "flight_height")
+            and hasattr(self.config, "gsd")
+        ):
+            tile.update_detection_gps(
+                sensor_height=self.config.sensor_height,
+                flight_height=self.config.flight_height,
+                gsd=self.config.gsd,
+            )
 
         # post process roi
         if self.roi_processor:
@@ -649,6 +863,12 @@ class PostProcessingThread(threading.Thread):
     def _run_once(
         self,
     ):
+        """
+        Run a single post-processing step on detection results from the buffer.
+
+        Returns:
+            str or None: "DONE" if no more data, otherwise None.
+        """
         # Get detection results from buffer
         results_package = self.shared_buffers.get(detections=True)
 
@@ -682,7 +902,9 @@ class PostProcessingThread(threading.Thread):
         return None
 
     def run(self):
-        """Main thread execution loop"""
+        """
+        Main thread execution loop for post-processing detection results.
+        """
         self.logger.info("Starting post-processing thread")
 
         while True:
@@ -702,6 +924,13 @@ class DetectionUploader(threading.Thread):
         shared_buffers,
         sqlite_path: str,
     ):
+        """
+        Initialize the DetectionUploader thread for uploading detections to a database.
+
+        Args:
+            shared_buffers: Shared buffer object for communication.
+            sqlite_path (str): Path to the SQLite database file.
+        """
         super().__init__(name="DetectionUploader")
         self.shared_buffers = shared_buffers
         self.logger = logging.getLogger(self.name)
@@ -713,37 +942,57 @@ class DetectionUploader(threading.Thread):
         self._create_table_if_not_exists()
 
     def _create_table_if_not_exists(self):
-        with self.conn.cursor() as cur:
-            cur.execute("""
-            CREATE TABLE IF NOT EXISTS wildlife_detections (
-                detection_id UUID PRIMARY KEY,
-                species TEXT,
-                latitude REAL,
-                longitude REAL,
-                altitude REAL,
-                confidence REAL,
-                image_gps TEXT,
-                source_image TEXT,
-                timestamp TEXT,
-            );
-            """)
-            self.conn.commit()
+        """
+        Create the wildlife_detections table in the database if it does not exist.
+        """
+        cur = self.conn.cursor()
+        cur.execute("""
+        CREATE TABLE IF NOT EXISTS wildlife_detections (
+            detection_id UUID PRIMARY KEY,
+            species TEXT,
+            latitude REAL,
+            longitude REAL,
+            altitude REAL,
+            confidence REAL,
+            image_gps TEXT,
+            source_image TEXT,
+            timestamp TEXT
+        );
+        """)
+        self.conn.commit()
 
     def _detection_to_dict(self, det: Detection):
+        """
+        Convert a Detection object to a dictionary suitable for database insertion.
+
+        Args:
+            det (Detection): Detection object to convert.
+
+        Returns:
+            dict: Dictionary representation of the detection.
+        """
         assert isinstance(det, Detection)
-        lat, long, alt = det.gps_as_decimals
+        lat, long, alt = (0.0, 0.0, 0.0)
+        if hasattr(det, "gps_as_decimals"):
+            lat, long, alt = det.gps_as_decimals
         return {
             "detection_id": uuid.uuid4(),
-            "species": det.class_name,
+            "species": getattr(det, "class_name", None),
             "latitude": round(lat, 8),
             "longitude": round(long, 8),
             "altitude": alt,
-            "confidence": round(det.score, 3),
-            "image_gps": det.image_gps_loc,
-            "source_image": str(det.parent_image),
+            "confidence": round(getattr(det, "score", 0.0), 3),
+            "image_gps": getattr(det, "image_gps_loc", None),
+            "source_image": str(getattr(det, "parent_image", "")),
         }
 
     def _upload_detections(self, detections):
+        """
+        Upload a list of detections to the database.
+
+        Args:
+            detections (list): List of Detection objects to upload.
+        """
         rows = []
         for det in detections:
             det_dict = self._detection_to_dict(det)
@@ -773,6 +1022,9 @@ class DetectionUploader(threading.Thread):
         self.conn.commit()
 
     def run(self):
+        """
+        Main thread execution loop for uploading detections to the database.
+        """
         self.logger.info("Starting detection upload thread.")
 
         try:
@@ -811,6 +1063,15 @@ class ObjectDetectionSystem:
         timeout=15,
         detection_label_map: dict = None,
     ):
+        """
+        Initialize the ObjectDetectionSystem coordinator.
+
+        Args:
+            config (PredictionConfig): Prediction configuration.
+            buffer_size (int): Buffer size for shared buffers.
+            timeout (int): Timeout for shared buffers.
+            detection_label_map (dict, optional): Label map for detections.
+        """
         # Initialize shared buffers
         self.shared_buffers = SharedBuffers(max_size=buffer_size, timeout=timeout)
 
@@ -829,14 +1090,29 @@ class ObjectDetectionSystem:
         self.logger = logging.getLogger("ObjectDetectionSystem")
 
     def set_processor(self, roi_processor: DetectionsPostprocessor):
+        """
+        Set the ROI processor for the detection system.
+
+        Args:
+            roi_processor (DetectionsPostprocessor): ROI processor to use.
+        """
         self._roi_processor = roi_processor
 
     def set_model(self, model: Detector):
+        """
+        Set the detection model for the detection system.
+
+        Args:
+            model (Detector): Detection model to use.
+        """
         self._detection_model = model
 
     def _set_handlers(
         self,
     ):
+        """
+        Set up handlers for detection and post-processing threads.
+        """
         self.detection_thread.set_model(
             model=self._detection_model,
         )
@@ -847,13 +1123,21 @@ class ObjectDetectionSystem:
     def outputs(
         self,
     ):
+        """
+        Get the outputs from the post-processing thread if it is not alive.
+
+        Returns:
+            list or None: List of outputs or None if the thread is still running.
+        """
         if not self.postprocess_thread.is_alive():
             return self.postprocess_thread.outputs
 
         return None
 
     def _process_pipeline(self):
-        """Start all threads"""
+        """
+        Start all threads in the object detection system.
+        """
         self.logger.info("Starting Object Detection System")
 
         self._set_handlers()
@@ -869,8 +1153,10 @@ class ObjectDetectionSystem:
         self._join_workers()
 
     def _join_workers(self):
-        """Stop all threads gracefully"""
-        self.logger.info("Stopping Object Detection System")
+        """
+        Stop all threads gracefully and wait for them to finish.
+        """
+        # self.logger.info("Stopping Object Detection System")
 
         # Signal shutdown
         self.shared_buffers.shutdown()
@@ -888,7 +1174,14 @@ class ObjectDetectionSystem:
         self, images_paths: Sequence[str], img_loading_batch: int = 4
     ) -> List[List[Detection]]:
         """
-        Run the system for a specified duration or until stopped
+        Run the object detection system on a list of image paths.
+
+        Args:
+            images_paths (Sequence[str]): List of image paths to process.
+            img_loading_batch (int): Batch size for image loading.
+
+        Returns:
+            List[List[Detection]]: List of detection results for each image.
         """
         images_paths = list(images_paths)
 
@@ -909,7 +1202,7 @@ class ObjectDetectionSystem:
             label_map=self.label_map,
         )
 
-        self.detection_uploader = DetectionUploader()
+        # self.detection_uploader = DetectionUploader()
 
         self._process_pipeline()
 
