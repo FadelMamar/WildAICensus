@@ -584,7 +584,7 @@ def run_census_cli(
         mlflow_model_alias=alias,
         mlflow_model_name=name,
         buffer_size=24,
-        timeout=60,
+        timeout=6000,
     )
 
     census_system = run_census(

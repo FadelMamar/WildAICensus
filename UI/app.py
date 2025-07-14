@@ -605,7 +605,7 @@ def main():
         st.header("Run Census Pipeline")
 
         with st.form("run_census_form"):
-            images_dir = st.text_input("Images directory", value="D:/images").strip()
+            images_dir = st.text_input("Images directory", value=r"D:\PhD\Data per camp\tmp").strip()
             model_path = st.text_input(
                 "Model path",
                 help="IDEA-Research/grounding-dino-tiny if using hf-groundingdino",
@@ -628,7 +628,7 @@ def main():
                 "Image overlap threshold", value=0.0
             )
             detection_iou_threshold = st.number_input(
-                "Detection IoU threshold", value=0.8
+                "Detection IoU threshold", value=0.2
             )
             save_path = st.text_input("Save path", value="census_results.json").strip()
             fiftyone_dataset_name = st.text_input(
@@ -641,15 +641,15 @@ def main():
                 help="ultralytics or hf-groundingdino",
             ).strip()
 
-            if st.form_submit_button("Run Census"):
-                with st.spinner("Running census..."):
+            if st.form_submit_button("Run count"):
+                with st.spinner("Running ..."):
                     result = run_census_subprocess(
                         images_dir=images_dir,
-                        model_path=None if len(model_path) == 0 else model_path,
+                        model_path=model_path if len(model_path) > 0 else None,
                         detection_model_type=detection_model_type,
                         alias=alias,
                         name=name,
-                        roi_classifier_path=roi_classifier_path,
+                        roi_classifier_path=roi_classifier_path if len(roi_classifier_path) > 0 else None,
                         overlap_strategy=overlap_strategy,
                         flight_height=flight_height,
                         sensor_height=sensor_height,
@@ -661,11 +661,11 @@ def main():
                         fiftyone_dataset_name=fiftyone_dataset_name,
                         fiftyone_persistent=fiftyone_persistent,
                     )
-                    st.write(result["stdout"])
-                    if result["stderr"]:
-                        st.error(result["stderr"])
-                    else:
-                        st.success("Census completed!")
+                    # st.write(result["stdout"])
+                    # if result["stderr"]:
+                    #     st.error(result["stderr"])
+                    # else:
+                    #     st.success("Census completed!")
 
 
 def get_inference_engine(annotator_kwargs: dict) -> InferenceEngine:

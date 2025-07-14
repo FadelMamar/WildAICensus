@@ -1,7 +1,5 @@
 call cd "C:\Users\Machine Learning\Desktop\workspace-wildAI\datalabeling"
 
-start helper-scripts\launch_mlflow_server.bat
-
 call deactivate
 
 call .venv\Scripts\activate
@@ -13,6 +11,10 @@ call .venv\Scripts\activate
 
 @REM call set TRAINING_API_URL = ...
 @REM call set TRAINING_API_KEY = ...
+
+start helper-scripts\launch_mlflow_server.bat
+start helper-scripts\launch_fiftyone.bat
+start helper-scripts\run-labelstudio-windows.bat
 
 call streamlit run UI/app.py
 

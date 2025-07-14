@@ -164,6 +164,8 @@ class Register(object):
             model_path, num_classes=num_classes, cls_is_features=cls_is_features
         ).model
 
+        model = model.cpu()  # Ensure model is on CPU for export
+
         # initialize weights
         if cls_is_features:
             model(torch.zeros(batch, cls_embed_dim))
