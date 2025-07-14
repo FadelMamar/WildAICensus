@@ -765,10 +765,11 @@ class GroundingDinoDetector(Detector):
 
         image = self.load_image_and_resize(image, target_size=target_size)
         text = [[text]] * image.shape[0]
+
         inputs = self.transform(
             images=image, text=text, return_tensors="pt", do_rescale=False
         )
-        inputs = {k:v.to(self.config.device) for k, v in inputs.items()}
+        inputs = {k: v.to(self.config.device) for k, v in inputs.items()}
         return inputs
 
     def postprocess(
@@ -792,8 +793,8 @@ class GroundingDinoDetector(Detector):
         for result in results:
             o = dict(
                 bbox=result["boxes"].cpu().tolist(),
-                label=result["labels"],
-                score=result["scores"],
+                label=result["labels"].cpu().tolist(),
+                score=result["scores"].cpu().tolist(),
                 class_name=result["text_labels"],
             )
 
